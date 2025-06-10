@@ -8,7 +8,8 @@ pub trait KeyReader {
 
 #[derive(Default,Debug)]
 pub struct RawReader {
-	pub bytes: VecDeque<u8>
+	pub bytes: VecDeque<u8>,
+	pub is_escaped: bool // The last byte was a backslash or not
 }
 
 impl RawReader {
@@ -27,7 +28,7 @@ impl RawReader {
 		self.bytes.extend(bytes);
 	}
 
-	pub fn parse_esc_seq_from_bytes(&mut self) -> Option<KeyEvent> {
+	pub fn parse_esc_seq(&mut self) -> Option<KeyEvent> {
 		let mut seq = vec![0x1b];
 		let b1 = self.bytes.pop_front()?;
 		seq.push(b1);
@@ -102,6 +103,80 @@ impl RawReader {
 			_ => Some(KeyEvent(KeyCode::Esc, ModKeys::empty())),
 		}
 	}
+	pub fn parse_byte_alias(&mut self) -> Option<KeyEvent> {
+		let mut buf = vec![];
+		let mut byte_iter = self.bytes.iter().copied();
+		for b in byte_iter.by_ref() {
+			match b {
+				b'>' => break,
+				_ => buf.push(b)
+			}
+		}
+
+		if buf.is_empty() {
+			return None
+		}
+
+		let mut mods = ModKeys::NONE;
+
+		// Collect mod keys
+		// Order does not matter here
+		loop {
+			if buf.as_slice().starts_with(b"c-") {
+				mods |= ModKeys::CTRL;
+				buf = buf[2..].to_vec();
+			} else if buf.as_slice().starts_with(b"s-") {
+				mods |= ModKeys::SHIFT;
+				buf = buf[2..].to_vec();
+			} else if buf.as_slice().starts_with(b"a-") {
+				mods |= ModKeys::ALT;
+				buf = buf[2..].to_vec();
+			} else {
+				break;
+			}
+		}
+
+		let is_fn_key = buf.len() > 1 && buf[0] == b'f' && buf[1..].iter().all(|c| (*c as char).is_ascii_digit());
+		let is_alphanum_key = buf.len() == 1 && (buf[0] as char).is_alphanumeric();
+
+		// Match aliases
+		let result = match buf.as_slice() {
+			// Common weird keys
+			b"esc" => Some(KeyEvent(KeyCode::Esc, mods)),
+			b"ret" => Some(KeyEvent(KeyCode::Enter, mods)),
+			b"tab" => Some(KeyEvent(KeyCode::Char('\t'), mods)),
+			b"bs" => Some(KeyEvent(KeyCode::Backspace, mods)),
+			b"del" => Some(KeyEvent(KeyCode::Delete, mods)),
+			b"ins" => Some(KeyEvent(KeyCode::Insert, mods)),
+			b"home" => Some(KeyEvent(KeyCode::Home, mods)),
+			b"end" => Some(KeyEvent(KeyCode::End, mods)),
+			b"left" => Some(KeyEvent(KeyCode::Left, mods)),
+			b"right" => Some(KeyEvent(KeyCode::Right, mods)),
+			b"up" => Some(KeyEvent(KeyCode::Up, mods)),
+			b"down" => Some(KeyEvent(KeyCode::Down, mods)),
+			b"pgup" => Some(KeyEvent(KeyCode::PageUp, mods)),
+			b"pgdown" => Some(KeyEvent(KeyCode::PageDown, mods)),
+
+			// Check for alphanumeric keys
+			b_ch if is_alphanum_key => Some(KeyEvent(KeyCode::Char((b_ch[0] as char).to_ascii_uppercase()), mods)),
+
+			// Check for function keys
+			_ if is_fn_key => {
+				let stripped = buf.strip_prefix(b"f").unwrap();
+				std::str::from_utf8(stripped)
+					.ok()
+					.and_then(|s| {
+						s.parse::<u8>().ok()
+					})
+					.map(|n| KeyEvent(KeyCode::F(n), mods))
+			}
+			_ => None
+		};
+		if result.is_some() {
+			self.bytes = byte_iter.collect();
+		}
+		result
+	}
 }
 
 impl KeyReader for RawReader {
@@ -112,14 +187,25 @@ impl KeyReader for RawReader {
 
 		loop {
 			let byte = self.bytes.pop_front()?;
+
+			// Check for byte aliases like '<esc>' and '<c-w>'
+			if byte == b'<' && !self.is_escaped {
+				if let Some(key) = self.parse_byte_alias() {
+					return Some(key)
+				}
+			}
+			if byte == b'\\' {
+				self.is_escaped = !self.is_escaped;
+			} else {
+				self.is_escaped = false;
+			}
+
 			collected.push(byte);
 
 			// If it's an escape sequence, delegate
 			if collected[0] == 0x1b && collected.len() == 1 {
-				if let Some(&_next @ (b'[' | b'0')) = self.bytes.front() {
-					println!("found escape seq");
-					let seq = self.parse_esc_seq_from_bytes();
-					println!("{seq:?}");
+				if let Some(&_next @ (b'[' | b'O')) = self.bytes.front() {
+					let seq = self.parse_esc_seq();
 					return seq
 				}
 			}

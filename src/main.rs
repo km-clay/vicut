@@ -1,7 +1,8 @@
-use std::io::{self, BufRead};
+use std::io::{self, Write, BufRead};
 
 
 use exec::ViCut;
+use log::{debug, error, info, trace, warn};
 use serde_json::{Map, Value};
 
 pub mod vicmd;
@@ -28,7 +29,7 @@ struct Argv {
 	delimiter: Option<String>,
 
 	json: bool,
-	csv: bool,
+	trace: bool,
 
 	cmds: Vec<Cmd>
 }
@@ -40,16 +41,10 @@ impl Argv {
 		while let Some(arg) = args.next() {
 			match arg.as_str() {
 				"--json" => {
-					if new.csv {
-						return Err("--json and --csv are mutually exclusive".into())
-					}
 					new.json = true;
 				}
-				"--csv" => {
-					if new.json {
-						return Err("--json and --csv are mutually exclusive".into())
-					}
-					new.csv = true;
+				"--trace" => {
+					new.trace = true;
 				}
 				"--input" => {
 					let Some(arg) = args.next() else {
@@ -136,6 +131,36 @@ impl Argv {
 	}
 }
 
+fn init_logger(trace: bool) {
+	let mut builder = env_logger::builder();
+	if trace {
+		builder.filter(None, log::LevelFilter::Trace);
+	} else {
+		builder.filter(None, log::LevelFilter::Off);
+	}
+
+	builder.format(move |buf, record| {
+		let color = match record.level() {
+			log::Level::Error => "\x1b[1;31m",
+			log::Level::Warn => "\x1b[33m",
+			log::Level::Info => "\x1b[32m",
+			log::Level::Debug => "\x1b[34m",
+			log::Level::Trace => "\x1b[36m"
+		};
+		if trace {
+			if record.level() == log::Level::Trace {
+				writeln!(buf, "[{color}{}\x1b[0m] {}", record.level(), record.args())
+			} else {
+				Ok(())
+			}
+		} else {
+			writeln!(buf, "[{color}{}\x1b[0m] {}", record.level(), record.args())
+		}
+	});
+
+	builder.init();
+}
+
 fn format_output_json(lines: Vec<Vec<(String,String)>>) {
 	let array: Vec<Value> = lines
 		.into_iter()
@@ -183,6 +208,13 @@ fn main() {
 		}
 	};
 
+	init_logger(args.trace);
+	error!("error");
+	warn!("warn");
+	info!("info");
+	debug!("debug");
+	trace!("trace");
+
 	let input: Box<dyn BufRead> = if let Some(input) = args.input {
 		Box::new(io::Cursor::new(input))
 	} else if let Some(file) = args.file {
@@ -223,13 +255,15 @@ fn main() {
 		let mut field_num = 0;
 		for cmd in &args.cmds {
 			match cmd {
-				Cmd::Motion(cmd) => {
-					if let Err(e) = vicut.move_cursor(cmd) {
+				Cmd::Motion(motion) => {
+					trace!("Executing non-capturing command: {motion}");
+					if let Err(e) = vicut.move_cursor(motion) {
 						eprintln!("vicut: {e}");
 						return;
 					}
 				}
 				Cmd::Field(motion) => {
+					trace!("Executing capturing command: {motion}");
 					field_num += 1;
 					match vicut.read_field(motion) {
 						Ok(field) => {
@@ -243,6 +277,7 @@ fn main() {
 					}
 				}
 				Cmd::NamedField(name, motion) => {
+					trace!("Executing named ({name}) capturing command: {motion}");
 					field_num += 1;
 					match vicut.read_field(motion) {
 						Ok(field) => fields.push((name.clone(),field)),
