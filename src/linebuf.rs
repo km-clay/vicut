@@ -1,5 +1,6 @@
 use std::{fmt::Display, ops::{Range, RangeInclusive}};
 
+use log::debug;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -220,6 +221,9 @@ impl ClampedUsize {
 	pub fn get(self) -> usize {
 		self.value
 	}
+	pub fn cap(&self) -> usize {
+		self.max
+	}
 	pub fn upper_bound(&self) -> usize {
 		if self.exclusive {
 			self.max.saturating_sub(1)
@@ -295,6 +299,7 @@ pub struct LineBuf {
 
 	pub insert_mode_start_pos: Option<usize>,
 	pub saved_col: Option<usize>,
+	pub last_motion_dir: Option<Direction>,
 
 	pub undo_stack: Vec<Edit>,
 	pub redo_stack: Vec<Edit>,
@@ -321,6 +326,26 @@ impl LineBuf {
 	}
 	pub fn set_cursor_clamp(&mut self, yn: bool) {
 		self.cursor.exclusive = yn;
+	}
+	pub fn push_cursor_off_newline(&mut self) {
+		if self.grapheme_at_cursor() == Some("\n") {
+			match self.last_motion_dir {
+				Some(Direction::Forward) => {
+					// Try pushing cursor forward
+					if !self.cursor.inc() {
+						// Fall back to pushing backward if we are at the end
+						self.cursor.dec();
+					}
+				}
+				_ => {
+					// Try pushing cursor backward
+					if !self.cursor.dec() {
+						// Fall back to pushing forward if we are at the start
+						self.cursor.inc();
+					}
+				}
+			}
+		}
 	}
 	pub fn cursor_byte_pos(&mut self) -> usize {
 		self.index_byte_pos(self.cursor.get())
@@ -1392,11 +1417,11 @@ impl LineBuf {
 			MotionCmd(_,Motion::BeginningOfLine) => MotionKind::On(self.start_of_line()),
 			MotionCmd(count,Motion::EndOfLine) => {
 				let pos = if count == 1 {
-					self.end_of_line() 
+					self.end_of_line().saturating_sub(1) 
 				} else if let Some((_,end)) = self.select_lines_down(count) {
 					end
 				} else {
-					self.end_of_line()
+					self.end_of_line().saturating_sub(1)
 				};
 				
 				MotionKind::On(pos)
@@ -1971,6 +1996,7 @@ impl LineBuf {
 		let is_undo_op = cmd.is_undo_op();
 		let is_inplace_edit = cmd.is_inplace_edit();
 		let edit_is_merging = self.undo_stack.last().is_some_and(|edit| edit.merging);
+		let cursor_start_pos = self.cursor.get();
 
 		// Merge character inserts into one edit
 		if edit_is_merging && cmd.verb.as_ref().is_none_or(|v| !v.1.is_char_insert()) {
@@ -2055,10 +2081,20 @@ impl LineBuf {
 			self.saved_col = None;
 		}
 
+		match cursor_start_pos.cmp(&self.cursor.get()) {
+			std::cmp::Ordering::Less => self.last_motion_dir = Some(Direction::Backward),
+			std::cmp::Ordering::Equal => {}
+			std::cmp::Ordering::Greater => self.last_motion_dir = Some(Direction::Forward),
+		}
+
 		if is_char_insert {
 			if let Some(edit) = self.undo_stack.last_mut() {
 				edit.start_merge();
 			}
+		}
+
+		if self.cursor.exclusive {
+			self.push_cursor_off_newline();
 		}
 
 		Ok(())

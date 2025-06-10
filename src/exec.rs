@@ -1,3 +1,5 @@
+use log::{debug, trace};
+
 use crate::linebuf::{ordered, ClampedUsize};
 use crate::reader::{KeyReader, RawReader};
 
@@ -29,7 +31,10 @@ impl ViCut {
 	pub fn read_field(&mut self, cmd: &str) -> Result<String,String> {
 		self.load_input(cmd);
 		self.mode = Box::new(ViNormal::new());
-		let start = self.editor.cursor.get();
+		let (mut start,mut end) = (self.editor.cursor.get(), self.editor.cursor.get());
+		if self.mode.clamp_cursor() {
+			end = self.editor.cursor.ret_add(1);
+		}
 
 		loop {
 			let Some(key) = self.reader.read_key() else {
@@ -43,9 +48,18 @@ impl ViCut {
 
 
 			self.exec_cmd(cmd)?;
+			let new_pos_clamped = self.editor.cursor;
+			let new_pos = new_pos_clamped.get();
+			if new_pos < start {
+				start = new_pos;
+			} else {
+				end = new_pos;
+				if self.mode.clamp_cursor() {
+					end += 1;
+				}
+			}
 		}
 
-		let end = self.editor.cursor.ret_add(1);
 		let (start,end) = ordered(start, end);
 
 		let slice = if let Some((start,mut end)) = self.editor.select_range() {
@@ -54,24 +68,29 @@ impl ViCut {
 			if self.editor.select_mode == Some(SelectMode::Char(SelectAnchor::End)) {
 				end += 1; // Include the cursor's character
 			}
-			self.editor
+			let slice = self.editor
 				.slice(start..end)
 				.map(|slice| slice.to_string())
-				.ok_or("Failed to slice buffer".to_string())
-		} else {
-			let start = ClampedUsize::new(start, self.editor.cursor_max(), true);
-			let mut end = ClampedUsize::new(end, self.editor.cursor_max(), false);
-			if end.get() == start.upper_bound() {
-				// 'end' refers to the actual end of the line in this case
-				// We need to add one so that it doesn't exclude the last character
-				// ClampedUsize::add() is a safe operation, 
-				// so no need to worry about exceeding the length of the buffer
-				end.add(1);
+				.ok_or("Failed to slice buffer".to_string());
+			if let Ok(slice) = slice.as_ref() {
+				trace!("Cutting with visual mode range, got: '{slice}'");
+			} else {
+				trace!("Failed to slice buffer from visual mode range");
 			}
-			self.editor
+			slice
+		} else {
+			let start = ClampedUsize::new(start, self.editor.cursor.cap(), true);
+			let end = ClampedUsize::new(end, self.editor.cursor.cap(), false);
+			let slice = self.editor
 				.slice(start.get()..end.get())
 				.map(|slice| slice.to_string())
-				.ok_or("Failed to slice buffer".to_string())
+				.ok_or("Failed to slice buffer".to_string());
+			if let Ok(slice) = slice.as_ref() {
+				trace!("Cutting from start position to cursor: '{slice}'");
+			} else {
+				trace!("Failed to slice buffer from cursor motion");
+			}
+			slice
 		};
 		slice
 	}
@@ -232,6 +251,7 @@ impl ViCut {
 			self.repeat_motion = cmd.motion.clone()
 		}
 
+		self.editor.set_cursor_clamp(self.mode.clamp_cursor());
 		self.editor.exec_cmd(cmd.clone())?;
 
 		if self.mode.report_mode() == ModeReport::Visual && cmd.verb().is_some_and(|v| v.1.is_edit()) {

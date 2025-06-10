@@ -19,10 +19,12 @@ pub type Name = String;
 enum Cmd {
 	Motion(String),
 	Field(String),
-	NamedField(Name,String)
+	NamedField(Name,String),
+	Repeat(usize,usize),
+	BreakGroup
 }
 
-#[derive(Default,Debug)]
+#[derive(Default,Clone,Debug)]
 struct Argv {
 	input: Option<String>,
 	file: Option<String>,
@@ -30,6 +32,8 @@ struct Argv {
 
 	json: bool,
 	trace: bool,
+	linewise: bool,
+	trim_fields: bool,
 
 	cmds: Vec<Cmd>
 }
@@ -45,6 +49,12 @@ impl Argv {
 				}
 				"--trace" => {
 					new.trace = true;
+				}
+				"--linewise" => {
+					new.linewise = true;
+				}
+				"--trim-fields" => {
+					new.trim_fields = true;
 				}
 				"--input" => {
 					let Some(arg) = args.next() else {
@@ -77,6 +87,7 @@ impl Argv {
 					}
 					new.delimiter = Some(arg)
 				}
+				"-n" => new.cmds.push(Cmd::BreakGroup),
 				"-r" => {
 					let cmd_count = args
 						.next()
@@ -89,17 +100,7 @@ impl Argv {
 						.parse::<usize>()
 						.unwrap_or(1);
 
-
-					let repeats = new.cmds
-						.iter()
-						.rev()
-						.take(cmd_count)
-						.cloned()
-						.collect::<Vec<_>>();
-
-					for _ in 0..repeat_count {
-						new.cmds.extend(repeats.clone().into_iter().rev());
-					}
+					new.cmds.push(Cmd::Repeat(cmd_count, repeat_count));
 				}
 				"-m" | "--move" => {
 					let Some(arg) = args.next() else { continue };
@@ -135,9 +136,7 @@ fn init_logger(trace: bool) {
 	let mut builder = env_logger::builder();
 	if trace {
 		builder.filter(None, log::LevelFilter::Trace);
-	} else {
-		builder.filter(None, log::LevelFilter::Off);
-	}
+	} 
 
 	builder.format(move |buf, record| {
 		let color = match record.level() {
@@ -195,6 +194,128 @@ fn format_output_standard(delimiter: &str, lines: Vec<Vec<(String,String)>>) {
 	print!("{lines}");
 }
 
+fn execute(args: Argv, input: String) {
+
+	let delimiter = args.delimiter.unwrap_or("\t".into());
+	let mut fields: Vec<(String,String)> = vec![];
+	let mut fmt_lines: Vec<Vec<(String,String)>> = vec![];
+
+	let mut vicut = match ViCut::new(&input, 0) {
+		Ok(v) => v,
+		Err(e) => {
+			eprintln!("vicut: {e}");
+			return;
+		}
+	};
+
+	let mut spent_cmds: Vec<Cmd> = vec![];
+
+	let mut field_num = 0;
+	for cmd in args.cmds {
+		exec_cmd(
+			&cmd,
+			&mut vicut,
+			&mut field_num,
+			&mut spent_cmds,
+			&mut fields,
+			&mut fmt_lines
+		);
+		spent_cmds.push(cmd);
+		vicut.set_normal_mode();
+	}
+
+	if !fields.is_empty() {
+		fmt_lines.push(std::mem::take(&mut fields));
+	}
+
+	if args.trim_fields {
+		trim_fields(&mut fmt_lines);
+	}
+
+	if args.json {
+		format_output_json(fmt_lines);
+	} else {
+		format_output_standard(&delimiter, fmt_lines);
+	}
+}
+
+fn trim_fields(lines: &mut Vec<Vec<(String,String)>>) {
+	for line in lines {
+		for (_, field) in line {
+			*field = field.trim().to_string()
+		}
+	}
+}
+
+fn exec_cmd(
+	cmd: &Cmd,
+	vicut: &mut ViCut,
+	field_num: &mut usize,
+	spent_cmds: &mut Vec<Cmd>,
+	fields: &mut Vec<(String,String)>,
+	fmt_lines: &mut Vec<Vec<(String,String)>>
+) {
+	match cmd {
+		Cmd::Repeat(n_cmds, n_repeats) => {
+			trace!("Repeating {n_cmds} commands, {n_repeats} times");
+			for _ in 0..*n_repeats {
+
+				let mut pulled_cmds = vec![];
+				let end = spent_cmds.len().saturating_sub(1);
+				let offset = end.saturating_sub(*n_cmds);
+				pulled_cmds.extend(spent_cmds.drain(offset..));
+
+				for r_cmd in pulled_cmds {
+					// We use recursion so that we can nest repeats easily
+					exec_cmd(&r_cmd, vicut, field_num, spent_cmds, fields, fmt_lines);
+					spent_cmds.push(r_cmd);
+				}
+			}
+		}
+		Cmd::Motion(motion) => {
+			trace!("Executing non-capturing command: {motion}");
+			if let Err(e) = vicut.move_cursor(motion) {
+				eprintln!("vicut: {e}");
+			}
+		}
+		Cmd::Field(motion) => {
+			trace!("Executing capturing command: {motion}");
+			*field_num += 1;
+			match vicut.read_field(motion) {
+				Ok(field) => {
+					let name = format!("field_{field_num}");
+					fields.push((name,field))
+				}
+				Err(e) => {
+					eprintln!("vicut: {e}");
+				}
+			}
+		}
+		Cmd::NamedField(name, motion) => {
+			trace!("Executing capturing command with name '{name}': {motion}");
+			*field_num += 1;
+			match vicut.read_field(motion) {
+				Ok(field) => fields.push((name.clone(),field)),
+				Err(e) => {
+					eprintln!("vicut: {e}");
+				}
+			}
+		}
+		Cmd::BreakGroup => {
+			trace!("Breaking field group with fields: ");
+			for field in &mut *fields {
+				let name = &field.0;
+				let content = &field.1;
+				trace!("\t{name}: {content}");
+			}
+			*field_num = 0;
+			if !fields.is_empty() {
+				fmt_lines.push(std::mem::take(fields));
+			}
+		}
+	}
+}
+
 fn main() {
 	if std::env::args().skip(1).count() == 0 {
 		eprintln!("print usage here lol"); // TODO: actually print the usage here
@@ -208,16 +329,15 @@ fn main() {
 		}
 	};
 
-	init_logger(args.trace);
-	error!("error");
-	warn!("warn");
-	info!("info");
-	debug!("debug");
-	trace!("trace");
+	if args.json && args.delimiter.is_some() {
+		eprintln!("vicut: WARNING: --delimiter flag is ignored when --json is used")
+	}
 
-	let input: Box<dyn BufRead> = if let Some(input) = args.input {
+	init_logger(args.trace);
+
+	let mut stream: Box<dyn BufRead> = if let Some(input) = args.input.clone() {
 		Box::new(io::Cursor::new(input))
-	} else if let Some(file) = args.file {
+	} else if let Some(file) = args.file.clone() {
 		match std::fs::File::open(file) {
 			Ok(file) => Box::new(io::BufReader::new(file)),
 			Err(e) => {
@@ -229,74 +349,27 @@ fn main() {
 		Box::new(io::BufReader::new(io::stdin()))
 	};
 
-	let delimiter = args.delimiter.unwrap_or("\t".into());
-	let mut fields: Vec<(String,String)> = vec![];
-	let mut fmt_lines: Vec<Vec<(String,String)>> = vec![];
-
-	for line_result in input.lines() {
-		let line = match line_result {
-			Ok(l) => l,
-			Err(e) => {
-				eprintln!("vicut: error reading line: {e}");
-				return;
+	if args.linewise {
+		for line in stream.lines() {
+			match line {
+				Ok(line) => {
+					execute(args.clone(),line)
+				}
+				Err(e) => {
+					eprintln!("vicut: {e}");
+					return;
+				}
 			}
-		};
-		if line.is_empty() { continue }
-
-		let mut vicut = match ViCut::new(&line, 0) {
-			Ok(v) => v,
+		}
+	} else {
+		let mut input = String::new();
+		match stream.read_to_string(&mut input) {
+			Ok(_) => {}
 			Err(e) => {
 				eprintln!("vicut: {e}");
 				return;
 			}
-		};
-
-
-		let mut field_num = 0;
-		for cmd in &args.cmds {
-			match cmd {
-				Cmd::Motion(motion) => {
-					trace!("Executing non-capturing command: {motion}");
-					if let Err(e) = vicut.move_cursor(motion) {
-						eprintln!("vicut: {e}");
-						return;
-					}
-				}
-				Cmd::Field(motion) => {
-					trace!("Executing capturing command: {motion}");
-					field_num += 1;
-					match vicut.read_field(motion) {
-						Ok(field) => {
-							let name = format!("field_{field_num}");
-							fields.push((name,field))
-						}
-						Err(e) => {
-							eprintln!("vicut: {e}");
-							return;
-						}
-					}
-				}
-				Cmd::NamedField(name, motion) => {
-					trace!("Executing named ({name}) capturing command: {motion}");
-					field_num += 1;
-					match vicut.read_field(motion) {
-						Ok(field) => fields.push((name.clone(),field)),
-						Err(e) => {
-							eprintln!("vicut: {e}");
-							return;
-						}
-					}
-				}
-			}
-			vicut.set_normal_mode();
 		}
-
-		fmt_lines.push(std::mem::take(&mut fields));
-	}
-
-	if args.json {
-		format_output_json(fmt_lines);
-	} else {
-		format_output_standard(&delimiter, fmt_lines);
+		execute(args,input);
 	}
 }

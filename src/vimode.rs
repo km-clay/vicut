@@ -1592,7 +1592,7 @@ impl ViMode for ViVisual {
 	}
 
 	fn clamp_cursor(&self) -> bool {
-		true
+		false
 	}
 
 	fn hist_scroll_start_pos(&self) -> Option<To> {
