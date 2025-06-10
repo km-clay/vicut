@@ -1,0 +1,11 @@
+[package]
+name = "vicut"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bitflags = "2.9.1"
+clap = "4.5.40"
+clap_derive = "4.5.40"
+unicode-segmentation = "1.12.0"
+unicode-width = "0.2.0"
