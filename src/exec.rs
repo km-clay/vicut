@@ -1,4 +1,4 @@
-use crate::linebuf::ordered;
+use crate::linebuf::{ordered, ClampedUsize};
 use crate::reader::{KeyReader, RawReader};
 
 use super::keys::{KeyCode, KeyEvent, ModKeys};
@@ -41,6 +41,7 @@ impl ViCut {
 			};
 			cmd.alter_line_motion_if_no_verb();
 
+
 			self.exec_cmd(cmd)?;
 		}
 
@@ -48,6 +49,8 @@ impl ViCut {
 		let (start,end) = ordered(start, end);
 
 		let slice = if let Some((start,mut end)) = self.editor.select_range() {
+			// We are in visual mode if we've made it here
+			// So we are going to use the editor's selected range
 			if self.editor.select_mode == Some(SelectMode::Char(SelectAnchor::End)) {
 				end += 1; // Include the cursor's character
 			}
@@ -56,8 +59,17 @@ impl ViCut {
 				.map(|slice| slice.to_string())
 				.ok_or("Failed to slice buffer".to_string())
 		} else {
+			let start = ClampedUsize::new(start, self.editor.cursor_max(), true);
+			let mut end = ClampedUsize::new(end, self.editor.cursor_max(), false);
+			if end.get() == start.upper_bound() {
+				// 'end' refers to the actual end of the line in this case
+				// We need to add one so that it doesn't exclude the last character
+				// ClampedUsize::add() is a safe operation, 
+				// so no need to worry about exceeding the length of the buffer
+				end.add(1);
+			}
 			self.editor
-				.slice(start..end)
+				.slice(start.get()..end.get())
 				.map(|slice| slice.to_string())
 				.ok_or("Failed to slice buffer".to_string())
 		};
@@ -71,6 +83,11 @@ impl ViCut {
 	pub fn load_input(&mut self, input: &str) {
 		let bytes = input.as_bytes();
 		self.reader.load_bytes(bytes);
+	}
+
+	pub fn set_normal_mode(&mut self) {
+		self.mode = Box::new(ViNormal::new());
+		self.editor.stop_selecting();
 	}
 
 	pub fn exec_cmd(&mut self, mut cmd: ViCmd) -> Result<(),String> {

@@ -2,6 +2,7 @@ use std::io::{self, BufRead};
 
 
 use exec::ViCut;
+use serde_json::{Map, Value};
 
 pub mod vicmd;
 pub mod vimode;
@@ -11,10 +12,13 @@ pub mod keys;
 pub mod register;
 pub mod reader;
 
-#[derive(Debug)]
+pub type Name = String;
+
+#[derive(Clone,Debug)]
 enum Cmd {
 	Motion(String),
-	Field(String)
+	Field(String),
+	NamedField(Name,String)
 }
 
 #[derive(Default,Debug)]
@@ -78,25 +82,92 @@ impl Argv {
 					}
 					new.delimiter = Some(arg)
 				}
-				"-m" => {
+				"-r" => {
+					let cmd_count = args
+						.next()
+						.unwrap_or("1".into())
+						.parse::<usize>()
+						.unwrap_or(1);
+					let repeat_count = args
+						.next()
+						.unwrap_or("1".into())
+						.parse::<usize>()
+						.unwrap_or(1);
+
+
+					let repeats = new.cmds
+						.iter()
+						.rev()
+						.take(cmd_count)
+						.cloned()
+						.collect::<Vec<_>>();
+
+					for _ in 0..repeat_count {
+						new.cmds.extend(repeats.clone().into_iter().rev());
+					}
+				}
+				"-m" | "--move" => {
 					let Some(arg) = args.next() else { continue };
 					if arg.starts_with('-') {
 						return Err(format!("Expected a motion command after '-m', found {arg}"))
 					}
 					new.cmds.push(Cmd::Motion(arg))
 				}
-				"-f" => {
+				"-c" | "--cut" => {
 					let Some(arg) = args.next() else { continue };
-					if arg.starts_with('-') {
-						return Err(format!("Expected a selection command after '-f', found {arg}"))
+					if arg.starts_with("name=") {
+						let name = arg.strip_prefix("name=").unwrap().to_string();
+						let Some(arg) = args.next() else { continue };
+						if arg.starts_with('-') {
+							return Err(format!("Expected a selection command after '-c', found {arg}"))
+						}
+						new.cmds.push(Cmd::NamedField(name,arg));
+					} else {
+						if arg.starts_with('-') {
+							return Err(format!("Expected a selection command after '-c', found {arg}"))
+						}
+						new.cmds.push(Cmd::Field(arg));
 					}
-					new.cmds.push(Cmd::Field(arg));
 				}
 				arg => { return Err(format!("Unrecognized argument '{arg}'")) }
 			}
 		}
 		Ok(new)
 	}
+}
+
+fn format_output_json(lines: Vec<Vec<(String,String)>>) {
+	let array: Vec<Value> = lines
+		.into_iter()
+		.map(|fields| {
+			let mut obj = Map::new();
+			for (name,field) in fields {
+				obj.insert(name, Value::String(field));
+			}
+			Value::Object(obj)
+		}).collect();
+
+	let json = Value::Array(array);
+	let output = serde_json::to_string_pretty(&json).unwrap();
+	println!("{output}")
+}
+
+fn format_output_standard(delimiter: &str, lines: Vec<Vec<(String,String)>>) {
+	let lines = lines.into_iter()
+		.fold(String::new(), |mut acc,line| {
+			// Accumulate all line fields into one string,
+			// Fold all lines into one string
+			let fmt_line = line
+				.into_iter()
+				.map(|(_,f)| f) // Ignore the name here, if any
+				.collect::<Vec<String>>()
+				.join(delimiter);
+			acc.push_str(&fmt_line);
+			acc.push('\n');
+			acc
+		});
+
+	print!("{lines}");
 }
 
 fn main() {
@@ -127,47 +198,70 @@ fn main() {
 	};
 
 	let delimiter = args.delimiter.unwrap_or("\t".into());
+	let mut fields: Vec<(String,String)> = vec![];
+	let mut fmt_lines: Vec<Vec<(String,String)>> = vec![];
 
 	for line_result in input.lines() {
 		let line = match line_result {
 			Ok(l) => l,
 			Err(e) => {
 				eprintln!("vicut: error reading line: {e}");
-				continue;
+				return;
 			}
 		};
+		if line.is_empty() { continue }
 
 		let mut vicut = match ViCut::new(&line, 0) {
 			Ok(v) => v,
 			Err(e) => {
 				eprintln!("vicut: {e}");
-				continue;
+				return;
 			}
 		};
 
-		let mut fields = vec![];
 
+		let mut field_num = 0;
 		for cmd in &args.cmds {
 			match cmd {
 				Cmd::Motion(cmd) => {
 					if let Err(e) = vicut.move_cursor(cmd) {
 						eprintln!("vicut: {e}");
-						continue;
+						return;
 					}
 				}
 				Cmd::Field(motion) => {
+					field_num += 1;
 					match vicut.read_field(motion) {
-						Ok(field) => fields.push(field),
+						Ok(field) => {
+							let name = format!("field_{field_num}");
+							fields.push((name,field))
+						}
 						Err(e) => {
 							eprintln!("vicut: {e}");
-							continue;
+							return;
+						}
+					}
+				}
+				Cmd::NamedField(name, motion) => {
+					field_num += 1;
+					match vicut.read_field(motion) {
+						Ok(field) => fields.push((name.clone(),field)),
+						Err(e) => {
+							eprintln!("vicut: {e}");
+							return;
 						}
 					}
 				}
 			}
+			vicut.set_normal_mode();
 		}
 
-		let output = fields.join(&delimiter);
-		println!("{output}");
+		fmt_lines.push(std::mem::take(&mut fields));
+	}
+
+	if args.json {
+		format_output_json(fmt_lines);
+	} else {
+		format_output_standard(&delimiter, fmt_lines);
 	}
 }
