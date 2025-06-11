@@ -1,4 +1,4 @@
-use std::io::{self, Write, BufRead};
+use std::{fmt::Write,io::{self, Write as IoWrite, BufRead}};
 
 
 use exec::ViCut;
@@ -26,8 +26,6 @@ enum Cmd {
 
 #[derive(Default,Clone,Debug)]
 struct Argv {
-	input: Option<String>,
-	file: Option<String>,
 	delimiter: Option<String>,
 
 	json: bool,
@@ -56,30 +54,6 @@ impl Argv {
 				"--trim-fields" => {
 					new.trim_fields = true;
 				}
-				"--input" => {
-					let Some(arg) = args.next() else {
-						return Err("Expected a string after '--input'".into())
-					};
-					if arg.starts_with('-') {
-						return Err(format!("Expected a motion command after '-m', found {arg}"))
-					}
-					if new.file.is_some() {
-						return Err("--input and --file are mutually exclusive".into())
-					}
-					new.input = Some(arg);
-				}
-				"--file" => {
-					let Some(arg) = args.next() else {
-						return Err("Expected a path after '--file'".into())
-					};
-					if arg.starts_with('-') {
-						return Err(format!("Expected a path after '--file', found {arg}"))
-					}
-					if new.input.is_some() {
-						return Err("--input and --file are mutually exclusive".into())
-					}
-					new.file = Some(arg);
-				}
 				"--delimiter" | "-d" => {
 					let Some(arg) = args.next() else { continue };
 					if arg.starts_with('-') {
@@ -87,8 +61,8 @@ impl Argv {
 					}
 					new.delimiter = Some(arg)
 				}
-				"-n" => new.cmds.push(Cmd::BreakGroup),
-				"-r" => {
+				"-n" | "--next" => new.cmds.push(Cmd::BreakGroup),
+				"-r" | "--repeat" => {
 					let cmd_count = args
 						.next()
 						.unwrap_or("1".into())
@@ -130,6 +104,65 @@ impl Argv {
 		}
 		Ok(new)
 	}
+}
+
+fn print_help() {
+	let mut help = String::new();
+	writeln!(help).unwrap();
+	writeln!(help, "\x1b[1mvicut\x1b[0m").unwrap();
+	writeln!(help, "A text processor that uses Vim motions to slice and extract structured data from stdin.").unwrap();
+	writeln!(help).unwrap();
+	writeln!(help).unwrap();
+	writeln!(help, "\x1b[1;4mUSAGE:\x1b[0m").unwrap();
+	writeln!(help, "\tvicut [OPTIONS] [COMMANDS]...").unwrap();
+	writeln!(help).unwrap();
+	writeln!(help).unwrap();
+	writeln!(help, "\x1b[1;4mOPTIONS:\x1b[0m").unwrap();
+	writeln!(help, "\t--delimiter <STR>").unwrap();
+	writeln!(help, "\t\tProvide a delimiter to place between fields in the output. No effect when used with --json.").unwrap();
+	writeln!(help).unwrap();
+	writeln!(help, "\t--json").unwrap();
+	writeln!(help, "\t\tOutput the result as structured JSON.").unwrap();
+	writeln!(help).unwrap();
+	writeln!(help, "\t--linewise").unwrap();
+	writeln!(help, "\t\tApply given commands to each line in the given input.").unwrap();
+	writeln!(help).unwrap();
+	writeln!(help, "\t--trim-fields").unwrap();
+	writeln!(help, "\t\tTrim leading and trailing whitespace from captured fields.").unwrap();
+	writeln!(help).unwrap();
+	writeln!(help, "\t--trace").unwrap();
+	writeln!(help, "\t\tPrint debug trace of command execution").unwrap();
+	writeln!(help).unwrap();
+	writeln!(help).unwrap();
+	writeln!(help, "\x1b[1;4mCOMMANDS:\x1b[0m").unwrap();
+	writeln!(help, "\t-c, --cut [name=<NAME>] <VIM_COMMAND>").unwrap();
+	writeln!(help, "\t\tExecute a Vim command on the buffer, and capture the text between the cursor's start and end positions as a field.").unwrap();
+	writeln!(help, "\t\tFields can be optionally given a name, which will be used as the key for that field in formatted JSON output.").unwrap();
+	writeln!(help).unwrap();
+	writeln!(help, "\t-m, --move <VIM_COMMAND>").unwrap();
+	writeln!(help, "\t\tLogically identical to -c/--cut, except it does not capture a field.").unwrap();
+	writeln!(help).unwrap();
+	writeln!(help, "\t-r, --repeat <N> <R>").unwrap();
+	writeln!(help, "\t\tRepeat the last N commands R times. Repeats can be nested.").unwrap();
+	writeln!(help).unwrap();
+	writeln!(help, "\t-n, --next").unwrap();
+	writeln!(help, "\t\tStart a new field group. Each field group becomes one output record.").unwrap();
+	writeln!(help).unwrap();
+	writeln!(help).unwrap();
+	writeln!(help, "\x1b[1;4mNOTES:\x1b[0m").unwrap();
+	writeln!(help, "\t* Commands are executed left to right.").unwrap();
+	writeln!(help, "\t* Cursor state is maintained between commands, but the editor returns to normal mode between each command.").unwrap();
+	writeln!(help, "\t* Commands are not limited to only motions. Commands which edit the buffer can be executed as well.").unwrap();
+	writeln!(help).unwrap();
+	writeln!(help).unwrap();
+	writeln!(help, "\x1b[1;4mEXAMPLE:\x1b[0m").unwrap();
+	writeln!(help, "\t$ echo 'foo bar (boo far) [bar foo]' | vicut --delimiter ' -- ' \\
+\t-c 'e' -m 'w' -r 2 1 -c 'va)' -c 'va]'").unwrap();
+	writeln!(help, "\toutputs:").unwrap();
+	writeln!(help, "\tfoo -- bar -- (boo far) -- [bar foo]").unwrap();
+	writeln!(help).unwrap();
+	writeln!(help, "For more info, see: https://github.com/km-clay/vicut").unwrap();
+	println!("{help}");
 }
 
 fn init_logger(trace: bool) {
@@ -321,6 +354,10 @@ fn main() {
 		eprintln!("print usage here lol"); // TODO: actually print the usage here
 		return
 	}
+	if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
+		print_help();
+		return
+	}
 	let args = match Argv::parse() {
 		Ok(args) => args,
 		Err(e) => {
@@ -335,19 +372,7 @@ fn main() {
 
 	init_logger(args.trace);
 
-	let mut stream: Box<dyn BufRead> = if let Some(input) = args.input.clone() {
-		Box::new(io::Cursor::new(input))
-	} else if let Some(file) = args.file.clone() {
-		match std::fs::File::open(file) {
-			Ok(file) => Box::new(io::BufReader::new(file)),
-			Err(e) => {
-				eprintln!("vicut: {e}");
-				return;
-			}
-		}
-	} else {
-		Box::new(io::BufReader::new(io::stdin()))
-	};
+	let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
 
 	if args.linewise {
 		for line in stream.lines() {
