@@ -123,7 +123,7 @@ p2p-dev-wlp9s0 --- wifi-p2p --- disconnected --- --
 ```
 
 #### `vicut`
-The solution using `vicut` for this input is very concise by comparison:
+The solution using `vicut` for parsing this output is very concise by comparison:
 ```bash
 vicut --linewise --trim-fields --delimiter ' --- ' \  
     -c 'E' \    # Capture to end of word
