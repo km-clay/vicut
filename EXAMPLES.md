@@ -24,7 +24,7 @@ Running `speedtest-cli --list` will show a list of servers that the program can 
 Immediately fails due to the presence of spaces within fields like the city name and distance. 
 
 #### `sed`
-Can do the job using a dense and fragile regular expression:
+Can do the job using this somewhat complex regular expression:
 ```bash
 speedtest-cli --list | sed -n 's/^\([0-9]*\)) \(.*\) (\(.*\)) \[\(.*\)\]/\1 --- \2 --- \3 --- \4/p'
 
