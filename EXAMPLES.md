@@ -60,6 +60,9 @@ vicut --linewise --delimiter ' --- ' \
 29834 --- Skyline Internet --- Denver, CO, United States --- 295.88 km
 . . .
 ```
+This showcases the use of **visual mode and text objects** for precise field extraction. If the internal editor is in visual mode at the end of a command, it returns just the selected range—rather than the entire motion span.  
+  
+This allows for fine-grained control over field boundaries: you can enter visual mode, position the end of the selection, and then use the `o` motion to jump back and refine the start of the selection. This mirrors how Vim itself allows back-and-forth selection editing and makes `vicut` unusually expressive for semi-structured text.
 
 ## Exhibit B: `nmcli dev`
 Running `nmcli dev` lists all of your network devices, their types, states, and the names of their connections. Once again this output is very readable for humans, but is tricky for machines to handle due to the inconsistent use of spaces.
