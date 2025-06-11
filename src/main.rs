@@ -61,7 +61,7 @@ impl Argv {
 				"--delimiter" | "-d" => {
 					let Some(arg) = args.next() else { continue };
 					if arg.starts_with('-') {
-						return Err(format!("Expected a delimiter after '-m', found {arg}"))
+						return Err(format!("Expected a delimiter after '-d', found {arg}"))
 					}
 					new.delimiter = Some(arg)
 				}
@@ -71,12 +71,12 @@ impl Argv {
 						.next()
 						.unwrap_or("1".into())
 						.parse::<usize>()
-						.unwrap_or(1);
+						.map_err(|_| "Expected a number after '-r'".to_string())?;
 					let repeat_count = args
 						.next()
 						.unwrap_or("1".into())
 						.parse::<usize>()
-						.unwrap_or(1);
+						.map_err(|_| "Expected a number after '-r'".to_string())?;
 
 					new.cmds.push(Cmd::Repeat(cmd_count, repeat_count));
 				}
@@ -124,6 +124,9 @@ fn print_help() {
 	writeln!(help, "\x1b[1;4mOPTIONS:\x1b[0m").unwrap();
 	writeln!(help, "\t--delimiter <STR>").unwrap();
 	writeln!(help, "\t\tProvide a delimiter to place between fields in the output. No effect when used with --json.").unwrap();
+	writeln!(help).unwrap();
+	writeln!(help, "\t--keep-mode").unwrap();
+	writeln!(help, "\t\tThe internal editor will not return to normal mode after each command.").unwrap();
 	writeln!(help).unwrap();
 	writeln!(help, "\t--json").unwrap();
 	writeln!(help, "\t\tOutput the result as structured JSON.").unwrap();

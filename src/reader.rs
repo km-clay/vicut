@@ -143,7 +143,8 @@ impl RawReader {
 		let result = match buf.as_slice() {
 			// Common weird keys
 			b"esc" => Some(KeyEvent(KeyCode::Esc, mods)),
-			b"ret" => Some(KeyEvent(KeyCode::Enter, mods)),
+			b"return" |
+			b"enter" => Some(KeyEvent(KeyCode::Enter, mods)),
 			b"tab" => Some(KeyEvent(KeyCode::Char('\t'), mods)),
 			b"bs" => Some(KeyEvent(KeyCode::Backspace, mods)),
 			b"del" => Some(KeyEvent(KeyCode::Delete, mods)),
