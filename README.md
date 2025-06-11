@@ -20,10 +20,9 @@ I wanted a tool that makes field extraction intuitive and precise, even with mes
 
 This method allows for very powerful text extraction, even from loosely structured inputs.
 
-## Examples
-See [EXAMPLES.md](https://github.com/km-clay/vicut/blob/main/EXAMPLES.md)
-
 ## Usage
+
+For advanced usage and some examples/comparisons with other tools, you can check out the [wiki](https://github.com/km-clay/vicut/wiki)
 
 ```
 vicut [OPTIONS] [COMMANDS]...
