@@ -1,19 +1,24 @@
 # vicut
 
-Command line utility for using Vim commands to process text and extract fields from stdin.
+A command line utility for using Vim commands to process text and extract fields from stdin.
 
 ## Why vicut?
-I know how to use vim fluently and want to be able to use it to process text on the command line easily. The only thing that currently exists that allows something like this is `nvim --headless`, but it's usually overkill.
+Extracting fields with standard Unix tools like `cut`, `sed`, or `awk` has always felt messy to me.  
+`cut` folds like a lawn chair at the first sign of any resistance.  
+`sed` often demands verbose, brittle regexes that are time consuming to write and are never reused.  
+And while `awk` is powerful, it quickly becomes verbose when dealing with anything non-trivial.  
+
+I wanted a tool that makes field extraction intuitive and precise, even with messy or irregular input.
 
 ## Overview
-`vicut` is a tool meant to be used in pipelines. It reads data from stdin, and then uses the command flags given by the user to operate on the text and extract fields. There are four command flags. 
+`vicut` is a tool meant to be used in pipelines. Internally, it uses a stateful text editing engine based on Vim. It reads data from stdin, and then uses the command flags given by the user to operate on the text and extract fields. Fields are extracted based on cursor movements. There are four command flags. 
 
 * `-c`/`--cut <CMD>` executes a Vim command, and returns the span covered by the cursor's motion as a field. 
 * `-m`/`--move <CMD>` does the same thing, but does not return a span, so it can be used to position the cursor or edit the buffer pre-emptively.
 * `-r`/`--repeat <N> <R>` repeats `N` previous commands `R` times. Repeats can be logically nested.
 * `-n`/`--next` concludes the current field group and starts a new one. Each field group is a separate record in the output.
 
-This structure allows powerful text extraction from messy or loosely structured inputs.
+This method allows for very powerful text extraction, even from loosely structured inputs.
 
 ## Usage
 
