@@ -32,6 +32,7 @@ struct Argv {
 	trace: bool,
 	linewise: bool,
 	trim_fields: bool,
+	keep_mode: bool,
 
 	cmds: Vec<Cmd>
 }
@@ -53,6 +54,9 @@ impl Argv {
 				}
 				"--trim-fields" => {
 					new.trim_fields = true;
+				}
+				"--keep-mode" => {
+					new.keep_mode = true;
 				}
 				"--delimiter" | "-d" => {
 					let Some(arg) = args.next() else { continue };
@@ -254,7 +258,9 @@ fn execute(args: Argv, input: String) {
 			&mut fmt_lines
 		);
 		spent_cmds.push(cmd);
-		vicut.set_normal_mode();
+		if !args.keep_mode {
+			vicut.set_normal_mode();
+		}
 	}
 
 	if !fields.is_empty() {
