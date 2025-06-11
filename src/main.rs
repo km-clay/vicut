@@ -351,7 +351,10 @@ fn exec_cmd(
 
 fn main() {
 	if std::env::args().skip(1).count() == 0 {
-		eprintln!("print usage here lol"); // TODO: actually print the usage here
+		eprintln!("USAGE:"); 
+		eprintln!("\tvicut [OPTIONS] [COMMANDS]...");
+		eprintln!();
+		eprintln!("use '--help' for more information");
 		return
 	}
 	if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
