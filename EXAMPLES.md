@@ -139,3 +139,4 @@ wlp9s0 --- wifi --- connected --- NETWORK NAME
 lo --- loopback --- connected (externally) --- lo
 p2p-dev-wlp9s0 --- wifi-p2p --- disconnected --- --
 ```
+This command in particular also demonstrates how the `f` and `t` character-search motions can act like conditionals. If the target character (e.g. `)`) exists, the cursor moves; if not, it stays put — allowing `vicut` to gracefully handle optional formatting, like `(externally)` in the `STATE` field, without extra logic.
