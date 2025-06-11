@@ -29,11 +29,14 @@ vicut [OPTIONS] [COMMANDS]...
 
 
 OPTIONS:
-        --delimiter <STR>
+        -d, --delimiter <STR>
                 Provide a delimiter to place between fields in the output. No effect when used with --json.
 
         --json
                 Output the result as structured JSON.
+
+        --keep-mode
+                The internal editor will not return to normal mode after each command.
 
         --linewise
                 Apply given commands to each line in the given input.
