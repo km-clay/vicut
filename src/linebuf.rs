@@ -6,6 +6,14 @@ use unicode_width::UnicodeWidthStr;
 
 use super::vicmd::{Anchor, Bound, CmdFlags, Dest, Direction, Motion, MotionCmd, RegisterName, TextObj, To, Verb, ViCmd, Word};
 
+#[derive(PartialEq,Eq,Debug,Clone,Copy)]
+pub enum Delim {
+	Paren,
+	Brace,
+	Bracket,
+	Angle
+}
+
 #[derive(Default,PartialEq,Eq,Debug,Clone,Copy)]
 pub enum CharClass {
 	#[default]
@@ -379,6 +387,21 @@ impl LineBuf {
 	pub fn grapheme_indices_owned(&self) -> Vec<usize> {
 		self.grapheme_indices.as_ref().cloned().unwrap_or_default()
 	}
+	pub fn grapheme_is_escaped(&mut self, pos: usize) -> bool {
+		let mut pos = ClampedUsize::new(pos, self.cursor.max, false);
+		let mut escaped = false;
+
+		while pos.dec() {
+			let Some(gr) = self.grapheme_at(pos.get()) else { return escaped };
+			if gr == "\\" {
+				escaped = !escaped;
+			} else {
+				return escaped
+			}
+		}
+
+		escaped
+	}
 	pub fn grapheme_at(&mut self, pos: usize) -> Option<&str> {
 		self.update_graphemes_lazy();
 		let indices = self.grapheme_indices();
@@ -627,6 +650,7 @@ impl LineBuf {
 	pub fn directional_indices_iter(&mut self, dir: Direction) -> Box<dyn Iterator<Item = usize>> {
 		self.directional_indices_iter_from(self.cursor.get(), dir)
 	}
+	#[allow(clippy::unnecessary_to_owned)]
 	pub fn directional_indices_iter_from(&mut self, pos: usize, dir: Direction) -> Box<dyn Iterator<Item = usize>> {
 		self.update_graphemes_lazy();
 		let skip = if pos == 0 { 0 } else { pos + 1 };
@@ -942,6 +966,104 @@ impl LineBuf {
 		}
 
 		Some((start, end))
+	}
+	pub fn find_next_matching_delim(&mut self) -> Option<usize> {
+		let delims = [
+			"[", "]",
+			"{", "}",
+			"(", ")",
+			"<", ">",
+		];
+		let mut fwd_indices = self.cursor.get()..self.cursor.max;
+		let idx = fwd_indices.find(|idx| self.grapheme_at(*idx).is_some_and(|gr| delims.contains(&gr)))?;
+		let search_direction = match self.grapheme_at(idx)? {
+			"[" |
+			"{" |
+			"(" |
+			"<" => Direction::Forward,
+			"]" |
+			"}" |
+			")" |
+			">" => Direction::Backward,
+			_ => unreachable!()
+		};
+		let target_delim = match self.grapheme_at(idx)? {
+			"[" => "]",
+			"]" => "[",
+			"{" => "}",
+			"}" => "{",
+			"(" => ")",
+			")" => "(",
+			"<" => ">",
+			">" => "<",
+			_ => unreachable!()
+		};
+
+		match search_direction {
+			Direction::Forward => {
+				let mut fwd_indices = idx..self.cursor_max();
+				fwd_indices.find(|idx| self.grapheme_at(*idx).is_some_and(|gr| gr == target_delim) && !self.grapheme_is_escaped(*idx))
+			}
+			Direction::Backward => {
+				let mut bkwd_indices = 0..idx;
+				bkwd_indices.find(|idx| self.grapheme_at(*idx).is_some_and(|gr| gr == target_delim) && !self.grapheme_is_escaped(*idx))
+			}
+		}
+	}
+
+	pub fn find_unmatched_delim(&mut self, delim: Delim, dir: Direction) -> Option<usize> {
+		let (opener,closer) = match delim {
+			Delim::Paren => ("(",")"),
+			Delim::Brace => ("{","}"),
+			Delim::Bracket => ("[","]"),
+			Delim::Angle => ("<",">"),
+		};
+		match dir {
+			Direction::Forward => {
+				let mut fwd_indices = self.cursor.get()..self.cursor.max;
+				let mut depth = 0;
+
+				while let Some(idx) = fwd_indices.next() {
+					if self.grapheme_is_escaped(idx) { continue }
+					let gr = self.grapheme_at(idx)?;
+					match gr {
+						_ if gr == opener => depth += 1,
+						_ if gr == closer => {
+							if depth == 0 {
+								return Some(idx)
+							} else {
+								depth -= 1;
+							}
+						}
+						_ => { /* Continue */ }
+					}
+				}
+
+				None
+			}
+			Direction::Backward => {
+				let mut bkwd_indices = (0..self.cursor.get()).rev();
+				let mut depth = 0;
+
+				while let Some(idx) = bkwd_indices.next() {
+					if self.grapheme_is_escaped(idx) { continue }
+					let gr = self.grapheme_at(idx)?;
+					match gr {
+						_ if gr == closer => depth += 1,
+						_ if gr == opener => {
+							if depth == 0 {
+								return Some(idx)
+							} else {
+								depth -= 1;
+							}
+						}
+						_ => { /* Continue */ }
+					}
+				}
+
+				None
+			}
+		}
 	}
 	pub fn dispatch_word_motion(
 		&mut self,
@@ -1369,10 +1491,30 @@ impl LineBuf {
 
 				MotionKind::Inclusive((start,end))
 			}
-			MotionCmd(count,Motion::ToDelimMatch) => todo!(),
-			MotionCmd(count,Motion::ToBrace(direction)) => todo!(),
-			MotionCmd(count,Motion::ToBracket(direction)) => todo!(),
-			MotionCmd(count,Motion::ToParen(direction)) => todo!(),
+			MotionCmd(_,Motion::ToDelimMatch) => {
+				// Just ignoring the count here, it does some really weird stuff in Vim
+				// try doing something like '5%' in vim, it is really strange
+				let Some(pos) = self.find_next_matching_delim() else {
+					return MotionKind::Null
+				};
+				MotionKind::On(pos)
+			}
+			MotionCmd(_,Motion::ToBrace(direction)) |
+			MotionCmd(_,Motion::ToBracket(direction)) |
+			MotionCmd(_,Motion::ToParen(direction)) => {
+				// Counts don't seem to do anything significant for these either
+				let delim = match motion.1 {
+					Motion::ToBrace(_) => Delim::Brace,
+					Motion::ToBracket(_) => Delim::Bracket,
+					Motion::ToParen(_) => Delim::Paren,
+					_ => unreachable!()
+				};
+				let Some(pos) = self.find_unmatched_delim(delim, direction) else {
+					return MotionKind::Null
+				};
+
+				MotionKind::On(pos)
+			}
 			MotionCmd(count,Motion::EndOfLastWord) => {
 				let start = self.start_of_line();
 				let mut newline_count = 0;
@@ -1477,14 +1619,14 @@ impl LineBuf {
 			MotionCmd(count,Motion::LineDown) |
 			MotionCmd(count,Motion::LineUp) => {
 				let Some((start,end)) = (match motion.1 {
-					Motion::LineUp => self.nth_prev_line(1),
-					Motion::LineDown => self.nth_next_line(1),
+					Motion::LineUp => self.nth_prev_line(count),
+					Motion::LineDown => self.nth_next_line(count),
 					_ => unreachable!()
 				}) else {
 					return MotionKind::Null
 				};
 
-				let mut target_col = if let Some(col) = self.saved_col {
+				let target_col = if let Some(col) = self.saved_col {
 					col 
 				} else {
 					let col = self.cursor_col();
@@ -1575,7 +1717,7 @@ impl LineBuf {
 	}
 	pub fn update_select_range(&mut self) {
 		if let Some(mut mode) = self.select_mode {
-			let Some((mut start,mut end)) = self.select_range.clone() else {
+			let Some((mut start,mut end)) = self.select_range else {
 				return
 			};
 			match mode {
@@ -1994,7 +2136,6 @@ impl LineBuf {
 		let is_char_insert = cmd.verb.as_ref().is_some_and(|v| v.1.is_char_insert());
 		let is_line_motion = cmd.is_line_motion();
 		let is_undo_op = cmd.is_undo_op();
-		let is_inplace_edit = cmd.is_inplace_edit();
 		let edit_is_merging = self.undo_stack.last().is_some_and(|edit| edit.merging);
 		let cursor_start_pos = self.cursor.get();
 
@@ -2009,7 +2150,6 @@ impl LineBuf {
 
 		let verb_cmd_ref = verb.as_ref();
 		let verb_ref = verb_cmd_ref.map(|v| v.1.clone());
-		let verb_count = verb_cmd_ref.map(|v| v.0).unwrap_or(1);
 
 		let before = self.buffer.clone();
 		let cursor_pos = self.cursor.get();

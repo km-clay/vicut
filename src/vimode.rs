@@ -745,6 +745,42 @@ impl ViNormal {
 						_ => return self.quit_parse()
 					}
 				}
+				']' => {
+					let Some(ch) = chars_clone.peek() else {
+						break 'motion_parse None
+					};
+					match ch {
+						')' => {
+							chars = chars_clone;
+							break 'motion_parse Some(MotionCmd(count, Motion::ToParen(Direction::Forward)))
+						}
+						'}' => {
+							chars = chars_clone;
+							break 'motion_parse Some(MotionCmd(count, Motion::ToBrace(Direction::Forward)))
+					}
+						_ => return self.quit_parse()
+					}
+				}
+				'[' => {
+					let Some(ch) = chars_clone.peek() else {
+						break 'motion_parse None
+					};
+					match ch {
+						'(' => {
+							chars = chars_clone;
+							break 'motion_parse Some(MotionCmd(count, Motion::ToParen(Direction::Backward)))
+						}
+						'{' => {
+							chars = chars_clone;
+							break 'motion_parse Some(MotionCmd(count, Motion::ToBrace(Direction::Backward)))
+					}
+						_ => return self.quit_parse()
+					}
+				}
+				'%' => {
+					chars = chars_clone;
+					break 'motion_parse Some(MotionCmd(count, Motion::ToDelimMatch))
+				}
 				'v' => {
 					// We got 'v' after a verb
 					// Instead of normal operations, we will calculate the span based on how visual mode would see it
@@ -1376,6 +1412,42 @@ impl ViVisual {
 					} else {
 						break 'motion_parse None
 					}
+				}
+				']' => {
+					let Some(ch) = chars_clone.peek() else {
+						break 'motion_parse None
+					};
+					match ch {
+						')' => {
+							chars = chars_clone;
+							break 'motion_parse Some(MotionCmd(count, Motion::ToParen(Direction::Forward)))
+						}
+						'}' => {
+							chars = chars_clone;
+							break 'motion_parse Some(MotionCmd(count, Motion::ToBrace(Direction::Forward)))
+					}
+						_ => return self.quit_parse()
+					}
+				}
+				'[' => {
+					let Some(ch) = chars_clone.peek() else {
+						break 'motion_parse None
+					};
+					match ch {
+						'(' => {
+							chars = chars_clone;
+							break 'motion_parse Some(MotionCmd(count, Motion::ToParen(Direction::Backward)))
+						}
+						'{' => {
+							chars = chars_clone;
+							break 'motion_parse Some(MotionCmd(count, Motion::ToBrace(Direction::Backward)))
+					}
+						_ => return self.quit_parse()
+					}
+				}
+				'%' => {
+					chars = chars_clone;
+					break 'motion_parse Some(MotionCmd(count, Motion::ToDelimMatch))
 				}
 				'f' => {
 					let Some(ch) = chars_clone.peek() else {
