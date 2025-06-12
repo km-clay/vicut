@@ -285,7 +285,13 @@ impl ViNormal {
 	fn validate_combination(&self, verb: Option<&Verb>, motion: Option<&Motion>) -> CmdState {
 		if verb.is_none() {
 			match motion {
-				Some(Motion::TextObj(_,_)) => return CmdState::Invalid,
+				Some(Motion::TextObj(obj)) => {
+					return match obj {
+						TextObj::Sentence(_) |
+						TextObj::Paragraph(_) => CmdState::Complete,
+						_ => CmdState::Invalid
+					}
+				}
 				Some(_) => return CmdState::Complete,
 				None => return CmdState::Pending
 			}
@@ -711,37 +717,15 @@ impl ViNormal {
 					match ch {
 						'g' => {
 							chars_clone.next();
-							chars = chars_clone;
 							break 'motion_parse Some(MotionCmd(count, Motion::BeginningOfBuffer))
 						}
-						'e' => {
-							chars = chars_clone;
-							break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::End, Word::Normal, Direction::Backward)));
-						}
-						'E' => {
-							chars = chars_clone;
-							break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::End, Word::Big, Direction::Backward)));
-						}
-						'k' => {
-							chars = chars_clone;
-							break 'motion_parse Some(MotionCmd(count, Motion::ScreenLineUp));
-						}
-						'j' => {
-							chars = chars_clone;
-							break 'motion_parse Some(MotionCmd(count, Motion::ScreenLineDown));
-						}
-						'_' => {
-							chars = chars_clone;
-							break 'motion_parse Some(MotionCmd(count, Motion::EndOfLastWord));
-						}
-						'0' => {
-							chars = chars_clone;
-							break 'motion_parse Some(MotionCmd(count, Motion::BeginningOfScreenLine));
-						}
-						'^' => {
-							chars = chars_clone;
-							break 'motion_parse Some(MotionCmd(count, Motion::FirstGraphicalOnScreenLine));
-						}
+						'e' => break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::End, Word::Normal, Direction::Backward))),
+						'E' => break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::End, Word::Big, Direction::Backward))),
+						'k' => break 'motion_parse Some(MotionCmd(count, Motion::ScreenLineUp)),
+						'j' => break 'motion_parse Some(MotionCmd(count, Motion::ScreenLineDown)),
+						'_' => break 'motion_parse Some(MotionCmd(count, Motion::EndOfLastWord)),
+						'0' => break 'motion_parse Some(MotionCmd(count, Motion::BeginningOfScreenLine)),
+						'^' => break 'motion_parse Some(MotionCmd(count, Motion::FirstGraphicalOnScreenLine)),
 						_ => return self.quit_parse()
 					}
 				}
@@ -750,14 +734,8 @@ impl ViNormal {
 						break 'motion_parse None
 					};
 					match ch {
-						')' => {
-							chars = chars_clone;
-							break 'motion_parse Some(MotionCmd(count, Motion::ToParen(Direction::Forward)))
-						}
-						'}' => {
-							chars = chars_clone;
-							break 'motion_parse Some(MotionCmd(count, Motion::ToBrace(Direction::Forward)))
-					}
+						')' => break 'motion_parse Some(MotionCmd(count, Motion::ToParen(Direction::Forward))),
+						'}' => break 'motion_parse Some(MotionCmd(count, Motion::ToBrace(Direction::Forward))),
 						_ => return self.quit_parse()
 					}
 				}
@@ -766,20 +744,10 @@ impl ViNormal {
 						break 'motion_parse None
 					};
 					match ch {
-						'(' => {
-							chars = chars_clone;
-							break 'motion_parse Some(MotionCmd(count, Motion::ToParen(Direction::Backward)))
-						}
-						'{' => {
-							chars = chars_clone;
-							break 'motion_parse Some(MotionCmd(count, Motion::ToBrace(Direction::Backward)))
-					}
+						'(' => break 'motion_parse Some(MotionCmd(count, Motion::ToParen(Direction::Backward))),
+						'{' => break 'motion_parse Some(MotionCmd(count, Motion::ToBrace(Direction::Backward))),
 						_ => return self.quit_parse()
 					}
-				}
-				'%' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::ToDelimMatch))
 				}
 				'v' => {
 					// We got 'v' after a verb
@@ -802,11 +770,6 @@ impl ViNormal {
 					}
 					self.pending_flags |= CmdFlags::VISUAL;
 					break 'motion_parse None
-				}
-				// TODO: figure out how to include 'Ctrl+V' here, might need a refactor
-				'G' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::EndOfBuffer));
 				}
 				'f' => {
 					let Some(ch) = chars_clone.peek() else {
@@ -836,70 +799,28 @@ impl ViNormal {
 
 					break 'motion_parse Some(MotionCmd(count, Motion::CharSearch(Direction::Backward, Dest::Before, *ch)))
 				}
-				';' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::RepeatMotion));
-				}
-				',' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::RepeatMotionRev));
-				}
-				'|' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::ToColumn));
-				}
-				'^' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::BeginningOfFirstWord));
-				}
-				'0' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::BeginningOfLine));
-				}
-				'$' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::EndOfLine));
-				}
-				'k' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::LineUp));
-				}
-				'j' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::LineDown));
-				}
-				'h' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::BackwardChar));
-				}
-				'l' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::ForwardChar));
-				}
-				'w' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::Start, Word::Normal, Direction::Forward)));
-				}
-				'W' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::Start, Word::Big, Direction::Forward)));
-				}
-				'e' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::End, Word::Normal, Direction::Forward)));
-				}
-				'E' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::End, Word::Big, Direction::Forward)));
-				}
-				'b' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::Start, Word::Normal, Direction::Backward)));
-				}
-				'B' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::Start, Word::Big, Direction::Backward)));
-				}
+				'%' => break 'motion_parse Some(MotionCmd(count, Motion::ToDelimMatch)),
+				'G' => break 'motion_parse Some(MotionCmd(count, Motion::EndOfBuffer)),
+				';' => break 'motion_parse Some(MotionCmd(count, Motion::RepeatMotion)),
+				',' => break 'motion_parse Some(MotionCmd(count, Motion::RepeatMotionRev)),
+				'|' => break 'motion_parse Some(MotionCmd(count, Motion::ToColumn)),
+				'^' => break 'motion_parse Some(MotionCmd(count, Motion::BeginningOfFirstWord)),
+				'0' => break 'motion_parse Some(MotionCmd(count, Motion::BeginningOfLine)),
+				'$' => break 'motion_parse Some(MotionCmd(count, Motion::EndOfLine)),
+				'k' => break 'motion_parse Some(MotionCmd(count, Motion::LineUp)),
+				'j' => break 'motion_parse Some(MotionCmd(count, Motion::LineDown)),
+				'h' => break 'motion_parse Some(MotionCmd(count, Motion::BackwardChar)),
+				'l' => break 'motion_parse Some(MotionCmd(count, Motion::ForwardChar)),
+				'w' => break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::Start, Word::Normal, Direction::Forward))),
+				'W' => break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::Start, Word::Big, Direction::Forward))),
+				'e' => break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::End, Word::Normal, Direction::Forward))),
+				'E' => break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::End, Word::Big, Direction::Forward))),
+				'b' => break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::Start, Word::Normal, Direction::Backward))),
+				'B' => break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::Start, Word::Big, Direction::Backward))),
+				')' => break 'motion_parse Some(MotionCmd(count, Motion::TextObj(TextObj::Sentence(Direction::Forward)))),
+				'(' => break 'motion_parse Some(MotionCmd(count, Motion::TextObj(TextObj::Sentence(Direction::Backward)))),
+				'}' => break 'motion_parse Some(MotionCmd(count, Motion::TextObj(TextObj::Paragraph(Direction::Forward)))),
+				'{' => break 'motion_parse Some(MotionCmd(count, Motion::TextObj(TextObj::Paragraph(Direction::Backward)))),
 				ch if ch == 'i' || ch == 'a' => {
 					let bound = match ch {
 						'i' => Bound::Inside,
@@ -910,19 +831,20 @@ impl ViNormal {
 						break 'motion_parse None
 					}
 					let obj = match chars_clone.next().unwrap() {
-						'w' => TextObj::Word(Word::Normal),
-						'W' => TextObj::Word(Word::Big),
-						'"' => TextObj::DoubleQuote,
-						'\'' => TextObj::SingleQuote,
-						'`' => TextObj::BacktickQuote,
-						'(' | ')' | 'b' => TextObj::Paren,
-						'{' | '}' | 'B' => TextObj::Brace,
-						'[' | ']' => TextObj::Bracket,
-						'<' | '>' => TextObj::Angle,
+						'w' => TextObj::Word(Word::Normal,bound),
+						'W' => TextObj::Word(Word::Big,bound),
+						's' => TextObj::WholeSentence(bound),
+						'p' => TextObj::WholeParagraph(bound),
+						'"' => TextObj::DoubleQuote(bound),
+						'\'' => TextObj::SingleQuote(bound),
+						'`' => TextObj::BacktickQuote(bound),
+						'(' | ')' | 'b' => TextObj::Paren(bound),
+						'{' | '}' | 'B' => TextObj::Brace(bound),
+						'[' | ']' => TextObj::Bracket(bound),
+						'<' | '>' => TextObj::Angle(bound),
 						_ => return self.quit_parse()
 					};
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::TextObj(obj, bound)))
+					break 'motion_parse Some(MotionCmd(count, Motion::TextObj(obj)))
 				}
 				_ => return self.quit_parse(),
 			}
@@ -1382,31 +1304,11 @@ impl ViVisual {
 				'g' => {
 					if let Some(ch) = chars_clone.peek() {
 						match ch {
-							'g' => {
-								chars_clone.next();
-								chars = chars_clone;
-								break 'motion_parse Some(MotionCmd(count, Motion::BeginningOfBuffer))
-							}
-							'e' => {
-								chars_clone.next();
-								chars = chars_clone;
-								break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::End, Word::Normal, Direction::Backward)));
-							}
-							'E' => {
-								chars_clone.next();
-								chars = chars_clone;
-								break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::End, Word::Big, Direction::Backward)));
-							}
-							'k' => {
-								chars_clone.next();
-								chars = chars_clone;
-								break 'motion_parse Some(MotionCmd(count, Motion::ScreenLineUp));
-							}
-							'j' => {
-								chars_clone.next();
-								chars = chars_clone;
-								break 'motion_parse Some(MotionCmd(count, Motion::ScreenLineDown));
-							}
+							'g' => break 'motion_parse Some(MotionCmd(count, Motion::BeginningOfBuffer)),
+							'e' => break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::End, Word::Normal, Direction::Backward))),
+							'E' => break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::End, Word::Big, Direction::Backward))),
+							'k' => break 'motion_parse Some(MotionCmd(count, Motion::ScreenLineUp)),
+							'j' => break 'motion_parse Some(MotionCmd(count, Motion::ScreenLineDown)),
 							_ => return self.quit_parse()
 						}
 					} else {
@@ -1418,14 +1320,8 @@ impl ViVisual {
 						break 'motion_parse None
 					};
 					match ch {
-						')' => {
-							chars = chars_clone;
-							break 'motion_parse Some(MotionCmd(count, Motion::ToParen(Direction::Forward)))
-						}
-						'}' => {
-							chars = chars_clone;
-							break 'motion_parse Some(MotionCmd(count, Motion::ToBrace(Direction::Forward)))
-					}
+						')' => break 'motion_parse Some(MotionCmd(count, Motion::ToParen(Direction::Forward))),
+						'}' => break 'motion_parse Some(MotionCmd(count, Motion::ToBrace(Direction::Forward))),
 						_ => return self.quit_parse()
 					}
 				}
@@ -1434,21 +1330,12 @@ impl ViVisual {
 						break 'motion_parse None
 					};
 					match ch {
-						'(' => {
-							chars = chars_clone;
-							break 'motion_parse Some(MotionCmd(count, Motion::ToParen(Direction::Backward)))
-						}
-						'{' => {
-							chars = chars_clone;
-							break 'motion_parse Some(MotionCmd(count, Motion::ToBrace(Direction::Backward)))
-					}
+						'(' => break 'motion_parse Some(MotionCmd(count, Motion::ToParen(Direction::Backward))),
+						'{' => break 'motion_parse Some(MotionCmd(count, Motion::ToBrace(Direction::Backward))),
 						_ => return self.quit_parse()
 					}
 				}
-				'%' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::ToDelimMatch))
-				}
+				'%' => break 'motion_parse Some(MotionCmd(count, Motion::ToDelimMatch)),
 				'f' => {
 					let Some(ch) = chars_clone.peek() else {
 						break 'motion_parse None
@@ -1477,66 +1364,25 @@ impl ViVisual {
 
 					break 'motion_parse Some(MotionCmd(count, Motion::CharSearch(Direction::Backward, Dest::Before, *ch)))
 				}
-				';' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::RepeatMotion));
-				}
-				',' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::RepeatMotionRev));
-				}
-				'|' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::ToColumn));
-				}
-				'0' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::BeginningOfLine));
-				}
-				'$' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::EndOfLine));
-				}
-				'k' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::LineUp));
-				}
-				'j' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::LineDown));
-				}
-				'h' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::BackwardChar));
-				}
-				'l' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::ForwardChar));
-				}
-				'w' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::Start, Word::Normal, Direction::Forward)));
-				}
-				'W' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::Start, Word::Big, Direction::Forward)));
-				}
-				'e' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::End, Word::Normal, Direction::Forward)));
-				}
-				'E' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::End, Word::Big, Direction::Forward)));
-				}
-				'b' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::Start, Word::Normal, Direction::Backward)));
-				}
-				'B' => {
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::Start, Word::Big, Direction::Backward)));
-				}
+				';' => break 'motion_parse Some(MotionCmd(count, Motion::RepeatMotion)),
+				',' => break 'motion_parse Some(MotionCmd(count, Motion::RepeatMotionRev)),
+				'|' => break 'motion_parse Some(MotionCmd(count, Motion::ToColumn)),
+				'0' => break 'motion_parse Some(MotionCmd(count, Motion::BeginningOfLine)),
+				'$' => break 'motion_parse Some(MotionCmd(count, Motion::EndOfLine)),
+				'k' => break 'motion_parse Some(MotionCmd(count, Motion::LineUp)),
+				'j' => break 'motion_parse Some(MotionCmd(count, Motion::LineDown)),
+				'h' => break 'motion_parse Some(MotionCmd(count, Motion::BackwardChar)),
+				'l' => break 'motion_parse Some(MotionCmd(count, Motion::ForwardChar)),
+				'w' => break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::Start, Word::Normal, Direction::Forward))),
+				'W' => break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::Start, Word::Big, Direction::Forward))),
+				'e' => break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::End, Word::Normal, Direction::Forward))),
+				'E' => break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::End, Word::Big, Direction::Forward))),
+				'b' => break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::Start, Word::Normal, Direction::Backward))),
+				'B' => break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::Start, Word::Big, Direction::Backward))),
+				')' => break 'motion_parse Some(MotionCmd(count, Motion::TextObj(TextObj::Sentence(Direction::Forward)))),
+				'(' => break 'motion_parse Some(MotionCmd(count, Motion::TextObj(TextObj::Sentence(Direction::Backward)))),
+				'}' => break 'motion_parse Some(MotionCmd(count, Motion::TextObj(TextObj::Paragraph(Direction::Forward)))),
+				'{' => break 'motion_parse Some(MotionCmd(count, Motion::TextObj(TextObj::Paragraph(Direction::Backward)))),
 				ch if ch == 'i' || ch == 'a' => {
 					let bound = match ch {
 						'i' => Bound::Inside,
@@ -1547,19 +1393,20 @@ impl ViVisual {
 						break 'motion_parse None
 					}
 					let obj = match chars_clone.next().unwrap() {
-						'w' => TextObj::Word(Word::Normal),
-						'W' => TextObj::Word(Word::Big),
-						'"' => TextObj::DoubleQuote,
-						'\'' => TextObj::SingleQuote,
-						'`' => TextObj::BacktickQuote,
-						'(' | ')' | 'b' => TextObj::Paren,
-						'{' | '}' | 'B' => TextObj::Brace,
-						'[' | ']' => TextObj::Bracket,
-						'<' | '>' => TextObj::Angle,
+						'w' => TextObj::Word(Word::Normal,bound),
+						'W' => TextObj::Word(Word::Big,bound),
+						's' => TextObj::WholeSentence(bound),
+						'p' => TextObj::WholeParagraph(bound),
+						'"' => TextObj::DoubleQuote(bound),
+						'\'' => TextObj::SingleQuote(bound),
+						'`' => TextObj::BacktickQuote(bound),
+						'(' | ')' | 'b' => TextObj::Paren(bound),
+						'{' | '}' | 'B' => TextObj::Brace(bound),
+						'[' | ']' => TextObj::Bracket(bound),
+						'<' | '>' => TextObj::Angle(bound),
 						_ => return self.quit_parse()
 					};
-					chars = chars_clone;
-					break 'motion_parse Some(MotionCmd(count, Motion::TextObj(obj, bound)))
+					break 'motion_parse Some(MotionCmd(count, Motion::TextObj(obj)))
 				}
 				_ => return self.quit_parse(),
 			}
