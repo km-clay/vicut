@@ -17,17 +17,19 @@ I wanted a tool that makes field extraction and output formatting intuitive and 
 * `-m`/`--move <CMD>` does the same thing, but does not return a span, so it can be used to position the cursor or edit the buffer pre-emptively.
 * `-r`/`--repeat <N> <R>` repeats `N` previous commands `R` times. Repeats can be logically nested.
 * `-n`/`--next` concludes the current field group and starts a new one. Each field group is a separate record in the output.
+  
+In this context, `<CMD>` refers to a Normal mode sequence like `di)`, `b2w`, `16vk`, `iInserting some text now<esc>b2w` etc.
 
 This method allows for very powerful text extraction, even from loosely structured inputs.
 ### Output Format Options
 Output can be structured in three different ways using these options:
-* `-j`/`--json` emits the extracted field data as a json object, ready to be piped into `jq`
+* `-j`/`--json` emits the extracted field data as a json object, ready to be piped into other programs, such as `jq`
 * `-d`/`--delimiter <STR>` lets you give a field separator as an argument to the flag. The separator is placed inbetween each field in each record.
 * `-t`/`--template <STR>` lets you define a custom output format using a format string. Fields are interpolated on placeholders that look like `{{1}}` or `{{field_name}}`.
 
 ## Usage
 
-For advanced usage and some examples/comparisons with other tools, you can check out the [wiki](https://github.com/km-clay/vicut/wiki)
+For in-depth usage info, and some examples/comparisons with other tools, you can check out the [wiki](https://github.com/km-clay/vicut/wiki)
 
 ```
 vicut [OPTIONS] [COMMANDS]...
@@ -100,28 +102,28 @@ Operating on a sample dataset of lines that look like this:
 ...
 ```
 ### 25,000 lines
-| Tool    | Command                                                    | Time (real)        |
-| ------- | ---------------------------------------------------------- | ------------------ |
-| `sed`   | `sed -E -e 's/\[]\[]//g' -e 's/\\) \\(\\)/ ---- /g'`       | 0.045s   |
-| `awk`   | `awk -F'[()]' awk -F'[()]' '{ gsub(/\[\|\]/, "", $4); print $1, "---", $2, "---", $3, "---", $4 }'`       | 0.040s   |
-| `vicut` | `vicut --linewise --delimiter ' --- ' -c 'e' -m '2w' -c 't(h' -c 'vi)' -c 'vi]'` | 0.128s   |
+| Tool    | Command                                                                                | Time (real) |
+| ------- | -------------------------------------------------------------------------------------- | ----------- |
+| `sed`   | `sed -E -e 's/\[]\[]//g' -e 's/\\) \\(\\)/ ---- /g'`                                   | 0.045s      |
+| `awk`   | `awk -F'[()]' '{ gsub(/\[\|\]/, "", $4); print $1, "---", $2, "---", $3, "---", $4 }'` | 0.040s      |
+| `vicut` | `vicut --linewise --delimiter ' --- ' -c 'e' -m '2w' -c 't(h' -c 'vi)' -c 'vi]'`       | 0.128s      |
 
 
 ### 100,000 lines
-| Tool    | Command                                                    | Time (real)        |
-| ------- | ---------------------------------------------------------- | ------------------ |
-| `sed`   | `sed -E -e 's/\[]\[]//g' -e 's/\\) \\(\\)/ ---- /g'`       | 0.164s   |
-| `awk`   | `awk -F'[()]' awk -F'[()]' '{ gsub(/\[\|\]/, "", $4); print $1, "---", $2, "---", $3, "---", $4 }'`       | 0.148s   |
-| `vicut` | `vicut --linewise --delimiter ' --- ' -c 'e' -m '2w' -c 't(h' -c 'vi)' -c 'vi]'` | 0.383s   |
+| Tool    | Command                                                                                | Time (real) |
+| ------- | -------------------------------------------------------------------------------------- | ----------- |
+| `sed`   | `sed -E -e 's/\[]\[]//g' -e 's/\\) \\(\\)/ ---- /g'`                                   | 0.164s      |
+| `awk`   | `awk -F'[()]' '{ gsub(/\[\|\]/, "", $4); print $1, "---", $2, "---", $3, "---", $4 }'` | 0.148s      |
+| `vicut` | `vicut --linewise --delimiter ' --- ' -c 'e' -m '2w' -c 't(h' -c 'vi)' -c 'vi]'`       | 0.383s      |
 
 ### 1,000,000 lines
-| Tool    | Command                                                    | Time (real)        |
-| ------- | ---------------------------------------------------------- | ------------------ |
-| `sed`   | `sed -E -e 's/\[]\[]//g' -e 's/\\) \\(\\)/ ---- /g'`       | 0.891s   |
-| `awk`   | `awk -F'[()]' awk -F'[()]' '{ gsub(/\[\|\]/, "", $4); print $1, "---", $2, "---", $3, "---", $4 }'`       | 0.546s   |
-| `vicut` | `vicut --linewise --delimiter ' --- ' -c 'e' -m '2w' -c 't(h' -c 'vi)' -c 'vi]'` | 3.361s   |
+| Tool    | Command                                                                                | Time (real) |
+| ------- | -------------------------------------------------------------------------------------- | ----------- |
+| `sed`   | `sed -E -e 's/\[]\[]//g' -e 's/\\) \\(\\)/ ---- /g'`                                   | 0.891s      |
+| `awk`   | `awk -F'[()]' '{ gsub(/\[\|\]/, "", $4); print $1, "---", $2, "---", $3, "---", $4 }'` | 0.546s      |
+| `vicut` | `vicut --linewise --delimiter ' --- ' -c 'e' -m '2w' -c 't(h' -c 'vi)' -c 'vi]'`       | 3.361s      |
 
-This data suggests that while the performance of `vicut` *is* roughly 3x slower in it's current state, performance scales linearly and predictably with input size.  
+This data suggests that while the performance of `vicut` *is* roughly 3x slower in its current state, performance scales linearly and predictably with input size.  
 Given that `vicut` performs more semantically aware, stateful operations compared to stateless regex pattern matching, a performance cost is to be expected, but current profiling does show room for significant optimizations.
 
 ## Installation
