@@ -21,9 +21,9 @@ I wanted a tool that makes field extraction intuitive and precise, even with mes
 This method allows for very powerful text extraction, even from loosely structured inputs.
 ### Output Format Options
 Output can be structured in three different ways using these options:
-* `--json` emits the extracted field data as a json object, ready to be piped into `jq`
-* `--delimiter <STR>` lets you give a field separator as an argument to the flag. The separator is placed inbetween each field in each record.
-* `--template <STR>` lets you define a custom output format using a format string. Fields are interpolated on placeholders that look like `{{1}}` or `{{field_name}}`.
+* `-j`/`--json` emits the extracted field data as a json object, ready to be piped into `jq`
+* `-d`/`--delimiter <STR>` lets you give a field separator as an argument to the flag. The separator is placed inbetween each field in each record.
+* `-t`/`--template <STR>` lets you define a custom output format using a format string. Fields are interpolated on placeholders that look like `{{1}}` or `{{field_name}}`.
 
 ## Usage
 
@@ -42,7 +42,7 @@ OPTIONS:
         -d, --delimiter <STR>
                 Provide a delimiter to place between fields in the output. No effect when used with --json.
 
-        --json
+        -j, --json
                 Output the result as structured JSON.
 
         --keep-mode
