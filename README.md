@@ -29,6 +29,11 @@ vicut [OPTIONS] [COMMANDS]...
 
 
 OPTIONS:
+        -t, --template <STR>
+                Provide a format template to use for custom output formats. Example:
+                --template "< {{1}} > ( {{2}} ) { {{3}} }"
+                Names given to fields explicitly using '-c name=<name>' should be used instead of field numbers.
+
         -d, --delimiter <STR>
                 Provide a delimiter to place between fields in the output. No effect when used with --json.
 
