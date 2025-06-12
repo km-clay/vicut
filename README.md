@@ -8,7 +8,7 @@ Extracting fields with standard Unix tools like `cut`, `sed`, or `awk` has alway
 `sed` often demands verbose, brittle regexes that are time consuming to write and are never reused.  
 And while `awk` is powerful, it quickly becomes verbose when dealing with anything non-trivial.  
 
-I wanted a tool that makes field extraction intuitive and precise, even with messy or irregular input.
+I wanted a tool that makes field extraction and output formatting intuitive and precise, even with messy or irregular input.
 
 ## Overview
 `vicut` is a tool meant to be used in pipelines. Internally, it uses a stateful text editing engine based on Vim. It reads data from stdin, and then uses the command flags given by the user to operate on the text and extract fields. Fields are extracted based on cursor movements. There are four command flags. 
