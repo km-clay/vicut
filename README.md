@@ -19,6 +19,11 @@ I wanted a tool that makes field extraction intuitive and precise, even with mes
 * `-n`/`--next` concludes the current field group and starts a new one. Each field group is a separate record in the output.
 
 This method allows for very powerful text extraction, even from loosely structured inputs.
+### Output Format Options
+Output can be structured in three different ways using these options:
+* `--json` emits the extracted field data as a json object, ready to be piped into `jq`
+* `--delimiter <STR>` lets you give a field separator as an argument to the flag. The separator is placed inbetween each field in each record.
+* `--template <STR>` lets you define a custom output format using a format string. Fields are interpolated on placeholders that look like `{{1}}` or `{{field_name}}`.
 
 ## Usage
 
