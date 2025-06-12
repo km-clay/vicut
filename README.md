@@ -88,6 +88,42 @@ EXAMPLE:
         foo -- bar -- (boo far) -- [bar foo]
 ```
 
+## Performance
+While `vicut` is not yet fully optimized, early comparisons show that its performance is competitive given its more stateful execution model. 
+Operating on a sample dataset of lines that look like this:
+```
+00001) Provider-1 (City-1, State-49) [924.05 km]
+00002) Provider-2 (City-2, State-48) [593.91 km]
+00003) Provider-3 (City-3, State-47) [306.39 km]
+00004) Provider-4 (City-4, State-46) [578.94 km]
+00005) Provider-5 (City-5, State-45) [740.13 km]
+...
+```
+### 25,000 lines
+| Tool    | Command                                                    | Time (real)        |
+| ------- | ---------------------------------------------------------- | ------------------ |
+| `sed`   | `sed -E -e 's/\[]\[]//g' -e 's/\\) \\(\\)/ ---- /g'`       | 0.045s   |
+| `awk`   | `awk -F'[()]' awk -F'[()]' '{ gsub(/\[\|\]/, "", $4); print $1, "---", $2, "---", $3, "---", $4 }'`       | 0.040s   |
+| `vicut` | `vicut --linewise --delimiter ' --- ' -c 'e' -m '2w' -c 't(h' -c 'vi)' -c 'vi]'` | 0.128s   |
+
+
+### 100,000 lines
+| Tool    | Command                                                    | Time (real)        |
+| ------- | ---------------------------------------------------------- | ------------------ |
+| `sed`   | `sed -E -e 's/\[]\[]//g' -e 's/\\) \\(\\)/ ---- /g'`       | 0.164s   |
+| `awk`   | `awk -F'[()]' awk -F'[()]' '{ gsub(/\[\|\]/, "", $4); print $1, "---", $2, "---", $3, "---", $4 }'`       | 0.148s   |
+| `vicut` | `vicut --linewise --delimiter ' --- ' -c 'e' -m '2w' -c 't(h' -c 'vi)' -c 'vi]'` | 0.383s   |
+
+### 1,000,000 lines
+| Tool    | Command                                                    | Time (real)        |
+| ------- | ---------------------------------------------------------- | ------------------ |
+| `sed`   | `sed -E -e 's/\[]\[]//g' -e 's/\\) \\(\\)/ ---- /g'`       | 0.891s   |
+| `awk`   | `awk -F'[()]' awk -F'[()]' '{ gsub(/\[\|\]/, "", $4); print $1, "---", $2, "---", $3, "---", $4 }'`       | 0.546s   |
+| `vicut` | `vicut --linewise --delimiter ' --- ' -c 'e' -m '2w' -c 't(h' -c 'vi)' -c 'vi]'` | 3.361s   |
+
+This data suggests that while the performance of `vicut` *is* roughly 3x slower in it's current state, performance scales linearly and predictably with input size.  
+Given that `vicut` performs more semantically aware, stateful operations compared to stateless regex pattern matching, a performance cost is to be expected, but current profiling does show room for significant optimizations.
+
 ## Installation
 
 **NOTE:** You will need to have `cargo` installed in order to build `vicut`
