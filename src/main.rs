@@ -44,7 +44,7 @@ impl Argv {
 		let mut args = std::env::args().skip(1);
 		while let Some(arg) = args.next() {
 			match arg.as_str() {
-				"--json" => {
+				"--json" | "-j" => {
 					new.json = true;
 				}
 				"--trace" => {
@@ -148,6 +148,7 @@ fn print_help() {
 	writeln!(help).unwrap();
 	writeln!(help, "\t--linewise").unwrap();
 	writeln!(help, "\t\tApply given commands to each line in the given input.").unwrap();
+	writeln!(help, "\t\tEach line in the input is treated as it's own separate buffer.").unwrap();
 	writeln!(help).unwrap();
 	writeln!(help, "\t--trim-fields").unwrap();
 	writeln!(help, "\t\tTrim leading and trailing whitespace from captured fields.").unwrap();
@@ -281,11 +282,19 @@ fn format_output_template(template: &str, lines: Vec<Vec<(String,String)>>) {
 						}
 					}
 					if closed {
-						let result = line.iter().find(|(name,_)| name == &field_name).map(|(_,field)| field);
+						let result = line
+							.iter()
+							.find(|(name,_)| name == &field_name)
+							.map(|(_,field)| field);
+						
 						if let Some(field) = result {
 							cur_line.push_str(field);
 						} else {
 							eprintln!("Did not find a field called '{field_name}' for output template");
+							eprintln!("Captured field names were:");
+							for (name,_) in line {
+								eprintln!("\t{name}");
+							}
 							return
 						}
 					} else {
@@ -296,7 +305,9 @@ fn format_output_template(template: &str, lines: Vec<Vec<(String,String)>>) {
 				_ => cur_line.push(ch)
 			}
 		}
-		output.push_str(&std::mem::take(&mut cur_line));
+		if !cur_line.is_empty() {
+			output.push_str(&std::mem::take(&mut cur_line));
+		}
 		output.push('\n')
 	}
 	print!("{output}")
@@ -379,7 +390,14 @@ fn exec_cmd(
 
 				for r_cmd in pulled_cmds {
 					// We use recursion so that we can nest repeats easily
-					exec_cmd(&r_cmd, vicut, field_num, spent_cmds, fields, fmt_lines);
+					exec_cmd(
+						&r_cmd,
+						vicut,
+						field_num,
+						spent_cmds,
+						fields,
+						fmt_lines
+					);
 					spent_cmds.push(r_cmd);
 				}
 			}
