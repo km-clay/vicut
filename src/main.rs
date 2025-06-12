@@ -5,6 +5,7 @@ use std::{fmt::Write,io::{self, Write as IoWrite, BufRead}};
 use exec::ViCut;
 use log::trace;
 use serde_json::{Map, Value};
+use rayon::prelude::*;
 
 pub mod vicmd;
 pub mod modes;
@@ -31,12 +32,14 @@ enum Cmd {
 struct Argv {
 	delimiter: Option<String>,
 	template: Option<String>,
+	max_jobs: Option<u32>,
 
 	json: bool,
 	trace: bool,
 	linewise: bool,
 	trim_fields: bool,
 	keep_mode: bool,
+	single_thread: bool,
 
 	cmds: Vec<Cmd>
 }
@@ -55,6 +58,9 @@ impl Argv {
 				}
 				"--linewise" => {
 					new.linewise = true;
+				}
+				"--serial" => {
+					new.single_thread = true;
 				}
 				"--trim-fields" => {
 					new.trim_fields = true;
@@ -152,6 +158,14 @@ fn print_help() {
 	writeln!(help, "\t--linewise").unwrap();
 	writeln!(help, "\t\tApply given commands to each line in the given input.").unwrap();
 	writeln!(help, "\t\tEach line in the input is treated as it's own separate buffer.").unwrap();
+	writeln!(help, "\t\tThis operation is multi-threaded.").unwrap();
+	writeln!(help).unwrap();
+	writeln!(help, "\t--serial").unwrap();
+	writeln!(help, "\t\tWhen used with --linewise, operates on each line sequentially instead of using multi-threading.").unwrap();
+	writeln!(help, "\t\tNote that the order of lines is maintained regardless of whether or not multi-threading is used.").unwrap();
+	writeln!(help).unwrap();
+	writeln!(help, "\t--jobs").unwrap();
+	writeln!(help, "\t\tWhen used with --linewise, limits the number of threads that the program can use.").unwrap();
 	writeln!(help).unwrap();
 	writeln!(help, "\t--trim-fields").unwrap();
 	writeln!(help, "\t\tTrim leading and trailing whitespace from captured fields.").unwrap();
@@ -219,7 +233,7 @@ fn init_logger(trace: bool) {
 	builder.init();
 }
 
-fn format_output_json(lines: Vec<Vec<(String,String)>>) {
+fn format_output_json(lines: Vec<Vec<(String,String)>>) -> String {
 	let array: Vec<Value> = lines
 		.into_iter()
 		.map(|fields| {
@@ -231,12 +245,11 @@ fn format_output_json(lines: Vec<Vec<(String,String)>>) {
 		}).collect();
 
 	let json = Value::Array(array);
-	let output = serde_json::to_string_pretty(&json).unwrap();
-	println!("{output}")
+	serde_json::to_string_pretty(&json).unwrap()
 }
 
-fn format_output_standard(delimiter: &str, lines: Vec<Vec<(String,String)>>) {
-	let lines = lines.into_iter()
+fn format_output_standard(delimiter: &str, lines: Vec<Vec<(String,String)>>) -> String {
+	lines.into_iter()
 		.fold(String::new(), |mut acc,line| {
 			// Accumulate all line fields into one string,
 			// Fold all lines into one string
@@ -248,12 +261,10 @@ fn format_output_standard(delimiter: &str, lines: Vec<Vec<(String,String)>>) {
 			acc.push_str(&fmt_line);
 			acc.push('\n');
 			acc
-		});
-
-	print!("{lines}");
+		})
 }
 
-fn format_output_template(template: &str, lines: Vec<Vec<(String,String)>>) {
+fn format_output_template(template: &str, lines: Vec<Vec<(String,String)>>) -> Result<String,String> {
 	let mut field_name = String::new();
 	let mut output = String::new();
 	let mut cur_line = String::new();
@@ -293,12 +304,13 @@ fn format_output_template(template: &str, lines: Vec<Vec<(String,String)>>) {
 						if let Some(field) = result {
 							cur_line.push_str(field);
 						} else {
-							eprintln!("Did not find a field called '{field_name}' for output template");
-							eprintln!("Captured field names were:");
+							let mut e = String::new();
+							write!(e,"Did not find a field called '{field_name}' for output template").unwrap();
+							write!(e,"Captured field names were:").unwrap();
 							for (name,_) in line {
-								eprintln!("\t{name}");
+								write!(e,"\t{name}").unwrap();
 							}
-							return
+							return Err(e)
 						}
 					} else {
 						cur_line.extend(field_name.drain(..));
@@ -313,29 +325,23 @@ fn format_output_template(template: &str, lines: Vec<Vec<(String,String)>>) {
 		}
 		output.push('\n')
 	}
-	print!("{output}")
+	Ok(output)
 }
 
-fn execute(args: Argv, input: String) {
+fn execute(args: &Argv, input: String) -> Result<String,String> {
 
-	let delimiter = args.delimiter.unwrap_or("\t".into());
+	let delimiter = args.delimiter.as_deref().unwrap_or("\t");
 	let mut fields: Vec<(String,String)> = vec![];
 	let mut fmt_lines: Vec<Vec<(String,String)>> = vec![];
 
-	let mut vicut = match ViCut::new(&input, 0) {
-		Ok(v) => v,
-		Err(e) => {
-			eprintln!("vicut: {e}");
-			return;
-		}
-	};
+	let mut vicut = ViCut::new(&input, 0)?;
 
-	let mut spent_cmds: Vec<Cmd> = vec![];
+	let mut spent_cmds: Vec<&Cmd> = vec![];
 
 	let mut field_num = 0;
-	for cmd in args.cmds {
+	for cmd in &args.cmds {
 		exec_cmd(
-			&cmd,
+			cmd,
 			&mut vicut,
 			&mut field_num,
 			&mut spent_cmds,
@@ -357,11 +363,11 @@ fn execute(args: Argv, input: String) {
 	}
 
 	if args.json {
-		format_output_json(fmt_lines);
-	} else if let Some(template) = args.template {
-		format_output_template(&template, fmt_lines);
+		Ok(format_output_json(fmt_lines))
+	} else if let Some(template) = args.template.as_deref() {
+		format_output_template(template, fmt_lines)
 	} else {
-		format_output_standard(&delimiter, fmt_lines);
+		Ok(format_output_standard(delimiter, fmt_lines))
 	}
 }
 
@@ -377,7 +383,7 @@ fn exec_cmd(
 	cmd: &Cmd,
 	vicut: &mut ViCut,
 	field_num: &mut usize,
-	spent_cmds: &mut Vec<Cmd>,
+	spent_cmds: &mut Vec<&Cmd>,
 	fields: &mut Vec<(String,String)>,
 	fmt_lines: &mut Vec<Vec<(String,String)>>
 ) {
@@ -394,7 +400,7 @@ fn exec_cmd(
 				for r_cmd in pulled_cmds {
 					// We use recursion so that we can nest repeats easily
 					exec_cmd(
-						&r_cmd,
+						r_cmd,
 						vicut,
 						field_num,
 						spent_cmds,
@@ -449,6 +455,38 @@ fn exec_cmd(
 	}
 }
 
+fn execute_multi_thread(stream: Box<dyn BufRead>, args: &Argv) -> String {
+	let lines: Vec<_> = stream.lines().collect::<Result<_,_>>().unwrap_or_else(|e| {
+		eprintln!("vicut: {e}");
+		std::process::exit(1);
+	});
+
+	// Pair each line with its original index
+	let mut results: Vec<_> = lines
+		.into_par_iter()
+		.enumerate()
+		.map(|(i, line)| {
+			let output = execute(args, line);
+			(i, output)
+		})
+	.collect();
+	results.sort_by_key(|(i,_)| *i);
+	let lines = results.into_iter().map(|(_,result)| {
+		match result {
+			Ok(line) => line,
+			Err(e) => {
+				eprintln!("vicut: {e}");
+				std::process::exit(1)
+			}
+		}
+	}).collect::<Vec<_>>();
+	let mut output = String::new();
+	for line in lines {
+		write!(output,"{line}").unwrap();
+	}
+	output
+}
+
 fn main() {
 	if std::env::args().skip(1).count() == 0 {
 		eprintln!("USAGE:"); 
@@ -475,21 +513,52 @@ fn main() {
 
 	init_logger(args.trace);
 
-	let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
+	let mut stdout = io::stdout().lock();
 
 	if args.linewise {
-		for line in stream.lines() {
-			match line {
-				Ok(line) => {
-					execute(args.clone(),line)
-				}
-				Err(e) => {
-					eprintln!("vicut: {e}");
-					return;
+		if args.single_thread {
+			// We need to initialize stream in each branch, since Box<dyn BufReader> does not implement send/sync
+			// So using it in pool.install() doesn't work. We have to initialize it in the closure there.
+			let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
+			let mut output = String::new();
+			for result in stream.lines() {
+				match result {
+					Ok(line) => {
+						match execute(&args,line) {
+							Ok(new_line) => write!(output,"{new_line}").unwrap(),
+							Err(e) => {
+								eprintln!("vicut: {e}");
+								return;
+							}
+						}
+					}
+					Err(e) => {
+						eprintln!("vicut: {e}");
+						return;
+					}
 				}
 			}
+			write!(stdout, "{output}").unwrap()
+		} else if let Some(num) = args.max_jobs {
+			let pool = rayon::ThreadPoolBuilder::new()
+				.num_threads(num as usize)
+				.build()
+				.unwrap_or_else(|e| {
+					eprintln!("vicut: Failed to build thread pool: {e}");
+					std::process::exit(1)
+				});
+			let output = pool.install(|| {
+				let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
+				execute_multi_thread(stream, &args)
+			});
+			write!(stdout, "{output}").unwrap();
+		} else {
+			let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
+			let output = execute_multi_thread(stream, &args);
+			write!(stdout, "{output}").unwrap();
 		}
 	} else {
+		let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
 		let mut input = String::new();
 		match stream.read_to_string(&mut input) {
 			Ok(_) => {}
@@ -498,6 +567,9 @@ fn main() {
 				return;
 			}
 		}
-		execute(args,input);
+		match execute(&args,input) {
+			Ok(output) => write!(stdout,"{output}").unwrap(),
+			Err(e) => eprintln!("vicut: {e}"),
+		}
 	}
 }

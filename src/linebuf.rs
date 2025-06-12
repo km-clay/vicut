@@ -564,6 +564,15 @@ impl LineBuf {
 		self.buffer.insert(pos, ch);
 		self.update_graphemes();
 	}
+	pub fn set_buffer_lazy(&mut self, buffer: String) {
+		if buffer != self.buffer {
+			self.buffer = buffer;
+			// Here we set it to none
+			// The methods which access grapheme_indices will update it if it is None
+			// so this way, we only update it if we really need to
+			self.grapheme_indices = None;
+		}
+	}
 	pub fn set_buffer(&mut self, buffer: String) {
 		self.buffer = buffer;
 		self.update_graphemes();
@@ -1923,7 +1932,7 @@ impl LineBuf {
 			MotionCmd(count,Motion::Null) => MotionKind::Null
 		};
 
-		self.set_buffer(buffer);
+		self.set_buffer_lazy(buffer);
 		eval
 	}
 	pub fn apply_motion(&mut self, motion: MotionKind) {
@@ -1973,7 +1982,7 @@ impl LineBuf {
 		} else {
 			self.move_cursor(motion);
 		}
-		self.update_graphemes();
+		self.update_graphemes_lazy();
 		self.update_select_range();
 	}
 	pub fn update_select_range(&mut self) {
