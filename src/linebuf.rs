@@ -598,13 +598,16 @@ impl LineBuf {
 				.count()
 			}).unwrap_or(0)
 	}
-	pub fn is_sentence_punctuation(&mut self, pos: usize) -> bool {
-		if let Some(gr) = self.grapheme_at(pos) {
-			if PUNCTUATION.contains(&gr) && self.grapheme_after(pos).is_some() {
+	pub fn is_sentence_punctuation(&self, pos: usize) -> bool {
+		self.next_sentence_start_from_punctuation(pos).is_some()
+	}
+	pub fn next_sentence_start_from_punctuation(&self, pos: usize) -> Option<usize> {
+		if let Some(gr) = self.read_grapheme_at(pos) {
+			if PUNCTUATION.contains(&gr) && self.read_grapheme_after(pos).is_some() {
 				let mut fwd_indices = (pos + 1..self.cursor.max).peekable();
-				if self.grapheme_after(pos).is_some_and(|gr| [")","]","\"","'"].contains(&gr)) {
+				if self.read_grapheme_after(pos).is_some_and(|gr| [")","]","\"","'"].contains(&gr)) {
 					while let Some(idx) = fwd_indices.peek() {
-						if self.grapheme_after(*idx).is_some_and(|gr| [")","]","\"","'"].contains(&gr)) {
+						if self.read_grapheme_at(*idx).is_some_and(|gr| [")","]","\"","'"].contains(&gr)) {
 							fwd_indices.next();
 						} else {
 							break
@@ -612,15 +615,23 @@ impl LineBuf {
 					}
 				}
 				if let Some(idx) = fwd_indices.next() {
-					if let Some(gr) = self.grapheme_at(idx) {
+					if let Some(gr) = self.read_grapheme_at(idx) {
 						if is_whitespace(gr) {
-							return true
-						}
-					}
-				}
-			}
-		}
-		false
+							while let Some(idx) = fwd_indices.next() {
+								if let Some(gr) = self.read_grapheme_at(idx) {
+									if is_whitespace(gr) {
+										continue
+									} else {
+										return Some(idx)
+									} // Oh look, a slide
+								} // Weeee
+							} // eeee
+						} // eeee
+					} // eeee
+				} // eeee
+			} // eeee
+		} // eee.
+		None
 	}
 	pub fn is_sentence_start(&mut self, pos: usize) -> bool {
 		if self.grapheme_before(pos).is_some_and(is_whitespace) {
@@ -862,29 +873,18 @@ impl LineBuf {
 	pub fn text_obj_sentence(&mut self, start_pos: usize, count: usize, bound: Bound) -> Option<(usize, usize)> {
 		let mut start = None;
 		let mut end = None;
-		let mut fwd_indices = start_pos..self.cursor.max;
+		let mut fwd_indices = (start_pos..self.cursor.max).peekable();
 		while let Some(idx) = fwd_indices.next() {
-			let Some(gr) = self.grapheme_at(idx) else {
-				end = Some(self.cursor.max);
-				break
-			};
-			if PUNCTUATION.contains(&gr) && self.is_sentence_punctuation(idx) {
+			if self.grapheme_at(idx).is_none() { break }
+
+			if let Some(next_sentence_start) = self.next_sentence_start_from_punctuation(idx) {
 				match bound {
 					Bound::Inside => {
 						end = Some(idx);
 						break
 					}
 					Bound::Around => {
-						let mut end_pos = idx;
-						while let Some(idx) = fwd_indices.next() {
-							if !self.grapheme_at(idx).is_some_and(is_whitespace) {
-								end_pos += 1;
-								break
-							} else {
-								end_pos += 1;
-							}
-						}
-						end = Some(end_pos);
+						end = Some(next_sentence_start);
 						break
 					}
 				}

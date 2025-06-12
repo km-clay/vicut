@@ -13,6 +13,8 @@ pub mod linebuf;
 pub mod keys;
 pub mod register;
 pub mod reader;
+#[cfg(test)]
+pub mod tests;
 
 pub type Name = String;
 

@@ -1,0 +1,103 @@
+---
+source: src/tests/modes.rs
+expression: cmds
+---
+[
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                Delete,
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                2,
+                WordMotion(
+                    Start,
+                    Normal,
+                    Forward,
+                ),
+            ),
+        ),
+        raw_seq: "d2w",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                Rot13,
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                5,
+                WordMotion(
+                    Start,
+                    Normal,
+                    Backward,
+                ),
+            ),
+        ),
+        raw_seq: "g?5b",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                2,
+                Put(
+                    Before,
+                ),
+            ),
+        ),
+        motion: None,
+        raw_seq: "2P",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                Delete,
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                5,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "5x",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+]
