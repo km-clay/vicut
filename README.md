@@ -108,7 +108,12 @@ install -Dm755 target/release/vicut ~/.local/bin # or wherever
 
 Here's a one liner for all of that:
 ```bash
-(git clone https://github.com/km-clay/vicut && cd vicut && cargo build --release && mkdir -p ~/.local/bin && install -Dm755 target/release/vicut ~/.local/bin && echo "Installed the binary to ~/.local/bin, make sure that is in your \$PATH")
+(git clone https://github.com/km-clay/vicut && \
+ cd vicut && \
+ cargo build --release && \
+ mkdir -p ~/.local/bin && \
+ install -Dm755 target/release/vicut ~/.local/bin && \
+ echo -e "\nInstalled the binary to ~/.local/bin, make sure that is in your \$PATH")
 ```
 
 ## Notes
