@@ -27,6 +27,44 @@ Output can be structured in three different ways using these options:
 * `-d`/`--delimiter <STR>` lets you give a field separator as an argument to the flag. The separator is placed inbetween each field in each record.
 * `-t`/`--template <STR>` lets you define a custom output format using a format string. Fields are interpolated on placeholders that look like `{{1}}` or `{{field_name}}`.
 
+## 🏎️ Performance
+`vicut`'s `--linewise` mode enables true parallel processing by treating each line as an independent buffer. This allows vicut to scale across CPU cores, giving it a serious performance edge over traditional tools like `sed` and `awk`— even while executing more semantically rich operations like Vim motions.
+
+On structured input, `vicut` is measurably faster than `sed` and `awk` on datasets up to 1 million lines.  
+Here's a benchmark using a generated data set that looks like this:
+```
+00001) Provider-1 (City-1, State-49) [924.05 km]
+00002) Provider-2 (City-2, State-48) [593.91 km]
+00003) Provider-3 (City-3, State-47) [306.39 km]
+00004) Provider-4 (City-4, State-46) [578.94 km]
+00005) Provider-5 (City-5, State-45) [740.13 km]
+...
+```
+### 25,000 lines
+| Tool    | Command                                                                                | Wall-Clock Time | 
+| ------- | -------------------------------------------------------------------------------------- | --------------- | 
+| `sed`   | `sed -E -e 's/\[]\[]//g' -e 's/\\) \\(\\)/ ---- /g'`                                   | 0.024s          |
+| `awk`   | `awk -F'[()]' '{ gsub(/\[\|\]/, "", $4); print $1, "---", $2, "---", $3, "---", $4 }'` | 0.017s          |
+| `vicut` | `vicut --linewise --delimiter ' --- ' -c 'e' -m '2w' -c 't(h' -c 'vi)' -c 'vi]'`       | 0.014s          |
+
+
+### 100,000 lines
+| Tool    | Command                                                                                | Wall-Clock Time |
+| ------- | -------------------------------------------------------------------------------------- | --------------- |
+| `sed`   | `sed -E -e 's/\[]\[]//g' -e 's/\\) \\(\\)/ ---- /g'`                                   | 0.083s          |
+| `awk`   | `awk -F'[()]' '{ gsub(/\[\|\]/, "", $4); print $1, "---", $2, "---", $3, "---", $4 }'` | 0.066s          |
+| `vicut` | `vicut --linewise --delimiter ' --- ' -c 'e' -m '2w' -c 't(h' -c 'vi)' -c 'vi]'`       | 0.051s          |
+
+### 1,000,000 lines
+| Tool    | Command                                                                                | Wall-Clock Time |
+| ------- | -------------------------------------------------------------------------------------- | --------------- |
+| `sed`   | `sed -E -e 's/\[]\[]//g' -e 's/\\) \\(\\)/ ---- /g'`                                   | 0.733s          |
+| `awk`   | `awk -F'[()]' '{ gsub(/\[\|\]/, "", $4); print $1, "---", $2, "---", $3, "---", $4 }'` | 0.512s          |
+| `vicut` | `vicut --linewise --delimiter ' --- ' -c 'e' -m '2w' -c 't(h' -c 'vi)' -c 'vi]'`       | 0.478s          |
+
+*Benchmark recorded using an AMD Ryzen 7 9700X (8-Core) running Arch Linux*  
+  
+This data shows that vicut's multi-threaded linewise model allows it to outperform traditional Unix text processors in batch text processing contexts — while offering very readable, concise syntax.
 ## ⚙️ Usage
 
 For in-depth usage info, and some examples/comparisons with other tools, you can check out the [wiki](https://github.com/km-clay/vicut/wiki)
@@ -89,42 +127,6 @@ EXAMPLE:
         outputs:
         foo -- bar -- (boo far) -- [bar foo]
 ```
-
-## 🧪 Performance
-While `vicut` is not yet fully optimized, early comparisons show that its performance is competitive given its more stateful execution model. 
-Operating on a sample dataset of lines that look like this:
-```
-00001) Provider-1 (City-1, State-49) [924.05 km]
-00002) Provider-2 (City-2, State-48) [593.91 km]
-00003) Provider-3 (City-3, State-47) [306.39 km]
-00004) Provider-4 (City-4, State-46) [578.94 km]
-00005) Provider-5 (City-5, State-45) [740.13 km]
-...
-```
-### 25,000 lines
-| Tool    | Command                                                                                | Time (real) |
-| ------- | -------------------------------------------------------------------------------------- | ----------- |
-| `sed`   | `sed -E -e 's/\[]\[]//g' -e 's/\\) \\(\\)/ ---- /g'`                                   | 0.045s      |
-| `awk`   | `awk -F'[()]' '{ gsub(/\[\|\]/, "", $4); print $1, "---", $2, "---", $3, "---", $4 }'` | 0.040s      |
-| `vicut` | `vicut --linewise --delimiter ' --- ' -c 'e' -m '2w' -c 't(h' -c 'vi)' -c 'vi]'`       | 0.128s      |
-
-
-### 100,000 lines
-| Tool    | Command                                                                                | Time (real) |
-| ------- | -------------------------------------------------------------------------------------- | ----------- |
-| `sed`   | `sed -E -e 's/\[]\[]//g' -e 's/\\) \\(\\)/ ---- /g'`                                   | 0.164s      |
-| `awk`   | `awk -F'[()]' '{ gsub(/\[\|\]/, "", $4); print $1, "---", $2, "---", $3, "---", $4 }'` | 0.148s      |
-| `vicut` | `vicut --linewise --delimiter ' --- ' -c 'e' -m '2w' -c 't(h' -c 'vi)' -c 'vi]'`       | 0.383s      |
-
-### 1,000,000 lines
-| Tool    | Command                                                                                | Time (real) |
-| ------- | -------------------------------------------------------------------------------------- | ----------- |
-| `sed`   | `sed -E -e 's/\[]\[]//g' -e 's/\\) \\(\\)/ ---- /g'`                                   | 0.891s      |
-| `awk`   | `awk -F'[()]' '{ gsub(/\[\|\]/, "", $4); print $1, "---", $2, "---", $3, "---", $4 }'` | 0.546s      |
-| `vicut` | `vicut --linewise --delimiter ' --- ' -c 'e' -m '2w' -c 't(h' -c 'vi)' -c 'vi]'`       | 3.361s      |
-
-This data suggests that while the performance of `vicut` *is* roughly 3x slower in its current state, performance scales linearly and predictably with input size.  
-Given that `vicut` performs more semantically aware, stateful operations compared to stateless regex pattern matching, a performance cost is to be expected, but current profiling does show room for significant optimizations.
 
 ## 📦 Installation
 
