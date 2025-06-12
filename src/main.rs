@@ -1,13 +1,13 @@
-#![allow(clippy::while_let_on_iterator)]
+#![allow(clippy::unnecessary_to_owned,clippy::while_let_on_iterator)]
 use std::{fmt::Write,io::{self, Write as IoWrite, BufRead}};
 
 
 use exec::ViCut;
-use log::{debug, error, info, trace, warn};
+use log::trace;
 use serde_json::{Map, Value};
 
 pub mod vicmd;
-pub mod vimode;
+pub mod modes;
 pub mod exec;
 pub mod linebuf;
 pub mod keys;

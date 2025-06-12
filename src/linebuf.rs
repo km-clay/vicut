@@ -1,4 +1,4 @@
-use std::{fmt::Display, ops::{Range, RangeInclusive}};
+use std::ops::{Range, RangeInclusive};
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;

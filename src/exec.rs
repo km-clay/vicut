@@ -1,12 +1,11 @@
-use log::{debug, trace};
+use log::trace;
 
 use crate::linebuf::{ordered, ClampedUsize};
 use crate::reader::{KeyReader, RawReader};
 
-use super::keys::{KeyCode, KeyEvent, ModKeys};
 use super::linebuf::{LineBuf, SelectAnchor, SelectMode};
-use super::vicmd::{CmdFlags, Motion, MotionCmd, RegisterName, To, Verb, VerbCmd, ViCmd};
-use super::vimode::{CmdReplay, ModeReport, ViInsert, ViMode, ViNormal, ViReplace, ViVisual};
+use super::vicmd::{CmdFlags, Motion, MotionCmd, RegisterName, Verb, VerbCmd, ViCmd};
+use super::modes::{CmdReplay, ModeReport, insert::ViInsert, ViMode, normal::ViNormal, replace::ViReplace, visual::ViVisual};
 
 pub struct ViCut {
 	pub reader: RawReader,
