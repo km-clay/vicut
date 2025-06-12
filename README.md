@@ -10,7 +10,7 @@ And while `awk` is powerful, it quickly becomes verbose when dealing with anythi
 
 I wanted a tool that makes field extraction and output formatting intuitive and precise, even with messy or irregular input.
 
-## Overview
+## 🧰 Overview
 `vicut` is a tool meant to be used in pipelines. Internally, it uses a stateful text editing engine based on Vim. It reads data from stdin, and then uses the command flags given by the user to operate on the text and extract fields. Fields are extracted based on cursor movements. There are four command flags. 
 
 * `-c`/`--cut <CMD>` executes a Vim command, and returns the span covered by the cursor's motion as a field. 
@@ -27,7 +27,7 @@ Output can be structured in three different ways using these options:
 * `-d`/`--delimiter <STR>` lets you give a field separator as an argument to the flag. The separator is placed inbetween each field in each record.
 * `-t`/`--template <STR>` lets you define a custom output format using a format string. Fields are interpolated on placeholders that look like `{{1}}` or `{{field_name}}`.
 
-## Usage
+## ⚙️ Usage
 
 For in-depth usage info, and some examples/comparisons with other tools, you can check out the [wiki](https://github.com/km-clay/vicut/wiki)
 
@@ -90,7 +90,7 @@ EXAMPLE:
         foo -- bar -- (boo far) -- [bar foo]
 ```
 
-## Performance
+## 🧪 Performance
 While `vicut` is not yet fully optimized, early comparisons show that its performance is competitive given its more stateful execution model. 
 Operating on a sample dataset of lines that look like this:
 ```
@@ -126,7 +126,7 @@ Operating on a sample dataset of lines that look like this:
 This data suggests that while the performance of `vicut` *is* roughly 3x slower in its current state, performance scales linearly and predictably with input size.  
 Given that `vicut` performs more semantically aware, stateful operations compared to stateless regex pattern matching, a performance cost is to be expected, but current profiling does show room for significant optimizations.
 
-## Installation
+## 📦 Installation
 
 **NOTE:** You will need to have `cargo` installed in order to build `vicut`
 
@@ -154,6 +154,6 @@ Here's a one liner for all of that:
  echo -e "\nInstalled the binary to ~/.local/bin, make sure that is in your \$PATH")
 ```
 
-## Notes
+## 📝 Notes
 
 `vicut` is experimental and still in early development. The core functionality is stable (probably) and usable, but many of Vim's more obscure motions and operators are not yet supported. The logic for executing the Vim commands is entirely home-grown, so there may be some small inconsistencies between Vim and vicut. The internal editor logic is adapted from the line editor I wrote for [`fern`](https://github.com/km-clay/fern), so some remnants of that may still appear in the codebase. Any and all contributions are welcome.
