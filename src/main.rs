@@ -27,6 +27,7 @@ enum Cmd {
 #[derive(Default,Clone,Debug)]
 struct Argv {
 	delimiter: Option<String>,
+	template: Option<String>,
 
 	json: bool,
 	trace: bool,
@@ -58,12 +59,21 @@ impl Argv {
 				"--keep-mode" => {
 					new.keep_mode = true;
 				}
-				"--delimiter" | "-d" => {
-					let Some(arg) = args.next() else { continue };
-					if arg.starts_with('-') {
-						return Err(format!("Expected a delimiter after '-d', found {arg}"))
+				"--template" | "-t" => {
+					let Some(next_arg) = args.next() else { 
+						return Err(format!("Expected a format string after '{arg}'"))
+					};
+					if next_arg.starts_with('-') {
+						return Err(format!("Expected a format string after '{arg}', found {next_arg}"))
 					}
-					new.delimiter = Some(arg)
+					new.template = Some(next_arg)
+				}
+				"--delimiter" | "-d" => {
+					let Some(next_arg) = args.next() else { continue };
+					if next_arg.starts_with('-') {
+						return Err(format!("Expected a delimiter after '{arg}', found {next_arg}"))
+					}
+					new.delimiter = Some(next_arg)
 				}
 				"-n" | "--next" => new.cmds.push(Cmd::BreakGroup),
 				"-r" | "--repeat" => {
@@ -71,12 +81,12 @@ impl Argv {
 						.next()
 						.unwrap_or("1".into())
 						.parse::<usize>()
-						.map_err(|_| "Expected a number after '-r'".to_string())?;
+						.map_err(|_| format!("Expected a number after '{arg}'"))?;
 					let repeat_count = args
 						.next()
 						.unwrap_or("1".into())
 						.parse::<usize>()
-						.map_err(|_| "Expected a number after '-r'".to_string())?;
+						.map_err(|_| format!("Expected a number after '{arg}'"))?;
 
 					new.cmds.push(Cmd::Repeat(cmd_count, repeat_count));
 				}
@@ -122,7 +132,12 @@ fn print_help() {
 	writeln!(help).unwrap();
 	writeln!(help).unwrap();
 	writeln!(help, "\x1b[1;4mOPTIONS:\x1b[0m").unwrap();
-	writeln!(help, "\t--delimiter <STR>").unwrap();
+	writeln!(help, "\t-t, --template <STR>").unwrap();
+	writeln!(help, "\t\tProvide a format template to use for custom output formats. Example:").unwrap();
+	writeln!(help, "\t\t--template \"< {{{{1}}}} > ( {{{{2}}}} ) {{ {{{{3}}}} }}\"").unwrap();
+	writeln!(help, "\t\tNames given to fields explicitly using '-c name=<name>' should be used instead of field numbers.").unwrap();
+	writeln!(help).unwrap();
+	writeln!(help, "\t-d, --delimiter <STR>").unwrap();
 	writeln!(help, "\t\tProvide a delimiter to place between fields in the output. No effect when used with --json.").unwrap();
 	writeln!(help).unwrap();
 	writeln!(help, "\t--keep-mode").unwrap();
@@ -234,6 +249,59 @@ fn format_output_standard(delimiter: &str, lines: Vec<Vec<(String,String)>>) {
 	print!("{lines}");
 }
 
+fn format_output_template(template: &str, lines: Vec<Vec<(String,String)>>) {
+	let mut field_name = String::new();
+	let mut output = String::new();
+	let mut cur_line = String::new();
+	for line in lines {
+		let mut chars = template.chars().peekable();
+		while let Some(ch) = chars.next() {
+			match ch {
+				'\\' => {
+					if let Some(esc_ch) = chars.next() {
+						cur_line.push(esc_ch)
+					}
+				}
+				'{' if chars.peek() == Some(&'{') => {
+					chars.next();
+					let mut closed = false;
+					while let Some(ch) = chars.next() {
+						match ch {
+							'\\' => {
+								if let Some(esc_ch) = chars.next() {
+									field_name.push(esc_ch)
+								}
+							}
+							'}' if chars.peek() == Some(&'}') => {
+								chars.next();
+								closed = true;
+								break
+							}
+							_ => field_name.push(ch)
+						}
+					}
+					if closed {
+						let result = line.iter().find(|(name,_)| name == &field_name).map(|(_,field)| field);
+						if let Some(field) = result {
+							cur_line.push_str(field);
+						} else {
+							eprintln!("Did not find a field called '{field_name}' for output template");
+							return
+						}
+					} else {
+						cur_line.extend(field_name.drain(..));
+					}
+					field_name.clear();
+				}
+				_ => cur_line.push(ch)
+			}
+		}
+		output.push_str(&std::mem::take(&mut cur_line));
+		output.push('\n')
+	}
+	print!("{output}")
+}
+
 fn execute(args: Argv, input: String) {
 
 	let delimiter = args.delimiter.unwrap_or("\t".into());
@@ -276,6 +344,8 @@ fn execute(args: Argv, input: String) {
 
 	if args.json {
 		format_output_json(fmt_lines);
+	} else if let Some(template) = args.template {
+		format_output_template(&template, fmt_lines);
 	} else {
 		format_output_standard(&delimiter, fmt_lines);
 	}
@@ -325,7 +395,7 @@ fn exec_cmd(
 			*field_num += 1;
 			match vicut.read_field(motion) {
 				Ok(field) => {
-					let name = format!("field_{field_num}");
+					let name = format!("{field_num}");
 					fields.push((name,field))
 				}
 				Err(e) => {

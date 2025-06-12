@@ -1653,8 +1653,8 @@ impl LineBuf {
 			MotionCmd(count,Motion::LineDownCharwise) |
 			MotionCmd(count,Motion::LineUpCharwise) => {
 				let Some((start,end)) = (match motion.1 {
-					Motion::LineUpCharwise => self.nth_prev_line(1),
-					Motion::LineDownCharwise => self.nth_next_line(1),
+					Motion::LineUpCharwise => self.nth_prev_line(count),
+					Motion::LineDownCharwise => self.nth_next_line(count),
 					_ => unreachable!()
 				}) else {
 					return MotionKind::Null

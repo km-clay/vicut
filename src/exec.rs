@@ -30,7 +30,6 @@ impl ViCut {
 
 	pub fn read_field(&mut self, cmd: &str) -> Result<String,String> {
 		self.load_input(cmd);
-		self.mode = Box::new(ViNormal::new());
 		let (mut start,mut end) = (self.editor.cursor.get(), self.editor.cursor.get());
 		if self.mode.clamp_cursor() {
 			end = self.editor.cursor.ret_add(1);
@@ -65,7 +64,7 @@ impl ViCut {
 		let slice = if let Some((start,mut end)) = self.editor.select_range() {
 			// We are in visual mode if we've made it here
 			// So we are going to use the editor's selected range
-			if self.editor.select_mode == Some(SelectMode::Char(SelectAnchor::End)) {
+			if matches!(self.editor.select_mode,Some(SelectMode::Char(_))) {
 				end += 1; // Include the cursor's character
 			}
 			let slice = self.editor
