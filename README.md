@@ -35,11 +35,11 @@ Output can be structured in three different ways using these options:
 On structured input, execution speed of `vicut` is comparable to or faster than `sed` and `awk` on datasets up to 1 million lines.  
 Here's a benchmark using a generated data set that looks like this:
 ```
-00001) Provider-1 (City-1, State-49) [924.05 km]
-00002) Provider-2 (City-2, State-48) [593.91 km]
-00003) Provider-3 (City-3, State-47) [306.39 km]
-00004) Provider-4 (City-4, State-46) [578.94 km]
-00005) Provider-5 (City-5, State-45) [740.13 km]
+00001) Provider-1 (City-1, State-1) [924.05 km]
+00002) Provider-2 (City-2, State-2) [593.91 km]
+00003) Provider-3 (City-3, State-3) [306.39 km]
+00004) Provider-4 (City-4, State-4) [578.94 km]
+00005) Provider-5 (City-5, State-5) [740.13 km]
 ...
 ```
 With the target output being:
