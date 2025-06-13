@@ -73,7 +73,7 @@ With the target output being:
 
 *Benchmark recorded using an AMD Ryzen 7 9700X (8-Core) running Arch Linux*  
   
-This data shows that vicut's multi-threaded linewise model allows it to match or even exceed the speed of traditional Unix text processors in batch text processing contexts — while offering very readable, concise syntax.
+This data shows that vicut's multi-threaded linewise model allows it to match or even surpass the speed of traditional Unix text processors in batch text processing contexts — while offering very readable, concise syntax.
 ## ⚙️ Usage
 
 For in-depth usage info, and some examples/comparisons with other tools, you can check out the [wiki](https://github.com/km-clay/vicut/wiki)
