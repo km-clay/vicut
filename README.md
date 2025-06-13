@@ -110,7 +110,8 @@ COMMANDS:
                 Execute a Vim command on the buffer, and capture the text between the cursor's
                 start and end positions as a field.
                 Fields can be optionally given a name, which will be used as the key
-                for that field in formatted JSON output.
+                for that field in formatted JSON output, or used to map fields to placeholders
+                if using --template
 
         -m, --move <VIM_COMMAND>
                 Logically identical to -c/--cut, except it does not capture a field.
