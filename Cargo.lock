@@ -409,6 +409,7 @@ dependencies = [
  "log",
  "pretty_assertions",
  "rayon",
+ "regex",
  "serde",
  "serde_json",
  "unicode-segmentation",

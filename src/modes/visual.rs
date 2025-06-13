@@ -436,6 +436,35 @@ impl ViVisual {
 				'(' => break 'motion_parse Some(MotionCmd(count, Motion::TextObj(TextObj::Sentence(Direction::Backward)))),
 				'}' => break 'motion_parse Some(MotionCmd(count, Motion::TextObj(TextObj::Paragraph(Direction::Forward)))),
 				'{' => break 'motion_parse Some(MotionCmd(count, Motion::TextObj(TextObj::Paragraph(Direction::Backward)))),
+				'/' | '?' => {
+					// Pattern search
+					// FIXME: This is fine for now, but allocating a new string on every parse attempt is cringe.
+					let mut pattern = String::new(); 
+					loop {
+						let Some(ch) = chars.next() else {
+							break 'motion_parse None
+						};
+						match ch {
+							'\\' => {
+								pattern.push(ch);
+								if let Some(escaped) = chars.next() {
+									pattern.push(escaped)
+								}
+								continue
+							}
+							'\r' => {
+								break 
+							}
+							_ => pattern.push(ch),
+						}
+					}
+
+					match ch {
+						'/' => break 'motion_parse Some(MotionCmd(count, Motion::PatternSearch(pattern))),
+						'?' => break 'motion_parse Some(MotionCmd(count, Motion::PatternSearchRev(pattern))),
+						_ => unreachable!()
+					}
+				}
 				ch if ch == 'i' || ch == 'a' => {
 					let bound = match ch {
 						'i' => Bound::Inside,

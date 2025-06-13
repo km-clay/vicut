@@ -201,6 +201,7 @@ pub enum Verb {
 	Redo,
 	RepeatLast,
 	Put(Anchor),
+	PatternReplace(String),
 	ReplaceMode,
 	InsertMode,
 	InsertModeLineBreak(Anchor),
@@ -284,6 +285,10 @@ pub enum Motion {
 	EndOfLine,
 	WordMotion(To,Word,Direction),
 	CharSearch(Direction,Dest,char),
+	PatternSearch(String),
+	PatternSearchRev(String),
+	NextMatch,
+	PrevMatch,
 	BackwardChar,
 	ForwardChar,
 	BackwardCharForced, // These two variants can cross line boundaries

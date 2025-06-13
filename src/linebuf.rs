@@ -1,5 +1,7 @@
 use std::ops::{Range, RangeInclusive};
 
+use log::debug;
+use regex::Regex;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -137,20 +139,20 @@ impl SelectMode {
 	pub fn anchor(&self) -> &SelectAnchor {
 		match self {
 			SelectMode::Char(anchor) |
-			SelectMode::Line(anchor) |
-			SelectMode::Block(anchor) => anchor
+				SelectMode::Line(anchor) |
+				SelectMode::Block(anchor) => anchor
 		}
 	}
 	pub fn invert_anchor(&mut self) {
 		match self {
 			SelectMode::Char(anchor) |
-			SelectMode::Line(anchor) |
-			SelectMode::Block(anchor) => {
-				*anchor = match anchor {
-					SelectAnchor::Start => SelectAnchor::End,
-					SelectAnchor::End => SelectAnchor::Start
+				SelectMode::Line(anchor) |
+				SelectMode::Block(anchor) => {
+					*anchor = match anchor {
+						SelectAnchor::Start => SelectAnchor::End,
+						SelectAnchor::End => SelectAnchor::Start
+					}
 				}
-			}
 		}
 	}
 }
@@ -241,7 +243,7 @@ impl Edit {
 	}
 	pub fn is_empty(&self) -> bool {
 		self.new.is_empty() &&
-		self.old.is_empty()
+			self.old.is_empty()
 	}
 }
 
@@ -334,13 +336,14 @@ impl ClampedUsize {
 #[derive(Default,Debug)]
 pub struct LineBuf {
 	pub buffer: String,
-	pub hint: Option<String>,
 	pub grapheme_indices: Option<Vec<usize>>, // Used to slice the buffer
 	pub cursor: ClampedUsize, // Used to index grapheme_indices
 
 	pub select_mode: Option<SelectMode>,
 	pub select_range: Option<(usize,usize)>,
 	pub last_selection: Option<(usize,usize)>,
+
+	pub last_pattern_search: Option<Regex>,
 
 	pub insert_mode_start_pos: Option<usize>,
 	pub saved_col: Option<usize>,
@@ -354,6 +357,8 @@ impl LineBuf {
 		Self::default()
 	}
 	/// Only update self.grapheme_indices if it is None
+	///
+	/// self.grapheme_indices is set to None when it is invalidated by changes to the buffer.
 	pub fn update_graphemes_lazy(&mut self) {
 		if self.grapheme_indices.is_none() {
 			self.update_graphemes();
@@ -368,38 +373,17 @@ impl LineBuf {
 	pub fn take_buf(&mut self) -> String {
 		std::mem::take(&mut self.buffer)
 	}
-	pub fn has_hint(&self) -> bool {
-		self.hint.is_some()
-	}
-	pub fn hint(&self) -> Option<&String> {
-		self.hint.as_ref()
-	}
-	pub fn set_hint(&mut self, hint: Option<String>) {
-		if let Some(hint) = hint {
-			let hint = hint.strip_prefix(&self.buffer).unwrap(); // If this ever panics, I will eat my hat
-			if !hint.is_empty() {
-				self.hint = Some(hint.to_string())
-			}
-		} else {
-			self.hint = None
-		}
-	}
-	pub fn accept_hint(&mut self) {
-		let Some(hint) = self.hint.take() else { return };
-
-		let old = self.buffer.clone();
-		let cursor_pos = self.cursor.get();
-		self.push_str(&hint);
-		let new = self.as_str();
-		let edit = Edit::diff(&old, new, cursor_pos);
-		self.undo_stack.push(edit);
-		self.cursor.add(hint.len());
-	}
 	pub fn set_cursor_clamp(&mut self, yn: bool) {
 		self.cursor.exclusive = yn;
 	}
+	pub fn read_cursor_byte_pos(&self) -> usize {
+		self.read_idx_byte_pos(self.cursor.get())
+	}
 	pub fn cursor_byte_pos(&mut self) -> usize {
 		self.index_byte_pos(self.cursor.get())
+	}
+	pub fn find_index_for_byte_pos(&self, index: usize) -> Option<usize> {
+		self.grapheme_indices().iter().find(|idx| **idx == index).copied()
 	}
 	pub fn index_byte_pos(&mut self, index: usize) -> usize {
 		self.update_graphemes_lazy();
@@ -415,7 +399,9 @@ impl LineBuf {
 			.unwrap_or(self.buffer.len())
 	}
 	/// Update self.grapheme_indices with the indices of the current buffer
-	#[track_caller]
+	///
+	/// Be careful with this. Code paths with any amount of regular traffic should use update_graphemes_lazy instead
+	/// Slicing the buffer with grapheme_indices(true) is surprisingly expensive
 	pub fn update_graphemes(&mut self) {
 		let indices: Vec<_> = self.buffer
 			.grapheme_indices(true)
@@ -634,8 +620,8 @@ impl LineBuf {
 		self.slice_to_cursor()
 			.map(|slice| {
 				slice.chars()
-				.filter(|ch| *ch == '\n')
-				.count()
+					.filter(|ch| *ch == '\n')
+					.count()
 			}).unwrap_or(0)
 	}
 	pub fn is_sentence_punctuation(&self, pos: usize) -> bool {
@@ -745,7 +731,7 @@ impl LineBuf {
 		let target_line = self.cursor_line_number() + n;
 		let start = self.start_of_line();
 		let (_,end) = self.line_bounds(target_line);
-		
+
 		Some((start,end))
 	}
 	pub fn line_bounds(&mut self, n: usize) -> (usize,usize) {
@@ -849,18 +835,18 @@ impl LineBuf {
 
 			// Quoted blocks
 			TextObj::DoubleQuote(bound) |
-			TextObj::SingleQuote(bound) |
-			TextObj::BacktickQuote(bound) => self.text_obj_quote(count, text_obj, bound),
+				TextObj::SingleQuote(bound) |
+				TextObj::BacktickQuote(bound) => self.text_obj_quote(count, text_obj, bound),
 
-			// Delimited blocks
-			TextObj::Paren(bound) |
-			TextObj::Bracket(bound) |
-			TextObj::Brace(bound) |
-			TextObj::Angle(bound) => self.text_obj_delim(count, text_obj, bound),
+				// Delimited blocks
+				TextObj::Paren(bound) |
+					TextObj::Bracket(bound) |
+					TextObj::Brace(bound) |
+					TextObj::Angle(bound) => self.text_obj_delim(count, text_obj, bound),
 
-			// Other stuff
-			TextObj::Tag(bound) => todo!(),
-			TextObj::Custom(_) => todo!(),
+					// Other stuff
+				TextObj::Tag(bound) => todo!(),
+				TextObj::Custom(_) => todo!(),
 		}
 	} 
 	pub fn text_obj_word(&mut self, count: usize, bound: Bound, word: Word) -> Option<(usize,usize)> {
@@ -1158,14 +1144,14 @@ impl LineBuf {
 		let idx = fwd_indices.find(|idx| self.grapheme_at(*idx).is_some_and(|gr| delims.contains(&gr)))?;
 		let search_direction = match self.grapheme_at(idx)? {
 			"[" |
-			"{" |
-			"(" |
-			"<" => Direction::Forward,
-			"]" |
-			"}" |
-			")" |
-			">" => Direction::Backward,
-			_ => unreachable!()
+				"{" |
+				"(" |
+				"<" => Direction::Forward,
+				"]" |
+					"}" |
+					")" |
+					">" => Direction::Backward,
+				_ => unreachable!()
 		};
 		let target_delim = match self.grapheme_at(idx)? {
 			"[" => "]",
@@ -1255,6 +1241,7 @@ impl LineBuf {
 		// Not sorry for these method names btw
 		let mut pos = ClampedUsize::new(self.cursor.get(), self.cursor.max, false);
 		for i in 0..count {
+			debug!("{pos:?}");
 			// We alter 'include_last_char' to only be true on the last iteration
 			// Therefore, '5cw' will find the correct range for the first four and stop on the end of the fifth word
 			let include_last_char_and_is_last_word = include_last_char && i == count.saturating_sub(1);
@@ -1292,6 +1279,7 @@ impl LineBuf {
 				}
 			});
 		}
+		debug!("{pos:?}");
 		pos.get()
 	}
 	pub fn start_of_word_forward(&mut self, mut pos: usize, word: Word, include_last_char: bool) -> usize {
@@ -1473,12 +1461,18 @@ impl LineBuf {
 	}
 	pub fn end_of_word_forward(&mut self, mut pos: usize, word: Word) -> usize {
 		let default = self.cursor.max;
-		let mut fwd_indices = (pos..default).peekable();
+		if pos >= default {
+			return default
+		}
+		let mut fwd_indices = (pos + 1..default).peekable();
 
 		match word {
 			Word::Big => {
+				let Some(cur_char) = self.grapheme_at(pos).map(|c| c.to_string()) else { return default };
 				let Some(next_idx) = fwd_indices.peek() else { return default };
-				let on_boundary = self.grapheme_at(*next_idx).is_none_or(is_whitespace);
+				let on_boundary = !is_whitespace(&cur_char) && self.grapheme_at(*next_idx).is_none_or(is_whitespace);
+				debug!("on boundary: {on_boundary}");
+				debug!("{:?}",self.grapheme_at(*next_idx));
 				if on_boundary {
 					let Some(idx) = fwd_indices.next() else { return default };
 					pos = idx;
@@ -1497,10 +1491,10 @@ impl LineBuf {
 				}
 
 				// The position of the next whitespace will tell us where the end (or start) of the word is
-					let Some(next_ws_pos) = fwd_indices.find(|i| self.grapheme_at(*i).is_some_and(is_whitespace)) else {
-						return default
-					};
-					pos = next_ws_pos;
+				let Some(next_ws_pos) = fwd_indices.find(|i| self.grapheme_at(*i).is_some_and(is_whitespace)) else {
+					return default
+				};
+				pos = next_ws_pos;
 
 				if pos == self.grapheme_indices().len() {
 					// We reached the end of the buffer
@@ -1518,6 +1512,7 @@ impl LineBuf {
 					let next_idx = fwd_indices.next().unwrap();
 					pos = next_idx
 				}
+				debug!("on boundary: {on_boundary}");
 
 				// Check current grapheme
 				let Some(cur_char) = self.grapheme_at(pos).map(|c| c.to_string()) else {
@@ -1579,10 +1574,10 @@ impl LineBuf {
 				}
 
 				// The position of the next whitespace will tell us where the end (or start) of the word is
-					let Some(next_ws_pos) = indices_iter.find(|i| self.grapheme_at(*i).is_some_and(is_whitespace)) else {
-						return default
-					};
-					pos = next_ws_pos;
+				let Some(next_ws_pos) = indices_iter.find(|i| self.grapheme_at(*i).is_some_and(is_whitespace)) else {
+					return default
+				};
+				pos = next_ws_pos;
 
 				if pos == self.grapheme_indices().len() {
 					// We reached the end of the buffer
@@ -1704,13 +1699,7 @@ impl LineBuf {
 		self.buffer.replace_range(start..end, new);
 	}
 	pub fn eval_motion(&mut self, verb: Option<&Verb>, motion: MotionCmd) -> MotionKind {
-		let buffer = self.buffer.clone();
-		if self.has_hint() {
-			let hint = self.hint.clone().unwrap();
-			self.push_str(&hint);
-		}
-
-		let eval = match motion {
+		match motion {
 			MotionCmd(count,Motion::WholeLine) => {
 				let Some((start,end)) = (if count == 1 {
 					Some(self.this_line())
@@ -1863,25 +1852,27 @@ impl LineBuf {
 				};
 				MotionKind::On(last)
 			}
-			MotionCmd(_,Motion::BeginningOfFirstWord) => {
-				let start = self.start_of_line();
-				let mut indices = start..self.cursor.max;
-				let mut first_graphical = None;
-				while let Some(idx) = indices.next() {
-					let grapheme = self.grapheme_at(idx).unwrap();
-					if !is_whitespace(grapheme) {
-						first_graphical = Some(idx);
-						break
+			MotionCmd(_,Motion::FirstGraphicalOnScreenLine) |
+				MotionCmd(_,Motion::BeginningOfFirstWord) => {
+					let start = self.start_of_line();
+					let mut indices = start..self.cursor.max;
+					let mut first_graphical = None;
+					while let Some(idx) = indices.next() {
+						let grapheme = self.grapheme_at(idx).unwrap();
+						if !is_whitespace(grapheme) {
+							first_graphical = Some(idx);
+							break
+						}
+						if grapheme == "\n" {
+							break
+						}
 					}
-					if grapheme == "\n" {
-						break
-					}
+					let Some(first) = first_graphical else {
+						return MotionKind::Null
+					};
+					MotionKind::On(first)
 				}
-				let Some(first) = first_graphical else {
-					return MotionKind::Null
-				};
-				MotionKind::On(first)
-			}
+			MotionCmd(_,Motion::BeginningOfScreenLine) |
 			MotionCmd(_,Motion::BeginningOfLine) => MotionKind::On(self.start_of_line()),
 			MotionCmd(count,Motion::EndOfLine) => {
 				let pos = if count == 1 {
@@ -1891,7 +1882,7 @@ impl LineBuf {
 				} else {
 					self.end_of_line()
 				};
-				
+
 				MotionKind::On(pos)
 			}
 			MotionCmd(count,Motion::CharSearch(direction, dest, ch)) => {
@@ -1950,12 +1941,78 @@ impl LineBuf {
 				}
 				MotionKind::On(target.get())
 			}
+			MotionCmd(_count, Motion::PatternSearchRev(ref pat)) |
+			MotionCmd(_count, Motion::PatternSearch(ref pat)) => {
+				// FIXME: For the love of god do not compile a new regex on every single command
+				if let Ok(regex) = Regex::new(&pat) {
+					let haystack = self.buffer.as_str();
+					let matches = regex.find_iter(haystack).collect::<Vec<_>>();
+					// We will use this match if we don't find any in our desired direction, just like vim
+					let wrap_match: Option<&regex::Match> = match &motion.1 {
+						Motion::PatternSearch(_) => matches.first(),
+						Motion::PatternSearchRev(_) => matches.last(),
+						_ => unreachable!()
+					};
+					let cursor_byte_pos = self.read_cursor_byte_pos();
+					match &motion.1 {
+						Motion::PatternSearch(_) => {
+							for mat in &matches {
+								if mat.start() > cursor_byte_pos {
+									let Some(match_idx) = self.find_index_for_byte_pos(mat.start()) else { return MotionKind::Null };
+									return MotionKind::Onto(match_idx)
+								}
+							}
+						}
+						Motion::PatternSearchRev(_) => {
+							let matches = matches.iter().rev();
+							for mat in matches {
+								if mat.start() < cursor_byte_pos {
+									let Some(match_idx) = self.find_index_for_byte_pos(mat.start()) else { return MotionKind::Null };
+									return MotionKind::Onto(match_idx)
+								}
+							}
+						}
+						_ => unreachable!()
+					}
+					let Some(mat) = wrap_match else { return MotionKind::Null };
+					let Some(match_idx) = self.find_index_for_byte_pos(mat.start()) else { return MotionKind::Null };
+					return MotionKind::Onto(match_idx)
+				} else {
+					match &motion.1 {
+						Motion::PatternSearch(_) => {
+							let Some(haystack) = self.slice_from_cursor() else { return MotionKind::Null };
+							if let Some(pos) = haystack.as_bytes().windows(pat.len()).position(|win| win == pat.as_bytes()) {
+								let Some(idx) = self.find_index_for_byte_pos(pos) else { return MotionKind::Null };
+								return MotionKind::Onto(idx)
+							} else {
+								return MotionKind::Null
+							}
+						}
+						Motion::PatternSearchRev(_) => {
+							let Some(haystack) = self.slice_from_cursor() else { return MotionKind::Null };
+							let haystack_rev = haystack.bytes().rev().collect::<Vec<_>>();
+							let pat_rev = pat.bytes().rev().collect::<Vec<_>>();
+							if let Some(pos) = haystack_rev.windows(pat.len()).position(|win| win == &pat_rev) {
+								let Some(idx) = self.find_index_for_byte_pos(pos) else { return MotionKind::Null };
+								return MotionKind::Onto(idx)
+							} else {
+								return MotionKind::Null
+							}
+						}
+						_ => unreachable!()
+					}
+				}
+			}
 			MotionCmd(count, Motion::ForwardCharForced) => MotionKind::On(self.cursor.ret_add(count)),
 			MotionCmd(count, Motion::BackwardCharForced) => MotionKind::On(self.cursor.ret_sub(count)),
 			MotionCmd(count,Motion::LineDown) |
+			MotionCmd(count,Motion::ScreenLineUp) |
+			MotionCmd(count,Motion::ScreenLineDown) |
 			MotionCmd(count,Motion::LineUp) => {
 				let Some((start,end)) = (match motion.1 {
+					Motion::ScreenLineUp |
 					Motion::LineUp => self.nth_prev_line(count),
+					Motion::ScreenLineDown |
 					Motion::LineDown => self.nth_next_line(count),
 					_ => unreachable!()
 				}) else {
@@ -1987,11 +2044,15 @@ impl LineBuf {
 				MotionKind::InclusiveWithTargetCol((start,end),target_pos)
 			}
 			MotionCmd(count,Motion::LineDownCharwise) |
+			MotionCmd(count,Motion::ScreenLineUpCharwise) |
+			MotionCmd(count,Motion::ScreenLineDownCharwise) |
 			MotionCmd(count,Motion::LineUpCharwise) => {
 				let Some((start,end)) = (match motion.1 {
-					Motion::LineUpCharwise => self.nth_prev_line(count),
-					Motion::LineDownCharwise => self.nth_next_line(count),
-					_ => unreachable!()
+					Motion::ScreenLineUpCharwise |
+						Motion::LineUpCharwise => self.nth_prev_line(count),
+						Motion::ScreenLineDownCharwise |
+							Motion::LineDownCharwise => self.nth_next_line(count),
+						_ => unreachable!()
 				}) else {
 					return MotionKind::Null
 				};
@@ -2011,18 +2072,14 @@ impl LineBuf {
 
 				MotionKind::On(target_pos)
 			}
-			MotionCmd(count,Motion::ScreenLineUp) => todo!(),
-			MotionCmd(count,Motion::ScreenLineUpCharwise) => todo!(),
-			MotionCmd(count,Motion::ScreenLineDown) => todo!(),
-			MotionCmd(count,Motion::ScreenLineDownCharwise) => todo!(),
-			MotionCmd(count,Motion::BeginningOfScreenLine) => todo!(),
-			MotionCmd(count,Motion::FirstGraphicalOnScreenLine) => todo!(),
-			MotionCmd(count,Motion::HalfOfScreen) => todo!(),
-			MotionCmd(count,Motion::HalfOfScreenLineText) => todo!(),
 			MotionCmd(_count,Motion::WholeBuffer) => MotionKind::Exclusive((0,self.grapheme_indices().len())),
 			MotionCmd(_count,Motion::BeginningOfBuffer) => MotionKind::On(0),
 			MotionCmd(_count,Motion::EndOfBuffer) => MotionKind::To(self.grapheme_indices().len()),
-			MotionCmd(_count,Motion::ToColumn) => todo!(),
+			MotionCmd(count,Motion::ToColumn) => {
+				let start = ClampedUsize::new(self.start_of_line(), self.cursor.max, false);
+				let target_col = count.saturating_sub(1);
+				MotionKind::On(start.ret_add(target_col))
+			}
 			MotionCmd(count,Motion::Range(start, end)) => {
 				let mut final_end = end;
 				if self.cursor.exclusive {
@@ -2038,61 +2095,14 @@ impl LineBuf {
 				final_end = final_end.min(self.cursor.max);
 				MotionKind::Exclusive((start,final_end))
 			}
-			MotionCmd(count,Motion::RepeatMotion) => todo!(),
-			MotionCmd(count,Motion::RepeatMotionRev) => todo!(),
-			MotionCmd(count,Motion::Null) => MotionKind::Null
-		};
-
-		self.set_buffer_lazy(buffer);
-		eval
+			MotionCmd(_,Motion::RepeatMotion) | // These two were already handled in exec.rs
+			MotionCmd(_,Motion::RepeatMotionRev) |
+			MotionCmd(_,Motion::Null) => MotionKind::Null,
+			_ => unimplemented!()
+		}
 	}
 	pub fn apply_motion(&mut self, motion: MotionKind) {
-		let last_grapheme_pos = self
-			.grapheme_indices()
-			.len()
-			.saturating_sub(1);
-
-		if self.has_hint() {
-			let hint = self.hint.take().unwrap();
-			let saved_buffer = self.buffer.clone(); // cringe
-			self.push_str(&hint);
-			self.move_cursor(motion);
-
-			let has_consumed_hint = (
-				self.cursor.exclusive && self.cursor.get() >= last_grapheme_pos
-			) || (
-				!self.cursor.exclusive && self.cursor.get() > last_grapheme_pos
-			);
-
-			if has_consumed_hint {
-				let buf_end = if self.cursor.exclusive {
-					self.cursor.ret_add(1)
-				} else {
-					self.cursor.get()
-				};
-				let remainder = self.slice_from(buf_end);
-
-				if remainder.is_some_and(|slice| !slice.is_empty()) {
-					let remainder = remainder.unwrap().to_string();
-					self.hint = Some(remainder);
-				}
-
-				let buffer = self.slice_to(buf_end).unwrap_or_default();
-				self.buffer = buffer.to_string();
-	 		} else {
-				let old_buffer = self.slice_to(last_grapheme_pos + 1).unwrap().to_string();
-				let Some(old_hint) = self.slice_from(last_grapheme_pos + 1) else {
-					self.set_buffer(format!("{saved_buffer}{hint}"));
-					self.hint = None;
-					return
-				};
-
-				self.hint = Some(old_hint.to_string());
-				self.set_buffer(old_buffer);
-			}
-		} else {
-			self.move_cursor(motion);
-		}
+		self.move_cursor(motion);
 		self.update_graphemes_lazy();
 		self.update_select_range();
 	}
@@ -2127,7 +2137,7 @@ impl LineBuf {
 	pub fn move_cursor(&mut self, motion: MotionKind) {
 		match motion {
 			MotionKind::Onto(pos) | // Onto follows On's behavior for cursor movements
-			MotionKind::On(pos) => self.cursor.set(pos),
+				MotionKind::On(pos) => self.cursor.set(pos),
 			MotionKind::To(pos) => {
 				self.cursor.set(pos);
 
@@ -2142,11 +2152,11 @@ impl LineBuf {
 				}
 			}
 			MotionKind::ExclusiveWithTargetCol((_,_),col) |
-			MotionKind::InclusiveWithTargetCol((_,_),col) => {
-				let (start,end) = self.this_line();
-				let end = end.min(col);
-				self.cursor.set(start + end)
-			}
+				MotionKind::InclusiveWithTargetCol((_,_),col) => {
+					let (start,end) = self.this_line();
+					let end = end.min(col);
+					self.cursor.set(start + end)
+				}
 			MotionKind::Inclusive((start,end)) => {
 				if self.select_range().is_none() {
 					self.cursor.set(start)
@@ -2195,13 +2205,13 @@ impl LineBuf {
 				ordered(self.cursor.get(), pos)
 			}
 			MotionKind::InclusiveWithTargetCol((start,end),_) |
-			MotionKind::Exclusive((start,end)) => ordered(*start, *end),
-			MotionKind::ExclusiveWithTargetCol((start,end),_) |
-			MotionKind::Inclusive((start,end)) => {
-				let (start, mut end) = ordered(*start, *end);
-				end = ClampedUsize::new(end,self.cursor.max,false).ret_add(1);
-				(start,end)
-			}
+				MotionKind::Exclusive((start,end)) => ordered(*start, *end),
+				MotionKind::ExclusiveWithTargetCol((start,end),_) |
+					MotionKind::Inclusive((start,end)) => {
+						let (start, mut end) = ordered(*start, *end);
+						end = ClampedUsize::new(end,self.cursor.max,false).ret_add(1);
+						(start,end)
+					}
 			MotionKind::Null => return None
 		};
 		Some(range)
@@ -2227,11 +2237,11 @@ impl LineBuf {
 				register.write_to_register(register_text);
 				match motion {
 					MotionKind::ExclusiveWithTargetCol((_,_),pos) |
-					MotionKind::InclusiveWithTargetCol((_,_),pos) => {
-						let (start,end) = self.this_line();
-						self.cursor.set(start);
-						self.cursor.add(end.min(pos));
-					}
+						MotionKind::InclusiveWithTargetCol((_,_),pos) => {
+							let (start,end) = self.this_line();
+							self.cursor.set(start);
+							self.cursor.add(end.min(pos));
+						}
 					_ => self.cursor.set(start),
 				}
 			}
@@ -2364,29 +2374,28 @@ impl LineBuf {
 				}
 			}
 			Verb::Redo |
-			Verb::Undo => {
-				let (edit_provider,edit_receiver) = match verb {
-					// Redo = pop from redo stack, push to undo stack
-					Verb::Redo => (&mut self.redo_stack, &mut self.undo_stack),
-					// Undo = pop from undo stack, push to redo stack
-					Verb::Undo => (&mut self.undo_stack, &mut self.redo_stack),
-					_ => unreachable!()
-				};
-				let Some(edit) = edit_provider.pop() else { return Ok(()) };
-				let Edit { pos, cursor_pos, old, new, merging: _ } = edit;
+				Verb::Undo => {
+					let (edit_provider,edit_receiver) = match verb {
+						// Redo = pop from redo stack, push to undo stack
+						Verb::Redo => (&mut self.redo_stack, &mut self.undo_stack),
+						// Undo = pop from undo stack, push to redo stack
+						Verb::Undo => (&mut self.undo_stack, &mut self.redo_stack),
+						_ => unreachable!()
+					};
+					let Some(edit) = edit_provider.pop() else { return Ok(()) };
+					let Edit { pos, cursor_pos, old, new, merging: _ } = edit;
 
-				self.buffer.replace_range(pos..pos + new.len(), &old);
-				let new_cursor_pos = self.cursor.get();
-				let in_insert_mode = !self.cursor.exclusive;
+					self.buffer.replace_range(pos..pos + new.len(), &old);
+					let new_cursor_pos = self.cursor.get();
+					let in_insert_mode = !self.cursor.exclusive;
 
-				if in_insert_mode {
-					self.cursor.set(cursor_pos)
+					if in_insert_mode {
+						self.cursor.set(cursor_pos)
+					}
+					let new_edit = Edit { pos, cursor_pos: new_cursor_pos, old: new, new: old, merging: false };
+					edit_receiver.push(new_edit);
+					self.update_graphemes();
 				}
-				let new_edit = Edit { pos, cursor_pos: new_cursor_pos, old: new, new: old, merging: false };
-				edit_receiver.push(new_edit);
-				self.update_graphemes();
-			}
-			Verb::RepeatLast => todo!(),
 			Verb::Put(anchor) => {
 				let Some(content) = register.read_from_register() else {
 					return Ok(())
@@ -2462,10 +2471,10 @@ impl LineBuf {
 
 				match motion {
 					MotionKind::ExclusiveWithTargetCol((_,_),pos) |
-					MotionKind::InclusiveWithTargetCol((_,_),pos) => {
-						self.cursor.set(start);
-						let end = self.end_of_line();
-						self.cursor.add(end.min(pos));
+						MotionKind::InclusiveWithTargetCol((_,_),pos) => {
+							self.cursor.set(start);
+							let end = self.end_of_line();
+							self.cursor.add(end.min(pos));
 					}
 					_ => self.cursor.set(start),
 				}
@@ -2505,18 +2514,20 @@ impl LineBuf {
 					}
 				}
 			}
+			Verb::PatternReplace(pat) => todo!(),
 
 			Verb::Complete |
 			Verb::EndOfFile |
 			Verb::InsertMode |
 			Verb::NormalMode |
 			Verb::VisualMode |
+			Verb::RepeatLast |
 			Verb::ReplaceMode |
 			Verb::VisualModeLine |
 			Verb::VisualModeBlock |
 			Verb::CompleteBackward |
 			Verb::AcceptLineOrNewline |
-			Verb::VisualModeSelectLast => self.apply_motion(motion), // Already handled logic for these
+			Verb::VisualModeSelectLast => self.apply_motion(motion), // Already handled logic for these in exec.rs
 		}
 		Ok(())
 	}
