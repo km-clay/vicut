@@ -28,9 +28,9 @@ Output can be structured in three different ways using these options:
 * `-t`/`--template <STR>` lets you define a custom output format using a format string. Fields are interpolated on placeholders that look like `{{1}}` or `{{field_name}}`.
 
 ## 🏎️ Performance
-`vicut`'s `--linewise` mode enables true parallel processing by treating each line as an independent buffer. This allows vicut to scale across CPU cores, giving it a serious performance edge over traditional tools like `sed` and `awk` for non-trivial inputs— even while executing more semantically rich operations like Vim motions.
+`vicut`'s `--linewise` mode enables true parallel processing by treating each line as an independent buffer. This allows vicut to scale across CPU cores, giving it an edge over traditional tools like `sed` and `awk` for non-trivial inputs— even while executing more semantically rich operations like Vim motions.
 
-On structured input, `vicut` is measurably faster than `sed` and `awk` on datasets up to 1 million lines.  
+On structured input, execution speed of `vicut` is comparable to or faster than `sed` and `awk` on datasets up to 1 million lines.  
 Here's a benchmark using a generated data set that looks like this:
 ```
 00001) Provider-1 (City-1, State-49) [924.05 km]
@@ -64,7 +64,7 @@ Here's a benchmark using a generated data set that looks like this:
 
 *Benchmark recorded using an AMD Ryzen 7 9700X (8-Core) running Arch Linux*  
   
-This data shows that vicut's multi-threaded linewise model allows it to outperform traditional Unix text processors in batch text processing contexts — while offering very readable, concise syntax.
+This data shows that vicut's multi-threaded linewise model allows it to match or even exceed the speed of traditional Unix text processors in batch text processing contexts — while offering very readable, concise syntax.
 ## ⚙️ Usage
 
 For in-depth usage info, and some examples/comparisons with other tools, you can check out the [wiki](https://github.com/km-clay/vicut/wiki)
