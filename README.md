@@ -1,6 +1,8 @@
 # vicut
 
-A command line utility for using Vim commands to process text and extract fields from stdin.
+A command line utility for using Vim commands to process text and extract fields from stdin.  
+
+![vicut](https://github.com/user-attachments/assets/d19fbc28-5f7d-4884-bb20-f50034fd388f)
 
 ## Why vicut?
 Extracting fields with standard Unix tools like `cut`, `sed`, or `awk` has always felt messy to me.  
