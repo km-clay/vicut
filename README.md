@@ -43,24 +43,24 @@ Here's a benchmark using a generated data set that looks like this:
 ### 25,000 lines
 | Tool    | Command                                                                                | Wall-Clock Time | 
 | ------- | -------------------------------------------------------------------------------------- | --------------- | 
-| `sed`   | `sed -E -e 's/\[]\[]//g' -e 's/\\) \\(\\)/ ---- /g'`                                   | 0.024s          |
-| `awk`   | `awk -F'[()]' '{ gsub(/\[\|\]/, "", $4); print $1, "---", $2, "---", $3, "---", $4 }'` | 0.017s          |
+| `sed`   | `sed -E -e 's/[][]//g' -e 's/(\) \| \()/ ---- /g'`                                   | 0.021s          |
+| `awk`   |  `awk -vOFS=" --- " -F'[][()]' '{ print $1, $2, $3, " " $5 }'`                       | 0.015s          |
 | `vicut` | `vicut --linewise --delimiter ' --- ' -c 'e' -m '2w' -c 't(h' -c 'vi)' -c 'vi]'`       | 0.014s          |
 
 
 ### 100,000 lines
 | Tool    | Command                                                                                | Wall-Clock Time |
 | ------- | -------------------------------------------------------------------------------------- | --------------- |
-| `sed`   | `sed -E -e 's/\[]\[]//g' -e 's/\\) \\(\\)/ ---- /g'`                                   | 0.083s          |
-| `awk`   | `awk -F'[()]' '{ gsub(/\[\|\]/, "", $4); print $1, "---", $2, "---", $3, "---", $4 }'` | 0.066s          |
-| `vicut` | `vicut --linewise --delimiter ' --- ' -c 'e' -m '2w' -c 't(h' -c 'vi)' -c 'vi]'`       | 0.051s          |
+| `sed`   | `sed -E -e 's/[][]//g' -e 's/(\) \| \()/ ---- /g'`                                  | 0.078s          |
+| `awk`   |  `awk -vOFS=" --- " -F'[][()]' '{ print $1, $2, $3, " " $5 }'`                       | 0.055s          |
+| `vicut` | `vicut --linewise --delimiter ' --- ' -c 'e' -m '2w' -c 't(h' -c 'vi)' -c 'vi]'`       | 0.058s          |
 
 ### 1,000,000 lines
 | Tool    | Command                                                                                | Wall-Clock Time |
 | ------- | -------------------------------------------------------------------------------------- | --------------- |
-| `sed`   | `sed -E -e 's/\[]\[]//g' -e 's/\\) \\(\\)/ ---- /g'`                                   | 0.733s          |
-| `awk`   | `awk -F'[()]' '{ gsub(/\[\|\]/, "", $4); print $1, "---", $2, "---", $3, "---", $4 }'` | 0.512s          |
-| `vicut` | `vicut --linewise --delimiter ' --- ' -c 'e' -m '2w' -c 't(h' -c 'vi)' -c 'vi]'`       | 0.478s          |
+| `sed`   | `sed -E -e 's/[][]//g' -e 's/(\) \| \()/ ---- /g'`                                    | 0.757s          |
+| `awk`   |  `awk -vOFS=" --- " -F'[][()]' '{ print $1, $2, $3, " " $5 }'`                       | 0.516s          |
+| `vicut` | `vicut --linewise --delimiter ' --- ' -c 'e' -m '2w' -c 't(h' -c 'vi)' -c 'vi]'`       | 0.509s          |
 
 *Benchmark recorded using an AMD Ryzen 7 9700X (8-Core) running Arch Linux*  
   
