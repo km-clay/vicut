@@ -149,7 +149,17 @@ EXAMPLE:
 
 ## 📦 Installation
 
-**NOTE:** You will need to have `cargo` installed in order to build `vicut`
+**NOTE:** Building requires the `rustc` compiler and the `cargo` package manager. Both can be installed using `rustup`.
+
+#### Cargo Installation
+You can have `cargo` download and build the source code using this command:
+```
+cargo install --git https://github.com/km-clay/vicut
+```
+Note that this will install the `vicut` binary to `~/.cargo/bin` so make sure that is in your PATH.  
+
+#### Building from Source
+Alternatively, you can clone the repo and build it manually:
 
 1. Clone the repository, navigate to it
 ```bash
@@ -160,7 +170,7 @@ cd vicut
 ```bash
 cargo build --release
 ```
-3. Install the binary to some place in your path
+3. Install the binary to some place in your PATH
 ```bash
 install -Dm755 target/release/vicut ~/.local/bin # or wherever
 ```
