@@ -91,6 +91,13 @@ OPTIONS:
         --linewise
                 Apply given commands to each line in the given input.
 
+        --serial
+                When used with --linewise, operates on each line sequentially instead of using multi-threading.
+                Note that the order of lines is maintained regardless of whether or not multi-threading is used.
+
+        --jobs
+                When used with --linewise, limits the number of threads that the program can use.
+
         --trim-fields
                 Trim leading and trailing whitespace from captured fields.
 
