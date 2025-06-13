@@ -28,7 +28,7 @@ Output can be structured in three different ways using these options:
 * `-t`/`--template <STR>` lets you define a custom output format using a format string. Fields are interpolated on placeholders that look like `{{1}}` or `{{field_name}}`.
 
 ## 🏎️ Performance
-`vicut`'s `--linewise` mode enables true parallel processing by treating each line as an independent buffer. This allows vicut to scale across CPU cores, giving it a serious performance edge over traditional tools like `sed` and `awk`— even while executing more semantically rich operations like Vim motions.
+`vicut`'s `--linewise` mode enables true parallel processing by treating each line as an independent buffer. This allows vicut to scale across CPU cores, giving it a serious performance edge over traditional tools like `sed` and `awk` for non-trivial inputs— even while executing more semantically rich operations like Vim motions.
 
 On structured input, `vicut` is measurably faster than `sed` and `awk` on datasets up to 1 million lines.  
 Here's a benchmark using a generated data set that looks like this:

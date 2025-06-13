@@ -1,1 +1,4 @@
 /target
+*perf*
+flamegraph.svg
+collapsed*
