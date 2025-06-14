@@ -2586,6 +2586,7 @@ impl LineBuf {
 			Verb::VisualModeLine |
 			Verb::VisualModeBlock |
 			Verb::CompleteBackward |
+			Verb::SearchMode(_, _) |
 			Verb::AcceptLineOrNewline |
 			Verb::VisualModeSelectLast => self.apply_motion(motion), // Already handled logic for these in exec.rs
 		}

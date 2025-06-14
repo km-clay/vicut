@@ -1,6 +1,7 @@
 use log::trace;
 
 use crate::linebuf::{ordered, ClampedUsize};
+use crate::modes::search::ViSearch;
 use crate::reader::{KeyReader, RawReader};
 
 use super::linebuf::{LineBuf, SelectAnchor, SelectMode};
@@ -139,6 +140,15 @@ impl ViCut {
 				Verb::VisualMode => {
 					selecting = true;
 					Box::new(ViVisual::new())
+				}
+				Verb::SearchMode(count,dir) => {
+					let mut mode: Box<dyn ViMode> = Box::new(ViSearch::new(count,dir));
+					std::mem::swap(&mut mode, &mut self.mode);
+
+					// We will now return early instead of doing all the other stuff.
+					// This is to preserve the line buffer's state while we are entering a pattern in search mode
+					// If we continue from here, visual mode selections will be lost for instance.
+					return Ok(())
 				}
 
 				_ => unreachable!()

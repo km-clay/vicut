@@ -221,6 +221,28 @@ impl ViVisual {
 					chars = chars_clone;
 					break 'verb_parse Some(VerbCmd(count, Verb::Put(Anchor::Before)));
 				}
+				'/' => {
+					return Some(
+						ViCmd {
+							register,
+							verb: Some(VerbCmd(1, Verb::SearchMode(count, Direction::Forward))),
+							motion: None,
+							raw_seq: self.take_cmd(),
+							flags: CmdFlags::empty()
+						}
+					)
+				}
+				'?' => {
+					return Some(
+						ViCmd {
+							register,
+							verb: Some(VerbCmd(1, Verb::SearchMode(count, Direction::Backward))),
+							motion: None,
+							raw_seq: self.take_cmd(),
+							flags: CmdFlags::empty()
+						}
+					)
+				}
 				'r' => {
 					let ch = chars_clone.next()?;
 					return Some(
@@ -438,35 +460,6 @@ impl ViVisual {
 				'(' => break 'motion_parse Some(MotionCmd(count, Motion::TextObj(TextObj::Sentence(Direction::Backward)))),
 				'}' => break 'motion_parse Some(MotionCmd(count, Motion::TextObj(TextObj::Paragraph(Direction::Forward)))),
 				'{' => break 'motion_parse Some(MotionCmd(count, Motion::TextObj(TextObj::Paragraph(Direction::Backward)))),
-				'/' | '?' => {
-					// Pattern search
-					// FIXME: This is fine for now, but allocating a new string on every parse attempt is cringe.
-					let mut pattern = String::new(); 
-					loop {
-						let Some(ch) = chars_clone.next() else {
-							break 'motion_parse None
-						};
-						match ch {
-							'\\' => {
-								pattern.push(ch);
-								if let Some(escaped) = chars_clone.next() {
-									pattern.push(escaped)
-								}
-								continue
-							}
-							'\r' => {
-								break 
-							}
-							_ => pattern.push(ch),
-						}
-					}
-
-					match ch {
-						'/' => break 'motion_parse Some(MotionCmd(count, Motion::PatternSearch(pattern))),
-						'?' => break 'motion_parse Some(MotionCmd(count, Motion::PatternSearchRev(pattern))),
-						_ => unreachable!()
-					}
-				}
 				ch if ch == 'i' || ch == 'a' => {
 					let bound = match ch {
 						'i' => Bound::Inside,

@@ -10,6 +10,7 @@ pub mod normal;
 pub mod insert;
 pub mod replace;
 pub mod visual;
+pub mod search;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModeReport {
@@ -17,6 +18,8 @@ pub enum ModeReport {
 	Normal,
 	Visual,
 	Replace,
+	Search,
+	Ex,
 	Unknown
 }
 
