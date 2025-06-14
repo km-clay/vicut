@@ -51,7 +51,7 @@ impl From<&str> for CharClass {
 		let mut flags = 0u8;
 
 		match first {
-			c if c.is_alphanumeric() => flags |= 0b10,
+			c if c.is_alphanumeric() || c == '_' => flags |= 0b10,
 			c if c.is_whitespace() => flags |= 0b01,
 			_ => {}
 		}
@@ -68,7 +68,7 @@ impl From<&str> for CharClass {
 
 		for c in value[first.len_utf8()..].chars() {
 			match c {
-				c if c.is_alphanumeric() => flags |= 0b10,
+				c if c.is_alphanumeric() || c == '_' => flags |= 0b10,
 				c if c.is_whitespace()   => flags |= 0b01,
 				_                        => {}
 			}
@@ -1254,7 +1254,6 @@ impl LineBuf {
 		// Not sorry for these method names btw
 		let mut pos = ClampedUsize::new(self.cursor.get(), self.cursor.max, false);
 		for i in 0..count {
-			debug!("{pos:?}");
 			// We alter 'include_last_char' to only be true on the last iteration
 			// Therefore, '5cw' will find the correct range for the first four and stop on the end of the fifth word
 			let include_last_char_and_is_last_word = include_last_char && i == count.saturating_sub(1);
@@ -1292,7 +1291,6 @@ impl LineBuf {
 				}
 			});
 		}
-		debug!("{pos:?}");
 		pos.get()
 	}
 	pub fn start_of_word_forward(&mut self, mut pos: usize, word: Word, include_last_char: bool) -> usize {
@@ -1484,8 +1482,6 @@ impl LineBuf {
 				let Some(cur_char) = self.grapheme_at(pos).map(|c| c.to_string()) else { return default };
 				let Some(next_idx) = fwd_indices.peek() else { return default };
 				let on_boundary = !is_whitespace(&cur_char) && self.grapheme_at(*next_idx).is_none_or(is_whitespace);
-				debug!("on boundary: {on_boundary}");
-				debug!("{:?}",self.grapheme_at(*next_idx));
 				if on_boundary {
 					let Some(idx) = fwd_indices.next() else { return default };
 					pos = idx;
@@ -1525,7 +1521,6 @@ impl LineBuf {
 					let next_idx = fwd_indices.next().unwrap();
 					pos = next_idx
 				}
-				debug!("on boundary: {on_boundary}");
 
 				// Check current grapheme
 				let Some(cur_char) = self.grapheme_at(pos).map(|c| c.to_string()) else {
@@ -1955,23 +1950,16 @@ impl LineBuf {
 				MotionKind::On(target.get())
 			}
 			MotionCmd(count, Motion::NextMatch) => {
-				debug!("looking for next match");
 				let Some(regex) = self.last_pattern_search.as_ref() else {
 					return MotionKind::Null
 				};
-				debug!("found last regex");
 				let haystack = self.buffer.as_str();
 				let matches = regex.find_iter(haystack).collect::<Vec<_>>();
-				debug!("{matches:?}");
 				let wrap_match: Option<&regex::Match> = matches.first();
-				debug!("{wrap_match:?}");
 				let cursor_byte_pos = self.read_cursor_byte_pos();
-				debug!("{cursor_byte_pos:?}");
 				let mut fwd_matches = 0;
 				for mat in &matches {
-					debug!("{mat:?}");
 					if mat.start() > cursor_byte_pos {
-						debug!("{} > {cursor_byte_pos}",mat.start());
 						fwd_matches += 1;
 						if fwd_matches == count {
 							let Some(match_idx) = self.find_index_for_byte_pos(mat.start()) else { return MotionKind::Null };
@@ -1981,7 +1969,6 @@ impl LineBuf {
 				}
 				let Some(mat) = wrap_match else { return MotionKind::Null };
 				let Some(match_idx) = self.find_index_for_byte_pos(mat.start()) else { return MotionKind::Null };
-				debug!("using wrap match");
 				MotionKind::Onto(match_idx)
 			}
 			MotionCmd(count, Motion::PrevMatch) => {
@@ -2013,13 +2000,11 @@ impl LineBuf {
 			}
 			MotionCmd(_count, Motion::PatternSearchRev(ref pat)) |
 			MotionCmd(_count, Motion::PatternSearch(ref pat)) => {
-				debug!("Reached pattern search eval");
 				// FIXME: For the love of god do not compile a new regex on every single command
 				// A decent solution for this will most likely be non-trivial though
 				// Precompiling and sharing across threads?
 				if let Ok(regex) = Regex::new(pat) {
 					self.last_pattern_search = Some(regex.clone());
-					debug!("made a regex");
 					let haystack = self.buffer.as_str();
 					let matches = regex.find_iter(haystack).collect::<Vec<_>>();
 					// We will use this match if we don't find any in our desired direction, just like vim
@@ -2029,8 +2014,6 @@ impl LineBuf {
 						_ => unreachable!()
 					};
 					let cursor_byte_pos = self.read_cursor_byte_pos();
-					debug!("{:?}",&motion.1);
-					debug!("{:?}",&matches);
 					match &motion.1 {
 						Motion::PatternSearch(_) => {
 							for mat in &matches {

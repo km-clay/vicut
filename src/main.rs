@@ -570,12 +570,12 @@ fn execute_multi_thread(stream: Box<dyn BufRead>, args: &Argv) -> String {
 
 #[cfg(test)]
 fn call_main(args: &[&str], input: &str) -> Result<String,String> {
-	if args.iter().count() == 0 {
+	if args.is_empty() {
 		let mut output = String::new();
-		write!(output,"USAGE:"); 
-		write!(output,"\tvicut [OPTIONS] [COMMANDS]...");
-		writeln!(output);
-		write!(output,"use '--help' for more information");
+		write!(output,"USAGE:").unwrap(); 
+		write!(output,"\tvicut [OPTIONS] [COMMANDS]...").unwrap();
+		writeln!(output).unwrap();
+		write!(output,"use '--help' for more information").unwrap();
 		return Err(output)
 	}
 	if args.iter().any(|arg| *arg == "--help" || *arg == "-h") {
@@ -632,7 +632,7 @@ fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 			});
 			write!(stdout, "{output}").unwrap();
 		} else {
-			let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
+			let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input.to_string())));
 			let output = execute_multi_thread(stream, &args);
 			write!(stdout, "{output}").unwrap();
 		}
