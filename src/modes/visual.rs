@@ -417,6 +417,8 @@ impl ViVisual {
 
 					break 'motion_parse Some(MotionCmd(count, Motion::CharSearch(Direction::Backward, Dest::Before, *ch)))
 				}
+				'n' => break 'motion_parse Some(MotionCmd(count, Motion::NextMatch)),
+				'N' => break 'motion_parse Some(MotionCmd(count, Motion::PrevMatch)),
 				';' => break 'motion_parse Some(MotionCmd(count, Motion::RepeatMotion)),
 				',' => break 'motion_parse Some(MotionCmd(count, Motion::RepeatMotionRev)),
 				'|' => break 'motion_parse Some(MotionCmd(count, Motion::ToColumn)),
@@ -441,13 +443,13 @@ impl ViVisual {
 					// FIXME: This is fine for now, but allocating a new string on every parse attempt is cringe.
 					let mut pattern = String::new(); 
 					loop {
-						let Some(ch) = chars.next() else {
+						let Some(ch) = chars_clone.next() else {
 							break 'motion_parse None
 						};
 						match ch {
 							'\\' => {
 								pattern.push(ch);
-								if let Some(escaped) = chars.next() {
+								if let Some(escaped) = chars_clone.next() {
 									pattern.push(escaped)
 								}
 								continue

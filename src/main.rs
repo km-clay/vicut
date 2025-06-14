@@ -45,6 +45,88 @@ struct Argv {
 }
 
 impl Argv {
+	pub fn parse_raw(args: &[&str]) -> Result<Self,String> {
+		let mut new = Self::default();
+		let mut args = args.iter();
+		while let Some(arg) = args.next() {
+			match *arg {
+				"--json" | "-j" => {
+					new.json = true;
+				}
+				"--trace" => {
+					new.trace = true;
+				}
+				"--linewise" => {
+					new.linewise = true;
+				}
+				"--serial" => {
+					new.single_thread = true;
+				}
+				"--trim-fields" => {
+					new.trim_fields = true;
+				}
+				"--keep-mode" => {
+					new.keep_mode = true;
+				}
+				"--template" | "-t" => {
+					let Some(next_arg) = args.next() else { 
+						return Err(format!("Expected a format string after '{arg}'"))
+					};
+					if next_arg.starts_with('-') {
+						return Err(format!("Expected a format string after '{arg}', found {next_arg}"))
+					}
+					new.template = Some(next_arg.to_string())
+				}
+				"--delimiter" | "-d" => {
+					let Some(next_arg) = args.next() else { continue };
+					if next_arg.starts_with('-') {
+						return Err(format!("Expected a delimiter after '{arg}', found {next_arg}"))
+					}
+					new.delimiter = Some(next_arg.to_string())
+				}
+				"-n" | "--next" => new.cmds.push(Cmd::BreakGroup),
+				"-r" | "--repeat" => {
+					let cmd_count = args
+						.next()
+						.unwrap_or(&"1")
+						.parse::<usize>()
+						.map_err(|_| format!("Expected a number after '{arg}'"))?;
+					let repeat_count = args
+						.next()
+						.unwrap_or(&"1")
+						.parse::<usize>()
+						.map_err(|_| format!("Expected a number after '{arg}'"))?;
+
+					new.cmds.push(Cmd::Repeat(cmd_count, repeat_count));
+				}
+				"-m" | "--move" => {
+					let Some(arg) = args.next() else { continue };
+					if arg.starts_with('-') {
+						return Err(format!("Expected a motion command after '-m', found {arg}"))
+					}
+					new.cmds.push(Cmd::Motion(arg.to_string()))
+				}
+				"-c" | "--cut" => {
+					let Some(arg) = args.next() else { continue };
+					if arg.starts_with("name=") {
+						let name = arg.strip_prefix("name=").unwrap().to_string();
+						let Some(arg) = args.next() else { continue };
+						if arg.starts_with('-') {
+							return Err(format!("Expected a selection command after '-c', found {arg}"))
+						}
+						new.cmds.push(Cmd::NamedField(name,arg.to_string()));
+					} else {
+						if arg.starts_with('-') {
+							return Err(format!("Expected a selection command after '-c', found {arg}"))
+						}
+						new.cmds.push(Cmd::Field(arg.to_string()));
+					}
+				}
+				arg => { return Err(format!("Unrecognized argument '{arg}'")) }
+			}
+		}
+		Ok(new)
+	}
 	pub fn parse() -> Result<Self,String> {
 		let mut new = Self::default();
 		let mut args = std::env::args().skip(1);
@@ -129,7 +211,7 @@ impl Argv {
 	}
 }
 
-fn print_help() {
+fn get_help() -> String {
 	let mut help = String::new();
 	writeln!(help).unwrap();
 	writeln!(help, "\x1b[1mvicut\x1b[0m").unwrap();
@@ -202,7 +284,7 @@ fn print_help() {
 	writeln!(help, "\tfoo -- bar -- (boo far) -- [bar foo]").unwrap();
 	writeln!(help).unwrap();
 	writeln!(help, "For more info, see: https://github.com/km-clay/vicut").unwrap();
-	println!("{help}");
+	help
 }
 
 fn init_logger(trace: bool) {
@@ -329,12 +411,11 @@ fn format_output_template(template: &str, lines: Vec<Vec<(String,String)>>) -> R
 }
 
 fn execute(args: &Argv, input: String) -> Result<String,String> {
-
 	let delimiter = args.delimiter.as_deref().unwrap_or("\t");
 	let mut fields: Vec<(String,String)> = vec![];
 	let mut fmt_lines: Vec<Vec<(String,String)>> = vec![];
 
-	let mut vicut = ViCut::new(&input, 0)?;
+	let mut vicut = ViCut::new(input, 0)?;
 
 	let mut spent_cmds: Vec<&Cmd> = vec![];
 
@@ -487,6 +568,91 @@ fn execute_multi_thread(stream: Box<dyn BufRead>, args: &Argv) -> String {
 	output
 }
 
+#[cfg(test)]
+fn call_main(args: &[&str], input: &str) -> Result<String,String> {
+	if args.iter().count() == 0 {
+		let mut output = String::new();
+		write!(output,"USAGE:"); 
+		write!(output,"\tvicut [OPTIONS] [COMMANDS]...");
+		writeln!(output);
+		write!(output,"use '--help' for more information");
+		return Err(output)
+	}
+	if args.iter().any(|arg| *arg == "--help" || *arg == "-h") {
+		return Ok(get_help())
+	}
+	let args = match Argv::parse_raw(args) {
+		Ok(args) => args,
+		Err(e) => {
+			return Err(format!("vicut: {e}"));
+		}
+	};
+
+	if args.json && args.delimiter.is_some() {
+		eprintln!("vicut: WARNING: --delimiter flag is ignored when --json is used")
+	}
+
+	let mut stdout = String::new();
+
+	use std::io::Cursor;
+	if args.linewise {
+		if args.single_thread {
+			// We need to initialize stream in each branch, since Box<dyn BufReader> does not implement send/sync
+			// So using it in pool.install() doesn't work. We have to initialize it in the closure there.
+
+			let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input)));
+			let mut output = String::new();
+			for result in stream.lines() {
+				match result {
+					Ok(line) => {
+						match execute(&args,line) {
+							Ok(new_line) => write!(output,"{new_line}").unwrap(),
+							Err(e) => {
+								return Err(format!("vicut: {e}"));
+							}
+						}
+					}
+					Err(e) => {
+						return Err(format!("vicut: {e}"));
+					}
+				}
+			}
+			write!(stdout, "{output}").unwrap()
+		} else if let Some(num) = args.max_jobs {
+			let pool = rayon::ThreadPoolBuilder::new()
+				.num_threads(num as usize)
+				.build()
+				.unwrap_or_else(|e| {
+					eprintln!("vicut: Failed to build thread pool: {e}");
+					std::process::exit(1)
+				});
+			let output = pool.install(|| {
+				let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input.to_string())));
+				execute_multi_thread(stream, &args)
+			});
+			write!(stdout, "{output}").unwrap();
+		} else {
+			let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
+			let output = execute_multi_thread(stream, &args);
+			write!(stdout, "{output}").unwrap();
+		}
+	} else {
+		let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input)));
+		let mut input = String::new();
+		match stream.read_to_string(&mut input) {
+			Ok(_) => {}
+			Err(e) => {
+				return Err(format!("vicut: {e}"));
+			}
+		}
+		match execute(&args,input) {
+			Ok(output) => write!(stdout,"{output}").unwrap(),
+			Err(e) => return Err(format!("vicut: {e}")),
+		}
+	}
+	Ok(stdout)
+}
+
 fn main() {
 	if std::env::args().skip(1).count() == 0 {
 		eprintln!("USAGE:"); 
@@ -496,7 +662,7 @@ fn main() {
 		return
 	}
 	if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
-		print_help();
+		print!("{}",get_help());
 		return
 	}
 	let args = match Argv::parse() {

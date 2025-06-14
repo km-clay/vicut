@@ -364,8 +364,8 @@ impl LineBuf {
 			self.update_graphemes();
 		}
 	}
-	pub fn with_initial(mut self, buffer: &str, cursor: usize) -> Self {
-		self.buffer = buffer.to_string();
+	pub fn with_initial(mut self, buffer: String, cursor: usize) -> Self {
+		self.buffer = buffer;
 		self.update_graphemes();
 		self.cursor = ClampedUsize::new(cursor, self.grapheme_indices().len(), self.cursor.exclusive);
 		self
@@ -520,6 +520,16 @@ impl LineBuf {
 		})?;
 		self.buffer.get(start_index..end_index)
 	}
+	pub fn read_slice_to(&self, end: usize) -> Option<&str> {
+		let grapheme_index = self.grapheme_indices().get(end).copied().or_else(|| {
+			if end == self.grapheme_indices().len() {
+				Some(self.buffer.len())
+			} else {
+				None
+			}
+		})?;
+		self.buffer.get(..grapheme_index)
+	}
 	pub fn slice_to(&mut self, end: usize) -> Option<&str> {
 		self.update_graphemes_lazy();
 		let grapheme_index = self.grapheme_indices().get(end).copied().or_else(|| {
@@ -535,6 +545,9 @@ impl LineBuf {
 		self.update_graphemes_lazy();
 		let grapheme_index = *self.grapheme_indices().get(start)?;
 		self.buffer.get(grapheme_index..)
+	}
+	pub fn read_slice_to_cursor(&self) -> Option<&str> {
+		self.read_slice_to(self.cursor.get())
 	}
 	pub fn slice_to_cursor(&mut self) -> Option<&str> {
 		self.slice_to(self.cursor.get())
@@ -1941,10 +1954,72 @@ impl LineBuf {
 				}
 				MotionKind::On(target.get())
 			}
+			MotionCmd(count, Motion::NextMatch) => {
+				debug!("looking for next match");
+				let Some(regex) = self.last_pattern_search.as_ref() else {
+					return MotionKind::Null
+				};
+				debug!("found last regex");
+				let haystack = self.buffer.as_str();
+				let matches = regex.find_iter(haystack).collect::<Vec<_>>();
+				debug!("{matches:?}");
+				let wrap_match: Option<&regex::Match> = matches.first();
+				debug!("{wrap_match:?}");
+				let cursor_byte_pos = self.read_cursor_byte_pos();
+				debug!("{cursor_byte_pos:?}");
+				let mut fwd_matches = 0;
+				for mat in &matches {
+					debug!("{mat:?}");
+					if mat.start() > cursor_byte_pos {
+						debug!("{} > {cursor_byte_pos}",mat.start());
+						fwd_matches += 1;
+						if fwd_matches == count {
+							let Some(match_idx) = self.find_index_for_byte_pos(mat.start()) else { return MotionKind::Null };
+							return MotionKind::Onto(match_idx)
+						}
+					}
+				}
+				let Some(mat) = wrap_match else { return MotionKind::Null };
+				let Some(match_idx) = self.find_index_for_byte_pos(mat.start()) else { return MotionKind::Null };
+				debug!("using wrap match");
+				MotionKind::Onto(match_idx)
+			}
+			MotionCmd(count, Motion::PrevMatch) => {
+				let Some(regex) = self.last_pattern_search.as_ref() else {
+					return MotionKind::Null
+				};
+				let haystack = self.read_slice_to_cursor().unwrap();
+				let matches = regex
+					.find_iter(haystack)
+					.collect::<Vec<_>>()
+					.into_iter()
+					.rev()
+					.collect::<Vec<_>>(); // I'm gonna be sick
+				let wrap_match: Option<&regex::Match> = matches.last();
+				let cursor_byte_pos = self.read_cursor_byte_pos();
+				let mut bkwd_matches = 0;
+				for mat in &matches {
+					if mat.start() < cursor_byte_pos {
+						bkwd_matches += 1;
+						if bkwd_matches == count {
+							let Some(match_idx) = self.find_index_for_byte_pos(mat.start()) else { return MotionKind::Null };
+							return MotionKind::Onto(match_idx)
+						}
+					}
+				}
+				let Some(mat) = wrap_match else { return MotionKind::Null };
+				let Some(match_idx) = self.find_index_for_byte_pos(mat.start()) else { return MotionKind::Null };
+				MotionKind::Onto(match_idx)
+			}
 			MotionCmd(_count, Motion::PatternSearchRev(ref pat)) |
 			MotionCmd(_count, Motion::PatternSearch(ref pat)) => {
+				debug!("Reached pattern search eval");
 				// FIXME: For the love of god do not compile a new regex on every single command
-				if let Ok(regex) = Regex::new(&pat) {
+				// A decent solution for this will most likely be non-trivial though
+				// Precompiling and sharing across threads?
+				if let Ok(regex) = Regex::new(pat) {
+					self.last_pattern_search = Some(regex.clone());
+					debug!("made a regex");
 					let haystack = self.buffer.as_str();
 					let matches = regex.find_iter(haystack).collect::<Vec<_>>();
 					// We will use this match if we don't find any in our desired direction, just like vim
@@ -1954,6 +2029,8 @@ impl LineBuf {
 						_ => unreachable!()
 					};
 					let cursor_byte_pos = self.read_cursor_byte_pos();
+					debug!("{:?}",&motion.1);
+					debug!("{:?}",&matches);
 					match &motion.1 {
 						Motion::PatternSearch(_) => {
 							for mat in &matches {
@@ -1976,27 +2053,27 @@ impl LineBuf {
 					}
 					let Some(mat) = wrap_match else { return MotionKind::Null };
 					let Some(match_idx) = self.find_index_for_byte_pos(mat.start()) else { return MotionKind::Null };
-					return MotionKind::Onto(match_idx)
+					MotionKind::Onto(match_idx)
 				} else {
 					match &motion.1 {
 						Motion::PatternSearch(_) => {
 							let Some(haystack) = self.slice_from_cursor() else { return MotionKind::Null };
 							if let Some(pos) = haystack.as_bytes().windows(pat.len()).position(|win| win == pat.as_bytes()) {
 								let Some(idx) = self.find_index_for_byte_pos(pos) else { return MotionKind::Null };
-								return MotionKind::Onto(idx)
+								MotionKind::Onto(idx)
 							} else {
-								return MotionKind::Null
+								MotionKind::Null
 							}
 						}
 						Motion::PatternSearchRev(_) => {
 							let Some(haystack) = self.slice_from_cursor() else { return MotionKind::Null };
 							let haystack_rev = haystack.bytes().rev().collect::<Vec<_>>();
 							let pat_rev = pat.bytes().rev().collect::<Vec<_>>();
-							if let Some(pos) = haystack_rev.windows(pat.len()).position(|win| win == &pat_rev) {
+							if let Some(pos) = haystack_rev.windows(pat.len()).position(|win| win == pat_rev) {
 								let Some(idx) = self.find_index_for_byte_pos(pos) else { return MotionKind::Null };
-								return MotionKind::Onto(idx)
+								MotionKind::Onto(idx)
 							} else {
-								return MotionKind::Null
+								MotionKind::Null
 							}
 						}
 						_ => unreachable!()

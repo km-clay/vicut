@@ -17,7 +17,7 @@ pub struct ViCut {
 
 
 impl ViCut {
-	pub fn new(input: &str, cursor: usize) -> Result<Self,String> {
+	pub fn new(input: String, cursor: usize) -> Result<Self,String> {
 		Ok(Self {
 			reader: RawReader::new(),
 			mode: Box::new(ViNormal::new()),

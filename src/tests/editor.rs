@@ -7,7 +7,7 @@ fn normal_cmd(cmd: &str, buf: &str, cursor: usize) -> (String,usize) {
 		.cmds_from_raw(cmd)
 		.pop()
 		.unwrap();
-	let mut buf = LineBuf::new().with_initial(buf, cursor);
+	let mut buf = LineBuf::new().with_initial(buf.to_string(), cursor);
 	buf.exec_cmd(cmd).unwrap();
 	(buf.as_str().to_string(),buf.cursor.get()) 
 }

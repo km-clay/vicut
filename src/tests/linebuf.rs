@@ -13,7 +13,7 @@ fn linebuf_empty_linebuf() {
 
 #[test]
 fn linebuf_ascii_content() {
-	let mut buf = LineBuf::new().with_initial("hello", 0);
+	let mut buf = LineBuf::new().with_initial("hello".into(), 0);
 
 	buf.update_graphemes_lazy();
 	assert_eq!(buf.grapheme_indices(), &[0, 1, 2, 3, 4]);
@@ -27,7 +27,7 @@ fn linebuf_ascii_content() {
 
 #[test]
 fn linebuf_unicode_graphemes() {
-	let mut buf = LineBuf::new().with_initial("a🇺🇸b́c", 0);
+	let mut buf = LineBuf::new().with_initial("a🇺🇸b́c".into(), 0);
 
 	buf.update_graphemes_lazy();
 	let indices = buf.grapheme_indices();
@@ -46,7 +46,7 @@ fn linebuf_unicode_graphemes() {
 
 #[test]
 fn linebuf_slice_to_from_cursor() {
-	let mut buf = LineBuf::new().with_initial("abçd", 2);
+	let mut buf = LineBuf::new().with_initial("abçd".into(), 2);
 
 	buf.update_graphemes_lazy();
 	assert_eq!(buf.slice_to_cursor(), Some("ab"));
@@ -55,7 +55,7 @@ fn linebuf_slice_to_from_cursor() {
 
 #[test]
 fn linebuf_out_of_bounds_slices() {
-	let mut buf = LineBuf::new().with_initial("test", 0);
+	let mut buf = LineBuf::new().with_initial("test".into(), 0);
 
 	buf.update_graphemes_lazy();
 
@@ -67,7 +67,7 @@ fn linebuf_out_of_bounds_slices() {
 #[test]
 fn linebuf_this_line() {
 	let initial = "This is the first line\nThis is the second line\nThis is the third line\nThis is the fourth line";
-	let mut buf = LineBuf::new().with_initial(initial, 57);
+	let mut buf = LineBuf::new().with_initial(initial.into(), 57);
 	let (start,end) = buf.this_line();
 	assert_eq!(buf.slice(start..end), Some("This is the third line\n"))
 }
@@ -75,7 +75,7 @@ fn linebuf_this_line() {
 #[test]
 fn linebuf_prev_line() {
 	let initial = "This is the first line\nThis is the second line\nThis is the third line\nThis is the fourth line";
-	let mut buf = LineBuf::new().with_initial(initial, 57);
+	let mut buf = LineBuf::new().with_initial(initial.into(), 57);
 	let (start,end) = buf.nth_prev_line(1).unwrap();
 	assert_eq!(buf.slice(start..end), Some("This is the second line\n"))
 }
@@ -83,7 +83,7 @@ fn linebuf_prev_line() {
 #[test]
 fn linebuf_prev_line_first_line_is_empty() {
 	let initial = "\nThis is the first line\nThis is the second line\nThis is the third line\nThis is the fourth line";
-	let mut buf = LineBuf::new().with_initial(initial, 36);
+	let mut buf = LineBuf::new().with_initial(initial.into(), 36);
 	let (start,end) = buf.nth_prev_line(1).unwrap();
 	assert_eq!(buf.slice(start..end), Some("This is the first line\n"))
 }
@@ -91,7 +91,7 @@ fn linebuf_prev_line_first_line_is_empty() {
 #[test]
 fn linebuf_next_line() {
 	let initial = "This is the first line\nThis is the second line\nThis is the third line\nThis is the fourth line";
-	let mut buf = LineBuf::new().with_initial(initial, 57);
+	let mut buf = LineBuf::new().with_initial(initial.into(), 57);
 	let (start,end) = buf.nth_next_line(1).unwrap();
 	assert_eq!(buf.slice(start..end), Some("This is the fourth line"))
 }
@@ -99,7 +99,7 @@ fn linebuf_next_line() {
 #[test]
 fn linebuf_next_line_last_line_is_empty() {
 	let initial = "This is the first line\nThis is the second line\nThis is the third line\nThis is the fourth line\n";
-	let mut buf = LineBuf::new().with_initial(initial, 57);
+	let mut buf = LineBuf::new().with_initial(initial.into(), 57);
 	let (start,end) = buf.nth_next_line(1).unwrap();
 	assert_eq!(buf.slice(start..end), Some("This is the fourth line\n"))
 }
@@ -107,7 +107,7 @@ fn linebuf_next_line_last_line_is_empty() {
 #[test]
 fn linebuf_next_line_several_trailing_newlines() {
 	let initial = "This is the first line\nThis is the second line\nThis is the third line\nThis is the fourth line\n\n\n\n";
-	let mut buf = LineBuf::new().with_initial(initial, 81);
+	let mut buf = LineBuf::new().with_initial(initial.into(), 81);
 	let (start,end) = buf.nth_next_line(1).unwrap();
 	assert_eq!(buf.slice(start..end), Some("\n"))
 }
@@ -115,7 +115,7 @@ fn linebuf_next_line_several_trailing_newlines() {
 #[test]
 fn linebuf_next_line_only_newlines() {
 	let initial = "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n";
-	let mut buf = LineBuf::new().with_initial(initial, 7);
+	let mut buf = LineBuf::new().with_initial(initial.into(), 7);
 	let (start,end) = buf.nth_next_line(1).unwrap();
 	assert_eq!(start, 8);
 	assert_eq!(buf.slice(start..end), Some("\n"))
@@ -124,7 +124,7 @@ fn linebuf_next_line_only_newlines() {
 #[test]
 fn linebuf_prev_line_only_newlines() {
 	let initial = "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n";
-	let mut buf = LineBuf::new().with_initial(initial, 7);
+	let mut buf = LineBuf::new().with_initial(initial.into(), 7);
 	let (start,end) = buf.nth_prev_line(1).unwrap();
 	assert_eq!(buf.slice(start..end), Some("\n"));
 	assert_eq!(start, 6);
@@ -132,7 +132,7 @@ fn linebuf_prev_line_only_newlines() {
 
 #[test]
 fn linebuf_cursor_motion() {
-	let mut buf = LineBuf::new().with_initial("Thé quíck 🦊 bröwn fóx jumpś óver the 💤 lázy dóg 🐶", 0);
+	let mut buf = LineBuf::new().with_initial("Thé quíck 🦊 bröwn fóx jumpś óver the 💤 lázy dóg 🐶".into(), 0);
 
 	buf.update_graphemes_lazy();
 	let total = buf.grapheme_indices.as_ref().unwrap().len();
