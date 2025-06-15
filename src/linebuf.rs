@@ -62,9 +62,8 @@ impl From<&str> for CharClass {
 		}
 
 		if value.len() == first.len_utf8() {
-			// I am the speed wizard
 			// HOCUS POCUS
-			return unsafe { std::mem::transmute(flags) }
+			return unsafe { std::mem::transmute::<u8, CharClass>(flags) }
 		}
 
 		for c in value[first.len_utf8()..].chars() {
@@ -78,7 +77,7 @@ impl From<&str> for CharClass {
 			}
 		}
 
-		unsafe { std::mem::transmute(flags) }
+		unsafe { std::mem::transmute::<u8, CharClass>(flags) }
 	}
 }
 
@@ -636,6 +635,7 @@ impl LineBuf {
 	pub fn is_sentence_punctuation(&self, pos: usize) -> bool {
 		self.next_sentence_start_from_punctuation(pos).is_some()
 	}
+	#[allow(clippy::collapsible_if)] // chaotic evil
 	pub fn next_sentence_start_from_punctuation(&self, pos: usize) -> Option<usize> {
 		if let Some(gr) = self.read_grapheme_at(pos) {
 			if PUNCTUATION.contains(&gr) && self.read_grapheme_after(pos).is_some() {
@@ -667,6 +667,12 @@ impl LineBuf {
 			} // eeee
 		} // eee.
 		None
+	}
+
+	pub fn is_paragraph_start(&mut self, pos: usize) -> bool {
+		let booool = self.grapheme_at(pos) == Some("\n") && self.grapheme_before(pos) == Some("\n");
+		debug!("{booool}");
+		booool
 	}
 	pub fn is_sentence_start(&mut self, pos: usize) -> bool {
 		if self.grapheme_before(pos).is_some_and(is_whitespace) {
@@ -832,7 +838,7 @@ impl LineBuf {
 				}
 			}
 			TextObj::Paragraph(dir) => {
-				let (start,end) = self.text_obj_paragraph(count, Bound::Around)?;
+				let (start,end) = self.text_obj_paragraph(self.cursor.get(), count, Bound::Around)?;
 				let cursor = self.cursor.get();
 				match dir {
 					Direction::Forward => Some((cursor,end)),
@@ -840,7 +846,7 @@ impl LineBuf {
 				}
 			}
 			TextObj::WholeSentence(bound) => self.text_obj_sentence(self.cursor.get(), count, bound),
-			TextObj::WholeParagraph(bound) => self.text_obj_paragraph(count, bound),
+			TextObj::WholeParagraph(bound) => self.text_obj_paragraph(self.cursor.get(), count, bound),
 
 			// Quoted blocks
 			TextObj::DoubleQuote(bound) |
@@ -911,16 +917,65 @@ impl LineBuf {
 		}
 		let start = start.unwrap_or(0);
 
-		if count > 1 {
-			if let Some((_,new_end)) = self.text_obj_sentence(end, count - 1, bound) {
-				end = new_end;
-			}
+		if count > 1 && let Some((_,new_end)) = self.text_obj_sentence(end, count - 1, bound) {
+			end = new_end;
 		}
 
 		Some((start,end))
 	}
-	pub fn text_obj_paragraph(&mut self, count: usize, bound: Bound) -> Option<(usize, usize)> {
-		todo!()
+
+
+
+
+	pub fn text_obj_paragraph(&mut self, start_pos: usize, count: usize, bound: Bound) -> Option<(usize, usize)> {
+		// FIXME: This is a pretty naive approach
+		let mut start = None;
+		let mut end = None;
+		let mut fwd_indices = (start_pos..self.cursor.max).peekable();
+
+		while let Some(idx) = fwd_indices.next() {
+			let Some("\n") = self.grapheme_at(idx) else {
+				continue
+			};
+			let Some(next_idx) = fwd_indices.peek() else { break };
+			if let Some("\n") = self.grapheme_at(*next_idx) {
+				match bound {
+					Bound::Inside => end = Some(*next_idx),
+					Bound::Around => {
+						fwd_indices.next();
+						while let Some(idx) = fwd_indices.next() {
+							match self.grapheme_at(idx) {
+								Some("\n") => continue,
+								_ => {
+									end = Some(idx);
+								}
+							}
+						}
+					}
+				}
+				
+				break
+			}
+		}
+		let mut end = end.unwrap_or(self.cursor.max);
+
+		let mut bkwd_indices = (0..end).rev().peekable();
+		while let Some(idx) = bkwd_indices.next() {
+			let Some("\n") = self.grapheme_at(idx) else {
+				continue
+			};
+			let Some(next_idx) = bkwd_indices.peek() else { break };
+			if let Some("\n") = self.grapheme_at(*next_idx) {
+				start = Some(idx);
+				break
+			}
+		}
+		let start = start.unwrap_or(0);
+
+		if count > 1 && let Some((_,new_end)) = self.text_obj_paragraph(end, count - 1, bound) {
+			end = new_end;
+		}
+		Some((start,end))
 	}
 	pub fn text_obj_delim(&mut self  , count: usize, text_obj: TextObj, bound: Bound) -> Option<(usize,usize)> {
 		let mut backward_indices = (0..self.cursor.get()).rev();
@@ -1760,38 +1815,59 @@ impl LineBuf {
 					return MotionKind::Null
 				};
 				match text_obj {
-					TextObj::Sentence(dir) |
-						TextObj::Paragraph(dir) => {
-							match dir {
-								Direction::Forward => MotionKind::On(end),
-								Direction::Backward => {
-									let cur_sentence_start = start;
-									let mut start_pos = self.cursor.get();
-									for _ in 0..count {
-										if self.is_sentence_start(start_pos) {
-											// We know there is some punctuation before us now
-											// Let's find it
-											let mut bkwd_indices = (0..start_pos).rev();
-											let punct_pos = bkwd_indices
-												.find(|idx| self.grapheme_at(*idx).is_some_and(|gr| PUNCTUATION.contains(&gr)))
-												.unwrap();
-											if self.grapheme_before(punct_pos).is_some() {
-												let Some((new_start,_)) = self.text_obj_sentence(punct_pos - 1, count, Bound::Inside) else {
-													return MotionKind::Null
-												};
-												start_pos = new_start;
-												continue
-											} else {
-												return MotionKind::Null
-											}
-										} else {
-											start_pos = cur_sentence_start;
-										}
+					TextObj::Paragraph(dir) => {
+						match dir {
+							Direction::Forward => MotionKind::On(end),
+							Direction::Backward => {
+								let cur_paragraph_start = start;
+								debug!("{start}");
+								let mut start_pos = self.cursor.get();
+								for _ in 0..count {
+									if self.is_paragraph_start(start_pos) {
+										let Some((new_start,_)) = self.text_obj_paragraph(start_pos.saturating_sub(1), 1, Bound::Inside) else {
+											return MotionKind::Null
+										};
+										start_pos = new_start;
+										continue
+									} else {
+										start_pos = cur_paragraph_start;
 									}
-									MotionKind::On(start_pos)
 								}
+								MotionKind::On(start_pos)
 							}
 						}
+					}
+					TextObj::Sentence(dir) => {
+						match dir {
+							Direction::Forward => MotionKind::On(end),
+							Direction::Backward => {
+								let cur_sentence_start = start;
+								let mut start_pos = self.cursor.get();
+								for _ in 0..count {
+									if self.is_sentence_start(start_pos) {
+										// We know there is some punctuation before us now
+										// Let's find it
+										let mut bkwd_indices = (0..start_pos).rev();
+										let punct_pos = bkwd_indices
+											.find(|idx| self.grapheme_at(*idx).is_some_and(|gr| PUNCTUATION.contains(&gr)))
+											.unwrap();
+										if self.grapheme_before(punct_pos).is_some() {
+											let Some((new_start,_)) = self.text_obj_sentence(punct_pos - 1, count, Bound::Inside) else {
+												return MotionKind::Null
+											};
+											start_pos = new_start;
+											continue
+										} else {
+											return MotionKind::Null
+										}
+									} else {
+										start_pos = cur_sentence_start;
+									}
+								}
+								MotionKind::On(start_pos)
+							}
+						}
+					}
 					TextObj::Word(_, bound) |
 					TextObj::WholeSentence(bound) |
 					TextObj::WholeParagraph(bound) => {

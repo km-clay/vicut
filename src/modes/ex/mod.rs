@@ -171,7 +171,7 @@ fn parse_one_addr(chars: &mut Peekable<Chars<'_>>) -> Result<Option<LineAddr>,()
 		}
 		'.' => Ok(Some(LineAddr::Current)),
 		'$' => Ok(Some(LineAddr::Last)),
-		_ => todo!()
+		_ => Err(())
 	}
 }
 
