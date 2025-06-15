@@ -5,6 +5,8 @@ use regex::Regex;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::{modes::ex::SubFlags, vicmd::LineAddr};
+
 use super::vicmd::{Anchor, Bound, CmdFlags, Dest, Direction, Motion, MotionCmd, RegisterName, TextObj, To, Verb, ViCmd, Word};
 
 const PUNCTUATION: [&str;3] = [
@@ -21,13 +23,18 @@ pub enum Delim {
 	Angle
 }
 
+#[repr(u8)]
 #[derive(Default,PartialEq,Eq,Debug,Clone,Copy)]
+/// Categories of various characters.
+///
+/// This enum is used with std::mem::transmute() in it's From<&str> impl.
+/// Keep that in mind if you decide to mess with this
 pub enum CharClass {
 	#[default]
-	Alphanum,
-	Symbol,
-	Whitespace,
-	Other
+	Symbol = 0b00,
+	Whitespace = 0b01,
+	Alphanum = 0b10,
+	Other = 0b11
 }
 
 impl From<&str> for CharClass {
@@ -42,8 +49,6 @@ impl From<&str> for CharClass {
 			return Self::Other;
 		};
 
-		// We're going to use bit flags instead of booleans here
-		// And pray that the compiler makes a nice jump table for us
 		// 0b10 = alphanumeric
 		// 0b01 = whitespace
 		// 0b00 = symbol
@@ -57,13 +62,9 @@ impl From<&str> for CharClass {
 		}
 
 		if value.len() == first.len_utf8() {
-			return match flags {
-				0b10 => CharClass::Alphanum,
-				0b01 => CharClass::Whitespace,
-				0b00 => CharClass::Symbol,
-				0b11 => CharClass::Other,
-				_ => unreachable!()
-			}
+			// I am the speed wizard
+			// HOCUS POCUS
+			return unsafe { std::mem::transmute(flags) }
 		}
 
 		for c in value[first.len_utf8()..].chars() {
@@ -77,13 +78,7 @@ impl From<&str> for CharClass {
 			}
 		}
 
-		match flags {
-			0b10 => CharClass::Alphanum,
-			0b01 => CharClass::Whitespace,
-			0b00 => CharClass::Symbol,
-			0b11 => CharClass::Other,
-			_ => unreachable!()
-		}
+		unsafe { std::mem::transmute(flags) }
 	}
 }
 
@@ -341,9 +336,10 @@ pub struct LineBuf {
 
 	pub select_mode: Option<SelectMode>,
 	pub select_range: Option<(usize,usize)>,
-	pub last_selection: Option<(usize,usize)>,
 
+	pub last_selection: Option<(usize,usize)>,
 	pub last_pattern_search: Option<Regex>,
+	pub last_substitution: Option<(Regex,String)>,
 
 	pub insert_mode_start_pos: Option<usize>,
 	pub saved_col: Option<usize>,
@@ -2155,10 +2151,15 @@ impl LineBuf {
 				final_end = final_end.min(self.cursor.max);
 				MotionKind::Exclusive((start,final_end))
 			}
+			MotionCmd(_,Motion::LineRange(LineAddr::Number(1), LineAddr::Last)) => {
+				let start = 0;
+				let end = self.cursor.max;
+				MotionKind::Inclusive((start,end))
+			}
 			MotionCmd(_,Motion::RepeatMotion) | // These two were already handled in exec.rs
 			MotionCmd(_,Motion::RepeatMotionRev) |
 			MotionCmd(_,Motion::Null) => MotionKind::Null,
-			_ => unimplemented!()
+			_ => unimplemented!("Not implemented: {motion:?}")
 		}
 	}
 	pub fn apply_motion(&mut self, motion: MotionKind) {
@@ -2574,8 +2575,42 @@ impl LineBuf {
 					}
 				}
 			}
-			Verb::PatternReplace(pat) => todo!(),
-
+			Verb::RepeatSubstitute => todo!(),
+			Verb::Substitute(old, new, flags) => {
+				if let Ok(regex) = Regex::new(&old) {
+					// We go in reverse here
+					let lines = (0..self.total_lines()).rev();
+					for line_no in lines {
+						let (start,end) = self.line_bounds(line_no);
+						let line = self.slice(start..end).unwrap();
+						let global = flags.contains(SubFlags::GLOBAL);
+						if global {
+							let line_matches = regex
+								.find_iter(line)
+								.map(|mat| (mat.start(),mat.end()))
+								.collect::<Vec<_>>()
+								.into_iter()
+								.rev();
+							for (mat_start,mat_end) in line_matches {
+								let real_start = start + mat_start;
+								let real_end = start + mat_end;
+								self.buffer.replace_range(real_start..real_end, &new);
+							}
+						} else {
+							let Some((mat_start,mat_end)) = regex.find(line).map(|mat| (mat.start(),mat.end())) else { return Ok(()) };
+							let real_start = start + mat_start;
+							let real_end = start + mat_end;
+							self.buffer.replace_range(real_start..real_end, &new);
+						}
+					}
+				} else {
+					// TODO: Implement sliding window logical fallback here
+					panic!();
+					return Ok(())
+				}
+				debug!("after sub:\n{}",&self.buffer);
+			}
+			Verb::ExMode |
 			Verb::Complete |
 			Verb::EndOfFile |
 			Verb::InsertMode |

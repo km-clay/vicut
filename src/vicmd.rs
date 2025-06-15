@@ -1,5 +1,7 @@
 use bitflags::bitflags;
 
+use crate::modes::ex::SubFlags;
+
 use super::register::{append_register, read_register, write_register};
 
 //TODO: write tests that take edit results and cursor positions from actual neovim edits and test them against the behavior of this editor
@@ -62,6 +64,7 @@ bitflags! {
 		const VISUAL = 1<<0;
 		const VISUAL_LINE = 1<<1;
 		const VISUAL_BLOCK = 1<<2;
+		const EXIT_CUR_MODE = 1<<3; // for instance, when pressing enter during ex mode or search mode
 	}
 }
 
@@ -152,6 +155,7 @@ impl ViCmd {
 			matches!(v.1, 
 				Verb::Change |
 				Verb::InsertMode |
+				Verb::ExMode |
 				Verb::SearchMode(_,_) |
 				Verb::InsertModeLineBreak(_) |
 				Verb::NormalMode |
@@ -200,15 +204,18 @@ pub enum Verb {
 	Redo,
 	RepeatLast,
 	Put(Anchor),
-	PatternReplace(String),
+	/// (old_pat,new_pat,flags)
+	Substitute(String,String,SubFlags),
+	RepeatSubstitute,
 	SearchMode(usize,Direction),
 	ReplaceMode,
+	ExMode,
 	InsertMode,
 	InsertModeLineBreak(Anchor),
 	NormalMode,
 	VisualMode,
 	VisualModeLine,
-	VisualModeBlock, // dont even know if im going to implement this
+	VisualModeBlock, // dont even know if im going to implement this, really hard to use without a user interface
 	VisualModeSelectLast,
 	SwapVisualAnchor,
 	JoinLines,
@@ -285,6 +292,8 @@ pub enum Motion {
 	EndOfLine,
 	WordMotion(To,Word,Direction),
 	CharSearch(Direction,Dest,char),
+	Line(LineAddr), 							// x
+	LineRange(LineAddr,LineAddr), // x,y
 	PatternSearch(String),
 	PatternSearchRev(String),
 	NextMatch,
@@ -410,6 +419,16 @@ pub enum TextObj {
 
 	/// Custom user-defined objects maybe?
 	Custom(char),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum LineAddr {
+	Number(usize),
+	Current,
+	Last,
+	Offset(isize),
+	Pattern(String),
+	PatternRev(String),
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]

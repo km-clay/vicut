@@ -11,6 +11,7 @@ pub mod insert;
 pub mod replace;
 pub mod visual;
 pub mod search;
+pub mod ex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModeReport {
@@ -50,6 +51,10 @@ pub enum CmdState {
 
 pub trait ViMode {
 	fn handle_key(&mut self, key: E) -> Option<ViCmd>;
+	fn handle_key_fallible(&mut self, key: E) -> Result<Option<ViCmd>,String> {
+		// Default behavior
+		Ok(self.handle_key(key))
+	}
 	fn is_repeatable(&self) -> bool;
 	fn as_replay(&self) -> Option<CmdReplay>;
 	fn cursor_style(&self) -> String;
@@ -62,10 +67,23 @@ pub trait ViMode {
 		let mut cmds = vec![];
 		for ch in raw.graphemes(true) {
 			let key = E::new(ch, M::NONE);
-			let Some(cmd) = self.handle_key(key) else {
-				continue
-			};
-			cmds.push(cmd)
+			match self.report_mode() {
+				ModeReport::Ex => {
+					let Ok(option) = self.handle_key_fallible(key) else {
+						return vec![]
+					};
+					let Some(cmd) = option else {
+						continue
+					};
+					cmds.push(cmd)
+				}
+				_ => {
+					let Some(cmd) = self.handle_key(key) else {
+						continue
+					};
+					cmds.push(cmd)
+				}
+			}
 		}
 		cmds
 	}

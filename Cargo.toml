@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 bitflags = "2.9.1"
 env_logger = "0.11.8"
+itertools = "0.14.0"
 log = "0.4.27"
 rayon = "1.10.0"
 regex = "1.11.1"

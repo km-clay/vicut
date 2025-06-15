@@ -1,6 +1,7 @@
-use log::trace;
+use log::{debug, trace};
 
 use crate::linebuf::{ordered, ClampedUsize};
+use crate::modes::ex::ViEx;
 use crate::modes::search::ViSearch;
 use crate::reader::{KeyReader, RawReader};
 
@@ -40,13 +41,17 @@ impl ViCut {
 				break
 			};
 
-			let Some(mut cmd) = self.mode.handle_key(key) else {
+			let Some(mut cmd) = self.mode.handle_key_fallible(key)? else {
 				continue
 			};
 			cmd.alter_line_motion_if_no_verb();
+			let return_to_normal = cmd.flags.contains(CmdFlags::EXIT_CUR_MODE);
 
 
 			self.exec_cmd(cmd)?;
+			if return_to_normal {
+				self.set_normal_mode();
+			}
 			let new_pos_clamped = self.editor.cursor;
 			let new_pos = new_pos_clamped.get();
 			if new_pos < start {
@@ -61,7 +66,7 @@ impl ViCut {
 
 		let (start,end) = ordered(start, end);
 
-		let slice = if let Some((start,mut end)) = self.editor.select_range() {
+		if let Some((start,mut end)) = self.editor.select_range() {
 			// We are in visual mode if we've made it here
 			// So we are going to use the editor's selected range
 			if matches!(self.editor.select_mode,Some(SelectMode::Char(_))) {
@@ -90,8 +95,7 @@ impl ViCut {
 				trace!("Failed to slice buffer from cursor motion");
 			}
 			slice
-		};
-		slice
+		}
 	}
 
 	pub fn move_cursor(&mut self, cmd: &str) -> Result<(),String> {
@@ -141,13 +145,20 @@ impl ViCut {
 					selecting = true;
 					Box::new(ViVisual::new())
 				}
+
+				// For these two we will return early instead of doing all the other stuff.
+				// This is to preserve the line buffer's state while we are entering a pattern in search mode
+				// If we continue from here, visual mode selections will be lost for instance.
+				Verb::ExMode => {
+					let mut mode: Box<dyn ViMode> = Box::new(ViEx::new(self.editor.select_range()));
+					std::mem::swap(&mut mode, &mut self.mode);
+
+					return Ok(())
+				}
 				Verb::SearchMode(count,dir) => {
 					let mut mode: Box<dyn ViMode> = Box::new(ViSearch::new(count,dir));
 					std::mem::swap(&mut mode, &mut self.mode);
 
-					// We will now return early instead of doing all the other stuff.
-					// This is to preserve the line buffer's state while we are entering a pattern in search mode
-					// If we continue from here, visual mode selections will be lost for instance.
 					return Ok(())
 				}
 

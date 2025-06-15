@@ -213,77 +213,77 @@ impl Argv {
 
 fn get_help() -> String {
 	let mut help = String::new();
-	writeln!(help).unwrap();
-	writeln!(help, "\x1b[1mvicut\x1b[0m").unwrap();
-	writeln!(help, "A text processor that uses Vim motions to slice and extract structured data from stdin.").unwrap();
-	writeln!(help).unwrap();
-	writeln!(help).unwrap();
-	writeln!(help, "\x1b[1;4mUSAGE:\x1b[0m").unwrap();
-	writeln!(help, "\tvicut [OPTIONS] [COMMANDS]...").unwrap();
-	writeln!(help).unwrap();
-	writeln!(help).unwrap();
-	writeln!(help, "\x1b[1;4mOPTIONS:\x1b[0m").unwrap();
-	writeln!(help, "\t-t, --template <STR>").unwrap();
-	writeln!(help, "\t\tProvide a format template to use for custom output formats. Example:").unwrap();
-	writeln!(help, "\t\t--template \"< {{{{1}}}} > ( {{{{2}}}} ) {{ {{{{3}}}} }}\"").unwrap();
-	writeln!(help, "\t\tNames given to fields explicitly using '-c name=<name>' should be used instead of field numbers.").unwrap();
-	writeln!(help).unwrap();
-	writeln!(help, "\t-d, --delimiter <STR>").unwrap();
-	writeln!(help, "\t\tProvide a delimiter to place between fields in the output. No effect when used with --json.").unwrap();
-	writeln!(help).unwrap();
-	writeln!(help, "\t--keep-mode").unwrap();
-	writeln!(help, "\t\tThe internal editor will not return to normal mode after each command.").unwrap();
-	writeln!(help).unwrap();
-	writeln!(help, "\t--json").unwrap();
-	writeln!(help, "\t\tOutput the result as structured JSON.").unwrap();
-	writeln!(help).unwrap();
-	writeln!(help, "\t--linewise").unwrap();
-	writeln!(help, "\t\tApply given commands to each line in the given input.").unwrap();
-	writeln!(help, "\t\tEach line in the input is treated as it's own separate buffer.").unwrap();
-	writeln!(help, "\t\tThis operation is multi-threaded.").unwrap();
-	writeln!(help).unwrap();
-	writeln!(help, "\t--serial").unwrap();
-	writeln!(help, "\t\tWhen used with --linewise, operates on each line sequentially instead of using multi-threading.").unwrap();
-	writeln!(help, "\t\tNote that the order of lines is maintained regardless of whether or not multi-threading is used.").unwrap();
-	writeln!(help).unwrap();
-	writeln!(help, "\t--jobs").unwrap();
-	writeln!(help, "\t\tWhen used with --linewise, limits the number of threads that the program can use.").unwrap();
-	writeln!(help).unwrap();
-	writeln!(help, "\t--trim-fields").unwrap();
-	writeln!(help, "\t\tTrim leading and trailing whitespace from captured fields.").unwrap();
-	writeln!(help).unwrap();
-	writeln!(help, "\t--trace").unwrap();
-	writeln!(help, "\t\tPrint debug trace of command execution").unwrap();
-	writeln!(help).unwrap();
-	writeln!(help).unwrap();
-	writeln!(help, "\x1b[1;4mCOMMANDS:\x1b[0m").unwrap();
-	writeln!(help, "\t-c, --cut [name=<NAME>] <VIM_COMMAND>").unwrap();
-	writeln!(help, "\t\tExecute a Vim command on the buffer, and capture the text between the cursor's start and end positions as a field.").unwrap();
-	writeln!(help, "\t\tFields can be optionally given a name, which will be used as the key for that field in formatted JSON output.").unwrap();
-	writeln!(help).unwrap();
-	writeln!(help, "\t-m, --move <VIM_COMMAND>").unwrap();
-	writeln!(help, "\t\tLogically identical to -c/--cut, except it does not capture a field.").unwrap();
-	writeln!(help).unwrap();
-	writeln!(help, "\t-r, --repeat <N> <R>").unwrap();
-	writeln!(help, "\t\tRepeat the last N commands R times. Repeats can be nested.").unwrap();
-	writeln!(help).unwrap();
-	writeln!(help, "\t-n, --next").unwrap();
-	writeln!(help, "\t\tStart a new field group. Each field group becomes one output record.").unwrap();
-	writeln!(help).unwrap();
-	writeln!(help).unwrap();
-	writeln!(help, "\x1b[1;4mNOTES:\x1b[0m").unwrap();
-	writeln!(help, "\t* Commands are executed left to right.").unwrap();
-	writeln!(help, "\t* Cursor state is maintained between commands, but the editor returns to normal mode between each command.").unwrap();
-	writeln!(help, "\t* Commands are not limited to only motions. Commands which edit the buffer can be executed as well.").unwrap();
-	writeln!(help).unwrap();
-	writeln!(help).unwrap();
-	writeln!(help, "\x1b[1;4mEXAMPLE:\x1b[0m").unwrap();
+	writeln!(help).ok();
+	writeln!(help, "\x1b[1mvicut\x1b[0m").ok();
+	writeln!(help, "A text processor that uses Vim motions to slice and extract structured data from stdin.").ok();
+	writeln!(help).ok();
+	writeln!(help).ok();
+	writeln!(help, "\x1b[1;4mUSAGE:\x1b[0m").ok();
+	writeln!(help, "\tvicut [OPTIONS] [COMMANDS]...").ok();
+	writeln!(help).ok();
+	writeln!(help).ok();
+	writeln!(help, "\x1b[1;4mOPTIONS:\x1b[0m").ok();
+	writeln!(help, "\t-t, --template <STR>").ok();
+	writeln!(help, "\t\tProvide a format template to use for custom output formats. Example:").ok();
+	writeln!(help, "\t\t--template \"< {{{{1}}}} > ( {{{{2}}}} ) {{ {{{{3}}}} }}\"").ok();
+	writeln!(help, "\t\tNames given to fields explicitly using '-c name=<name>' should be used instead of field numbers.").ok();
+	writeln!(help).ok();
+	writeln!(help, "\t-d, --delimiter <STR>").ok();
+	writeln!(help, "\t\tProvide a delimiter to place between fields in the output. No effect when used with --json.").ok();
+	writeln!(help).ok();
+	writeln!(help, "\t--keep-mode").ok();
+	writeln!(help, "\t\tThe internal editor will not return to normal mode after each command.").ok();
+	writeln!(help).ok();
+	writeln!(help, "\t--json").ok();
+	writeln!(help, "\t\tOutput the result as structured JSON.").ok();
+	writeln!(help).ok();
+	writeln!(help, "\t--linewise").ok();
+	writeln!(help, "\t\tApply given commands to each line in the given input.").ok();
+	writeln!(help, "\t\tEach line in the input is treated as it's own separate buffer.").ok();
+	writeln!(help, "\t\tThis operation is multi-threaded.").ok();
+	writeln!(help).ok();
+	writeln!(help, "\t--serial").ok();
+	writeln!(help, "\t\tWhen used with --linewise, operates on each line sequentially instead of using multi-threading.").ok();
+	writeln!(help, "\t\tNote that the order of lines is maintained regardless of whether or not multi-threading is used.").ok();
+	writeln!(help).ok();
+	writeln!(help, "\t--jobs").ok();
+	writeln!(help, "\t\tWhen used with --linewise, limits the number of threads that the program can use.").ok();
+	writeln!(help).ok();
+	writeln!(help, "\t--trim-fields").ok();
+	writeln!(help, "\t\tTrim leading and trailing whitespace from captured fields.").ok();
+	writeln!(help).ok();
+	writeln!(help, "\t--trace").ok();
+	writeln!(help, "\t\tPrint debug trace of command execution").ok();
+	writeln!(help).ok();
+	writeln!(help).ok();
+	writeln!(help, "\x1b[1;4mCOMMANDS:\x1b[0m").ok();
+	writeln!(help, "\t-c, --cut [name=<NAME>] <VIM_COMMAND>").ok();
+	writeln!(help, "\t\tExecute a Vim command on the buffer, and capture the text between the cursor's start and end positions as a field.").ok();
+	writeln!(help, "\t\tFields can be optionally given a name, which will be used as the key for that field in formatted JSON output.").ok();
+	writeln!(help).ok();
+	writeln!(help, "\t-m, --move <VIM_COMMAND>").ok();
+	writeln!(help, "\t\tLogically identical to -c/--cut, except it does not capture a field.").ok();
+	writeln!(help).ok();
+	writeln!(help, "\t-r, --repeat <N> <R>").ok();
+	writeln!(help, "\t\tRepeat the last N commands R times. Repeats can be nested.").ok();
+	writeln!(help).ok();
+	writeln!(help, "\t-n, --next").ok();
+	writeln!(help, "\t\tStart a new field group. Each field group becomes one output record.").ok();
+	writeln!(help).ok();
+	writeln!(help).ok();
+	writeln!(help, "\x1b[1;4mNOTES:\x1b[0m").ok();
+	writeln!(help, "\t* Commands are executed left to right.").ok();
+	writeln!(help, "\t* Cursor state is maintained between commands, but the editor returns to normal mode between each command.").ok();
+	writeln!(help, "\t* Commands are not limited to only motions. Commands which edit the buffer can be executed as well.").ok();
+	writeln!(help).ok();
+	writeln!(help).ok();
+	writeln!(help, "\x1b[1;4mEXAMPLE:\x1b[0m").ok();
 	writeln!(help, "\t$ echo 'foo bar (boo far) [bar foo]' | vicut --delimiter ' -- ' \\
-\t-c 'e' -m 'w' -r 2 1 -c 'va)' -c 'va]'").unwrap();
-	writeln!(help, "\toutputs:").unwrap();
-	writeln!(help, "\tfoo -- bar -- (boo far) -- [bar foo]").unwrap();
-	writeln!(help).unwrap();
-	writeln!(help, "For more info, see: https://github.com/km-clay/vicut").unwrap();
+\t-c 'e' -m 'w' -r 2 1 -c 'va)' -c 'va]'").ok();
+	writeln!(help, "\toutputs:").ok();
+	writeln!(help, "\tfoo -- bar -- (boo far) -- [bar foo]").ok();
+	writeln!(help).ok();
+	writeln!(help, "For more info, see: https://github.com/km-clay/vicut").ok();
 	help
 }
 
@@ -387,10 +387,10 @@ fn format_output_template(template: &str, lines: Vec<Vec<(String,String)>>) -> R
 							cur_line.push_str(field);
 						} else {
 							let mut e = String::new();
-							write!(e,"Did not find a field called '{field_name}' for output template").unwrap();
-							write!(e,"Captured field names were:").unwrap();
+							write!(e,"Did not find a field called '{field_name}' for output template").ok();
+							write!(e,"Captured field names were:").ok();
 							for (name,_) in line {
-								write!(e,"\t{name}").unwrap();
+								write!(e,"\t{name}").ok();
 							}
 							return Err(e)
 						}
@@ -543,27 +543,24 @@ fn execute_multi_thread(stream: Box<dyn BufRead>, args: &Argv) -> String {
 	});
 
 	// Pair each line with its original index
-	let mut results: Vec<_> = lines
+	let mut lines: Vec<_> = lines
 		.into_par_iter()
 		.enumerate()
 		.map(|(i, line)| {
-			let output = execute(args, line);
+			let output = match execute(args, line) {
+				Ok(line) => line,
+				Err(e) => {
+					eprintln!("vicut: {e}");
+					std::process::exit(1)
+				}
+			};
 			(i, output)
 		})
 	.collect();
-	results.sort_by_key(|(i,_)| *i);
-	let lines = results.into_iter().map(|(_,result)| {
-		match result {
-			Ok(line) => line,
-			Err(e) => {
-				eprintln!("vicut: {e}");
-				std::process::exit(1)
-			}
-		}
-	}).collect::<Vec<_>>();
+	lines.sort_by_key(|(i,_)| *i);
 	let mut output = String::new();
-	for line in lines {
-		write!(output,"{line}").unwrap();
+	for (_,line) in lines {
+		write!(output,"{line}").ok();
 	}
 	output
 }
@@ -572,10 +569,10 @@ fn execute_multi_thread(stream: Box<dyn BufRead>, args: &Argv) -> String {
 fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 	if args.is_empty() {
 		let mut output = String::new();
-		write!(output,"USAGE:").unwrap(); 
-		write!(output,"\tvicut [OPTIONS] [COMMANDS]...").unwrap();
-		writeln!(output).unwrap();
-		write!(output,"use '--help' for more information").unwrap();
+		write!(output,"USAGE:").ok(); 
+		write!(output,"\tvicut [OPTIONS] [COMMANDS]...").ok();
+		writeln!(output).ok();
+		write!(output,"use '--help' for more information").ok();
 		return Err(output)
 	}
 	if args.iter().any(|arg| *arg == "--help" || *arg == "-h") {
@@ -606,7 +603,7 @@ fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 				match result {
 					Ok(line) => {
 						match execute(&args,line) {
-							Ok(new_line) => write!(output,"{new_line}").unwrap(),
+							Ok(new_line) => write!(output,"{new_line}").ok(),
 							Err(e) => {
 								return Err(format!("vicut: {e}"));
 							}
@@ -615,9 +612,9 @@ fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 					Err(e) => {
 						return Err(format!("vicut: {e}"));
 					}
-				}
+				};
 			}
-			write!(stdout, "{output}").unwrap()
+			write!(stdout, "{output}").ok();
 		} else if let Some(num) = args.max_jobs {
 			let pool = rayon::ThreadPoolBuilder::new()
 				.num_threads(num as usize)
@@ -630,11 +627,11 @@ fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 				let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input.to_string())));
 				execute_multi_thread(stream, &args)
 			});
-			write!(stdout, "{output}").unwrap();
+			write!(stdout, "{output}").ok();
 		} else {
 			let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input.to_string())));
 			let output = execute_multi_thread(stream, &args);
-			write!(stdout, "{output}").unwrap();
+			write!(stdout, "{output}").ok();
 		}
 	} else {
 		let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input)));
@@ -646,9 +643,9 @@ fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 			}
 		}
 		match execute(&args,input) {
-			Ok(output) => write!(stdout,"{output}").unwrap(),
+			Ok(output) => write!(stdout,"{output}").ok(),
 			Err(e) => return Err(format!("vicut: {e}")),
-		}
+		};
 	}
 	Ok(stdout)
 }
@@ -691,7 +688,7 @@ fn main() {
 				match result {
 					Ok(line) => {
 						match execute(&args,line) {
-							Ok(new_line) => write!(output,"{new_line}").unwrap(),
+							Ok(new_line) => write!(output,"{new_line}").ok(),
 							Err(e) => {
 								eprintln!("vicut: {e}");
 								return;
@@ -702,9 +699,9 @@ fn main() {
 						eprintln!("vicut: {e}");
 						return;
 					}
-				}
+				};
 			}
-			write!(stdout, "{output}").unwrap()
+			write!(stdout, "{output}").ok();
 		} else if let Some(num) = args.max_jobs {
 			let pool = rayon::ThreadPoolBuilder::new()
 				.num_threads(num as usize)
@@ -717,11 +714,11 @@ fn main() {
 				let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
 				execute_multi_thread(stream, &args)
 			});
-			write!(stdout, "{output}").unwrap();
+			write!(stdout, "{output}").ok();
 		} else {
 			let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
 			let output = execute_multi_thread(stream, &args);
-			write!(stdout, "{output}").unwrap();
+			write!(stdout, "{output}").ok();
 		}
 	} else {
 		let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
@@ -734,8 +731,8 @@ fn main() {
 			}
 		}
 		match execute(&args,input) {
-			Ok(output) => write!(stdout,"{output}").unwrap(),
+			Ok(output) => { write!(stdout,"{output}").ok(); }
 			Err(e) => eprintln!("vicut: {e}"),
-		}
+		};
 	}
 }

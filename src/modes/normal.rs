@@ -230,6 +230,17 @@ impl ViNormal {
 					chars = chars_clone;
 					break 'verb_parse Some(VerbCmd(count, Verb::Dedent));
 				}
+				':' => {
+					return Some(
+						ViCmd {
+							register,
+							verb: Some(VerbCmd(1, Verb::ExMode)),
+							motion: None,
+							raw_seq: self.take_cmd(),
+							flags: self.flags(),
+					}
+					)
+				}
 				'/' => {
 					return Some(
 						ViCmd {
