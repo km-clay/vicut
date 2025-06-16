@@ -47,7 +47,6 @@ impl ViCut {
 			let return_to_normal = cmd.flags.contains(CmdFlags::EXIT_CUR_MODE);
 
 
-			dbg!(&cmd);
 			self.exec_cmd(cmd)?;
 			if return_to_normal {
 				self.set_normal_mode();
@@ -67,7 +66,6 @@ impl ViCut {
 					let return_to_normal = cmd.flags.contains(CmdFlags::EXIT_CUR_MODE);
 
 
-					dbg!(&cmd);
 					self.exec_cmd(cmd)?;
 					if return_to_normal {
 						self.set_normal_mode();
@@ -97,6 +95,9 @@ impl ViCut {
 			}
 			slice
 		} else {
+			if self.editor.buffer.is_empty() {
+				return Ok(String::new())
+			}
 			let start = ClampedUsize::new(start, self.editor.cursor.cap(), true);
 			let end = ClampedUsize::new(end, self.editor.cursor.cap(), false);
 			let start_pos = start.get();

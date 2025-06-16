@@ -1,20 +1,19 @@
-use std::sync::Mutex;
+use std::{cell::RefCell, sync::Mutex};
 
-pub static REGISTERS: Mutex<Registers> = Mutex::new(Registers::new());
+thread_local! {
+	pub static REGISTERS: RefCell<Registers> = const { RefCell::new(Registers::new()) };
+}
 
 pub fn read_register(ch: Option<char>) -> Option<String> {
-	let lock = REGISTERS.lock().unwrap();
-	lock.get_reg(ch).map(|r| r.buf().clone())
+	REGISTERS.with_borrow(|regs| regs.get_reg(ch).map(|r| r.buf().clone()))
 }
 
 pub fn write_register(ch: Option<char>, buf: String) {
-	let mut lock = REGISTERS.lock().unwrap();
-	if let Some(r) = lock.get_reg_mut(ch) { r.write(buf) }
+	REGISTERS.with_borrow_mut(|regs| if let Some(r) = regs.get_reg_mut(ch) { r.write(buf) })
 }
 
 pub fn append_register(ch: Option<char>, buf: String) {
-	let mut lock = REGISTERS.lock().unwrap();
-	if let Some(r) = lock.get_reg_mut(ch) { r.append(buf) }
+	REGISTERS.with_borrow_mut(|regs| if let Some(r) = regs.get_reg_mut(ch) { r.append(buf) })
 }
 
 #[derive(Default,Debug)]
@@ -50,6 +49,7 @@ pub struct Registers {
 
 impl Registers {
 	pub const fn new() -> Self {
+		// default() isn't constant :(
 		Self {
 			default: Register(String::new()),
 			a: Register(String::new()),

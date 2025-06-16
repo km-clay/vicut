@@ -1,5 +1,5 @@
 #![allow(clippy::unnecessary_to_owned,clippy::while_let_on_iterator)]
-use std::{fmt::Write,io::{self, Write as IoWrite, BufRead}};
+use std::{collections::BTreeMap, fmt::Write, fs, io::{self, BufRead, Write as IoWrite}, path::{Path, PathBuf}};
 
 
 use exec::ViCut;
@@ -33,15 +33,19 @@ struct Argv {
 	delimiter: Option<String>,
 	template: Option<String>,
 	max_jobs: Option<u32>,
+	backup_extension: Option<String>,
 
+	edit_inplace: bool,
 	json: bool,
 	trace: bool,
 	linewise: bool,
 	trim_fields: bool,
 	keep_mode: bool,
+	backup_files: bool,
 	single_thread: bool,
 
-	cmds: Vec<Cmd>
+	cmds: Vec<Cmd>,
+	files: Vec<PathBuf>
 }
 
 impl Argv {
@@ -67,6 +71,21 @@ impl Argv {
 				}
 				"--keep-mode" => {
 					new.keep_mode = true;
+				}
+				"--backup" => {
+					new.backup_files = true;
+				}
+				"-i" => {
+					new.edit_inplace = true;
+				}
+				"--backup-extension" => {
+					let Some(next_arg) = args.next() else { 
+						return Err(format!("Expected a string after '{arg}'"))
+					};
+					if next_arg.starts_with('-') {
+						return Err(format!("Expected a string after '{arg}', found {next_arg}"))
+					}
+					new.backup_extension = Some(next_arg.to_string())
 				}
 				"--template" | "-t" => {
 					let Some(next_arg) = args.next() else { 
@@ -122,7 +141,7 @@ impl Argv {
 						new.cmds.push(Cmd::Field(arg.to_string()));
 					}
 				}
-				arg => { return Err(format!("Unrecognized argument '{arg}'")) }
+				_ => new.handle_filename(arg.to_string())
 			}
 		}
 		Ok(new)
@@ -149,6 +168,12 @@ impl Argv {
 				}
 				"--keep-mode" => {
 					new.keep_mode = true;
+				}
+				"--backup" => {
+					new.backup_files = true;
+				}
+				"-i" => {
+					new.edit_inplace = true;
 				}
 				"--template" | "-t" => {
 					let Some(next_arg) = args.next() else { 
@@ -204,10 +229,28 @@ impl Argv {
 						new.cmds.push(Cmd::Field(arg));
 					}
 				}
-				arg => { return Err(format!("Unrecognized argument '{arg}'")) }
+				_ => new.handle_filename(arg)
 			}
 		}
 		Ok(new)
+	}
+	fn handle_filename(&mut self, filename: String) {
+		let path = PathBuf::from(filename.trim().to_string());
+		if !path.exists() {
+			eprintln!("vicut: file not found '{}'",path.display());
+			std::process::exit(1);
+		}
+		if !path.is_file() {
+			eprintln!("vicut: '{}' is not a file",path.display());
+			std::process::exit(1);
+		}
+		if fs::File::open(&path).is_err() {
+			eprintln!("vicut: failed to read file '{}'",path.display());
+			std::process::exit(1);
+		}
+		if !self.files.contains(&path) {
+			self.files.push(path)
+		}
 	}
 }
 
@@ -219,7 +262,7 @@ fn get_help() -> String {
 	writeln!(help).ok();
 	writeln!(help).ok();
 	writeln!(help, "\x1b[1;4mUSAGE:\x1b[0m").ok();
-	writeln!(help, "\tvicut [OPTIONS] [COMMANDS]...").ok();
+	writeln!(help, "\tvicut [OPTIONS] [COMMANDS] [FILES]").ok();
 	writeln!(help).ok();
 	writeln!(help).ok();
 	writeln!(help, "\x1b[1;4mOPTIONS:\x1b[0m").ok();
@@ -251,6 +294,15 @@ fn get_help() -> String {
 	writeln!(help).ok();
 	writeln!(help, "\t--trim-fields").ok();
 	writeln!(help, "\t\tTrim leading and trailing whitespace from captured fields.").ok();
+	writeln!(help).ok();
+	writeln!(help, "\t-i").ok();
+	writeln!(help, "\t\tEdit given files in-place.").ok();
+	writeln!(help).ok();
+	writeln!(help, "\t--backup").ok();
+	writeln!(help, "\t\tIf editing files in-place, create a backup first.").ok();
+	writeln!(help).ok();
+	writeln!(help, "\t--backup-extension").ok();
+	writeln!(help, "\t\tIf --backup is set, use the given file extension. Default is '.bak'").ok();
 	writeln!(help).ok();
 	writeln!(help, "\t--trace").ok();
 	writeln!(help, "\t\tPrint debug trace of command execution").ok();
@@ -483,9 +535,9 @@ fn exec_cmd(
 			for _ in 0..*n_repeats {
 
 				let mut pulled_cmds = vec![];
-				let end = spent_cmds.len().saturating_sub(1);
-				let offset = end.saturating_sub(*n_cmds);
-				pulled_cmds.extend(spent_cmds.drain(offset..));
+				let total = spent_cmds.len();
+				let start = total.saturating_sub(*n_cmds);
+				pulled_cmds.extend(spent_cmds.drain(start..));
 
 				for r_cmd in pulled_cmds {
 					// We use recursion so that we can nest repeats easily
@@ -545,7 +597,76 @@ fn exec_cmd(
 	}
 }
 
-fn execute_multi_thread(stream: Box<dyn BufRead>, args: &Argv) -> String {
+fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Argv) {
+	// Filename, Line number, Line content
+	let mut work: Vec<(PathBuf, usize, String)> = vec![];
+
+	for file in &args.files {
+		let contents = fs::read_to_string(file).unwrap_or_else(|e| {
+			eprintln!("vicut: failed to read file '{}': {e}",file.display());
+			std::process::exit(1);
+		});
+		if args.edit_inplace && args.backup_files {
+			let extension = args.backup_extension.as_deref().unwrap_or("bak");
+			let backup_path = file.with_extension(format!(
+					"{}.{extension}",
+					file.extension()
+					.and_then(|ext| ext.to_str())
+					.unwrap_or("")
+			));
+
+			fs::copy(file, &backup_path).unwrap_or_else(|e| {
+				eprintln!("vicut: failed to back up file '{}': {e}", file.display());
+				std::process::exit(1)
+			});
+		}
+		for (line_no,line) in contents.lines().enumerate() {
+			work.push((file.clone(), line_no, line.to_string()));
+		}
+	}
+
+	// Process each line's content
+	let results = work.into_par_iter()
+		.map(|(path, line_no, line)| {
+			let processed = match execute(args, line) {
+				Ok(line) => line,
+				Err(e) => {
+					eprintln!("vicut: error in file '{}', line {}: {e}",path.display(),line_no);
+					std::process::exit(1)
+				}
+			};
+			(path, line_no, processed)
+		}).collect::<Vec<_>>();
+
+	// Separate content by file
+	let mut per_file: BTreeMap<PathBuf, Vec<(usize,String)>> = BTreeMap::new();
+	for (path, line_no, processed) in results {
+		per_file.entry(path)
+			.or_default()
+			.push((line_no,processed));
+	}
+	// Write back to file
+	for (path, mut lines) in per_file {
+		lines.sort_by_key(|(line_no,_)| *line_no); // Sort lines
+		let output_final = lines.into_iter()
+			.map(|(_,line)| line)
+			.collect::<Vec<_>>()
+			.join("");
+
+		if args.edit_inplace {
+			fs::write(&path, output_final).unwrap_or_else(|e| {
+				eprintln!("vicut: failed to write to file '{}': {e}",path.display());
+				std::process::exit(1)
+			});
+		} else if args.files.len() > 1 {
+			write!(stdout, "--- {}\n{}",path.display(), output_final).ok();
+		} else {
+			write!(stdout, "{output_final}").ok();
+		}
+	}
+}
+
+fn execute_multi_thread_stdin(stream: Box<dyn BufRead>, args: &Argv) -> String {
 	let lines: Vec<_> = stream.lines().collect::<Result<_,_>>().unwrap_or_else(|e| {
 		eprintln!("vicut: {e}");
 		std::process::exit(1);
@@ -632,11 +753,11 @@ fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 				});
 			Ok(pool.install(|| {
 				let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input.to_string())));
-				execute_multi_thread(stream, &args)
+				execute_multi_thread_stdin(stream, &args)
 			}))
 		} else {
 			let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input.to_string())));
-			Ok(execute_multi_thread(stream, &args))
+			Ok(execute_multi_thread_stdin(stream, &args))
 		}
 	} else {
 		let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input)));
@@ -693,51 +814,157 @@ fn main() {
 
 	init_logger(args.trace);
 
-	let mut stdout = io::stdout().lock();
-
 	if args.linewise {
 		if args.single_thread {
+			let mut stdout = io::stdout().lock();
+
 			// We need to initialize stream in each branch, since Box<dyn BufReader> does not implement send/sync
 			// So using it in pool.install() doesn't work. We have to initialize it in the closure there.
-			let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
 			let mut output = String::new();
-			for result in stream.lines() {
-				match result {
-					Ok(line) => {
-						match execute(&args,line) {
-							Ok(new_line) => write!(output,"{new_line}").ok(),
+			if !args.files.is_empty() {
+				for path in &args.files {
+					let file = fs::File::open(path).unwrap_or_else(|e| {
+						eprintln!("vicut: failed to read file '{}': {e}",path.display());
+						std::process::exit(1)
+					});
+					if args.edit_inplace && args.backup_files {
+						let extension = args.backup_extension.as_deref().unwrap_or("bak");
+						let backup_path = path.with_extension(format!(
+								"{}.{extension}",
+								path.extension()
+								.and_then(|ext| ext.to_str())
+								.unwrap_or("")
+						));
+
+						fs::copy(path, &backup_path).unwrap_or_else(|e| {
+							eprintln!("vicut: failed to back up file '{}': {e}", path.display());
+							std::process::exit(1)
+						});
+					}
+					let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(file));
+					for result in stream.lines() {
+						match result {
+							Ok(line) => {
+								match execute(&args,line) {
+									Ok(new_line) => write!(output,"{new_line}").ok(),
+									Err(e) => {
+										eprintln!("vicut: {e}");
+										return;
+									}
+								}
+							}
 							Err(e) => {
 								eprintln!("vicut: {e}");
 								return;
 							}
+						};
+					}
+					if args.edit_inplace {
+						fs::write(path, std::mem::take(&mut output)).unwrap_or_else(|e| {
+							eprintln!("vicut: failed to write to file '{}': {e}",path.display());
+							std::process::exit(1)
+						});
+					} else {
+						if args.files.len() > 1 {
+							writeln!(stdout,"--- {}", path.display()).ok();
 						}
+						write!(stdout, "{output}").ok();
 					}
-					Err(e) => {
-						eprintln!("vicut: {e}");
-						return;
-					}
-				};
+				}
+			} else {
+				let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
+				for result in stream.lines() {
+					match result {
+						Ok(line) => {
+							match execute(&args,line) {
+								Ok(new_line) => write!(output,"{new_line}").ok(),
+								Err(e) => {
+									eprintln!("vicut: {e}");
+									return;
+								}
+							}
+						}
+						Err(e) => {
+							eprintln!("vicut: {e}");
+							return;
+						}
+					};
+				}
 			}
 			write!(stdout, "{output}").ok();
+
 		} else if let Some(num) = args.max_jobs {
-			let pool = rayon::ThreadPoolBuilder::new()
-				.num_threads(num as usize)
-				.build()
-				.unwrap_or_else(|e| {
-					eprintln!("vicut: Failed to build thread pool: {e}");
-					std::process::exit(1)
+				let pool = rayon::ThreadPoolBuilder::new()
+					.num_threads(num as usize)
+					.build()
+					.unwrap_or_else(|e| {
+						eprintln!("vicut: Failed to build thread pool: {e}");
+						std::process::exit(1)
+					});
+				pool.install(|| {
+					let mut stdout = io::stdout().lock();
+					let output = if !args.files.is_empty() {
+						execute_multi_thread_files(stdout, &args);
+						// Output has already been handled
+						std::process::exit(0);
+					} else {
+						let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
+						execute_multi_thread_stdin(stream, &args)
+					};
+					write!(stdout, "{output}").ok();
 				});
-			let output = pool.install(|| {
-				let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
-				execute_multi_thread(stream, &args)
-			});
-			write!(stdout, "{output}").ok();
 		} else {
-			let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
-			let output = execute_multi_thread(stream, &args);
+			let mut stdout = io::stdout().lock();
+			let output = if !args.files.is_empty() {
+				execute_multi_thread_files(stdout, &args);
+				// Output has already been handled
+				std::process::exit(0);
+			} else {
+				let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
+				execute_multi_thread_stdin(stream, &args)
+			};
 			write!(stdout, "{output}").ok();
 		}
+	} else if !args.files.is_empty() {
+		let mut stdout = io::stdout().lock();
+		for path in &args.files {
+			let content = fs::read_to_string(path).unwrap_or_else(|e| {
+				eprintln!("vicut: failed to read file '{}': {e}",path.display());
+				std::process::exit(1)
+			});
+			if args.edit_inplace && args.backup_files {
+				let extension = args.backup_extension.as_deref().unwrap_or("bak");
+				let backup_path = path.with_extension(format!(
+						"{}.{extension}",
+						path.extension()
+						.and_then(|ext| ext.to_str())
+						.unwrap_or("")
+				));
+
+				fs::copy(path, &backup_path).unwrap_or_else(|e| {
+					eprintln!("vicut: failed to back up file '{}': {e}", path.display());
+					std::process::exit(1)
+				});
+			}
+			match execute(&args,content) {
+				Ok(mut output) => {
+					if args.edit_inplace {
+						fs::write(path, std::mem::take(&mut output)).unwrap_or_else(|e| {
+							eprintln!("vicut: failed to write to file '{}': {e}",path.display());
+							std::process::exit(1)
+						});
+					} else {
+						if args.files.len() > 1 {
+							writeln!(stdout,"--- {}", path.display()).ok();
+						}
+						write!(stdout,"{output}").ok(); 
+					}
+				}
+				Err(e) => eprintln!("vicut: {e}"),
+			};
+		}
 	} else {
+		let mut stdout = io::stdout().lock();
 		let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
 		let mut input = String::new();
 		match stream.read_to_string(&mut input) {

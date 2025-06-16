@@ -1767,7 +1767,6 @@ impl LineBuf {
 			LineAddr::Current => Some(self.cursor_line_number()),
 			LineAddr::Last => Some(self.total_lines()),
 			LineAddr::Offset(offset) => {
-				dbg!(offset);
 				let current = self.cursor_line_number();
 				Some(current.saturating_add_signed(offset))
 			}
