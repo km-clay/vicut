@@ -1303,7 +1303,7 @@ impl ViMode for ViNormal {
 	  false
 	}
 	fn clamp_cursor(&self) -> bool {
-	  true
+		true
 	}
 	fn hist_scroll_start_pos(&self) -> Option<To> {
 		None

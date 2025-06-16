@@ -100,6 +100,7 @@ impl ViMode for ViEx {
 
 fn parse_ex_cmd(raw: &str, select_range: Option<(usize,usize)>) -> Result<Option<ViCmd>,()> {
 	let raw = raw.trim();
+	dbg!(raw);
 	if raw.is_empty() {
 		return Ok(None)
 	}
@@ -125,6 +126,7 @@ fn parse_ex_address(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Motion>,()
 		chars.next();
 		return Ok(Some(Motion::LineRange(LineAddr::Number(1),LineAddr::Last)))
 	}
+	dbg!("parsing address");
 	let Some(start) = parse_one_addr(chars)? else { return Ok(Some(Motion::WholeLine)) };
 	if let Some(&',') = chars.peek() {
 		chars.next();
@@ -147,6 +149,16 @@ fn parse_one_addr(chars: &mut Peekable<Chars<'_>>) -> Result<Option<LineAddr>,()
 				.map_err(|_| ())?;
 
 			Ok(Some(LineAddr::Number(number)))
+		}
+		'+' | '-' => {
+			let mut digits = String::new();
+			digits.push(first);
+			digits.extend(chars.peeking_take_while(|c| c.is_ascii_digit()));
+
+			let number = digits.parse::<isize>()
+				.map_err(|_| ())?;
+
+			Ok(Some(LineAddr::Offset(number)))
 		}
 		'/' | '?' => {
 			let mut pattern = String::new();

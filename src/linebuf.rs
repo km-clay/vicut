@@ -158,6 +158,8 @@ pub enum MotionKind {
 	Onto(usize), // Absolute position, operations include the position but motions exclude it (wtf vim)
 	Inclusive((usize,usize)), // Range, inclusive
 	Exclusive((usize,usize)), // Range, exclusive
+	Line(usize),
+	LineRange(usize,usize),
 
 	// Used for linewise operations like 'dj', left is the selected range, right is the cursor's new position on the line
 	InclusiveWithTargetCol((usize,usize),usize), 
@@ -338,7 +340,7 @@ pub struct LineBuf {
 
 	pub last_selection: Option<(usize,usize)>,
 	pub last_pattern_search: Option<Regex>,
-	pub last_substitution: Option<(Regex,String)>,
+	pub last_substitution: Option<(Regex,String,SubFlags)>,
 
 	pub insert_mode_start_pos: Option<usize>,
 	pub saved_col: Option<usize>,
@@ -622,10 +624,18 @@ impl LineBuf {
 		self.buffer
 			.chars()
 			.filter(|ch| *ch == '\n')
-			.count()
+			.count() + 1
 	}
 	pub fn cursor_line_number(&mut self) -> usize {
 		self.slice_to_cursor()
+			.map(|slice| {
+				slice.chars()
+					.filter(|ch| *ch == '\n')
+					.count()
+			}).unwrap_or(0)
+	}
+	pub fn calc_line_num_for_byte_pos(&mut self, pos: usize) -> usize {
+		self.buffer.get(..pos)
 			.map(|slice| {
 				slice.chars()
 					.filter(|ch| *ch == '\n')
@@ -703,7 +713,7 @@ impl LineBuf {
 	}
 	pub fn nth_next_line(&mut self, n: usize) -> Option<(usize,usize)> {
 		let line_no = self.cursor_line_number() + n;
-		if line_no > self.total_lines() {
+		if line_no >= self.total_lines() {
 			return None
 		}
 		Some(self.line_bounds(line_no))
@@ -714,7 +724,7 @@ impl LineBuf {
 			return None
 		}
 		let line_no = cursor_line_no.saturating_sub(n);
-		if line_no > self.total_lines() {
+		if line_no >= self.total_lines() {
 			return None
 		}
 		Some(self.line_bounds(line_no))
@@ -1715,15 +1725,8 @@ impl LineBuf {
 	}
 	pub fn cursor_col(&mut self) -> usize {
 		let start = self.start_of_line();
-		let end = self.cursor.get();
-		let Some(slice) = self.slice_inclusive(start..=end) else {
-			return start
-		};
-
-		slice
-			.graphemes(true)
-			.map(|g| g.width())
-			.sum()
+		let cursor_pos = self.cursor.get();
+		cursor_pos - start
 	}
 	pub fn insert_str_at(&mut self, pos: usize, new: &str) {
 		let idx = self.index_byte_pos(pos);
@@ -1756,6 +1759,75 @@ impl LineBuf {
 		let start = self.index_byte_pos(pos);
 		let end = start + gr.len();
 		self.buffer.replace_range(start..end, new);
+	}
+	pub fn eval_line_addr(&mut self, addr: LineAddr) -> Option<usize> {
+		match addr {
+			LineAddr::Number(num) => Some(num.saturating_sub(1)), // Line ranges are one indexed for input, zero indexed internally
+																														// Both zero and one refer to the first line
+			LineAddr::Current => Some(self.cursor_line_number()),
+			LineAddr::Last => Some(self.total_lines()),
+			LineAddr::Offset(offset) => {
+				dbg!(offset);
+				let current = self.cursor_line_number();
+				Some(current.saturating_add_signed(offset))
+			}
+			LineAddr::PatternRev(ref pat) |
+			LineAddr::Pattern(ref pat) => {
+				if let Ok(regex) = Regex::new(pat) {
+					self.last_pattern_search = Some(regex.clone());
+					let haystack = self.buffer.as_str();
+					let matches = regex.find_iter(haystack).collect::<Vec<_>>();
+					// We will use this match if we don't find any in our desired direction, just like vim
+					let wrap_match: Option<&regex::Match> = match &addr {
+						LineAddr::Pattern(_) => matches.first(),
+						LineAddr::PatternRev(_) => matches.last(),
+						_ => unreachable!()
+					};
+					let cursor_byte_pos = self.read_cursor_byte_pos();
+					match addr {
+						LineAddr::Pattern(_) => {
+							for mat in &matches {
+								if mat.start() > cursor_byte_pos {
+									let match_line_no = self.calc_line_num_for_byte_pos(mat.start());
+									return Some(match_line_no)
+								}
+							}
+						}
+						LineAddr::PatternRev(_) => {
+							let matches = matches.iter().rev();
+							for mat in matches {
+								if mat.start() < cursor_byte_pos {
+									let match_line_no = self.calc_line_num_for_byte_pos(mat.start());
+									return Some(match_line_no)
+								}
+							}
+						}
+						_ => unreachable!()
+					}
+					let mat = wrap_match?;
+					let match_line_no = self.calc_line_num_for_byte_pos(mat.start());
+					Some(match_line_no)
+				} else {
+					match addr {
+						LineAddr::Pattern(_) => {
+							let haystack = self.slice_from_cursor()?;
+							let pos = haystack.as_bytes().windows(pat.len()).position(|win| win == pat.as_bytes())?;
+							let line_no = self.calc_line_num_for_byte_pos(pos);
+							Some(line_no)
+						}
+						LineAddr::PatternRev(_) => {
+							let haystack = self.slice_from_cursor()?;
+							let haystack_rev = haystack.bytes().rev().collect::<Vec<_>>();
+							let pat_rev = pat.bytes().rev().collect::<Vec<_>>();
+							let pos = haystack_rev.windows(pat.len()).position(|win| win == pat_rev)?;
+							let line_no = self.calc_line_num_for_byte_pos(pos);
+							Some(line_no)
+						}
+						_ => unreachable!()
+					}
+				}
+			}
+		}
 	}
 	pub fn eval_motion(&mut self, verb: Option<&Verb>, motion: MotionCmd) -> MotionKind {
 		match motion {
@@ -1792,6 +1864,9 @@ impl LineBuf {
 					matches!(motion.1, Motion::WordMotion(To::Start, _, Direction::Forward));
 
 				let pos = self.dispatch_word_motion(count, to, word, dir, include_last_char);
+				let two = self.grapheme_before(pos);
+				let one = self.grapheme_at(pos);
+				let three = self.grapheme_after(pos);
 				let pos = ClampedUsize::new(pos,self.cursor.max,false);
 				// End-based operations must include the last character
 				// But the cursor must also stop just before it when moving
@@ -1957,13 +2032,13 @@ impl LineBuf {
 			MotionCmd(count,Motion::EndOfLine) => {
 				let pos = if count == 1 {
 					self.end_of_line() 
-				} else if let Some((_,end)) = self.select_lines_down(count) {
+				} else if let Some((_,end)) = self.select_lines_down(count.saturating_sub(1)) {
 					end
 				} else {
 					self.end_of_line()
 				};
 
-				MotionKind::On(pos)
+				MotionKind::To(pos.saturating_sub(1)) // Exclude the newline
 			}
 			MotionCmd(count,Motion::CharSearch(direction, dest, ch)) => {
 				let ch_str = &format!("{ch}");
@@ -2206,7 +2281,7 @@ impl LineBuf {
 			}
 			MotionCmd(_count,Motion::WholeBuffer) => MotionKind::Exclusive((0,self.grapheme_indices().len())),
 			MotionCmd(_count,Motion::BeginningOfBuffer) => MotionKind::On(0),
-			MotionCmd(_count,Motion::EndOfBuffer) => MotionKind::To(self.grapheme_indices().len()),
+			MotionCmd(_count,Motion::EndOfBuffer) => MotionKind::On(self.cursor.max),
 			MotionCmd(count,Motion::ToColumn) => {
 				let start = ClampedUsize::new(self.start_of_line(), self.cursor.max, false);
 				let target_col = count.saturating_sub(1);
@@ -2227,10 +2302,20 @@ impl LineBuf {
 				final_end = final_end.min(self.cursor.max);
 				MotionKind::Exclusive((start,final_end))
 			}
-			MotionCmd(_,Motion::LineRange(LineAddr::Number(1), LineAddr::Last)) => {
-				let start = 0;
-				let end = self.cursor.max;
-				MotionKind::Inclusive((start,end))
+			MotionCmd(_, Motion::Line(addr)) => {
+				let Some(line_no) = self.eval_line_addr(addr) else {
+					return MotionKind::Null
+				};
+				MotionKind::Line(line_no)
+			}
+			MotionCmd(_, Motion::LineRange(start_addr, end_addr)) => {
+				let Some(start_line_no) = self.eval_line_addr(start_addr) else {
+					return MotionKind::Null
+				};
+				let Some(end_line_no) = self.eval_line_addr(end_addr) else {
+					return MotionKind::Null
+				};
+				MotionKind::LineRange(start_line_no, end_line_no)
 			}
 			MotionCmd(_,Motion::RepeatMotion) | // These two were already handled in exec.rs
 			MotionCmd(_,Motion::RepeatMotionRev) |
@@ -2288,6 +2373,11 @@ impl LineBuf {
 					std::cmp::Ordering::Equal => { /* Do nothing */ }
 				}
 			}
+			MotionKind::LineRange(n,_) |
+			MotionKind::Line(n) => {
+				let (start,_) = self.line_bounds(n);
+				self.cursor.set(start)
+			}
 			MotionKind::ExclusiveWithTargetCol((_,_),col) |
 				MotionKind::InclusiveWithTargetCol((_,_),col) => {
 					let (start,end) = self.this_line();
@@ -2332,6 +2422,15 @@ impl LineBuf {
 					std::cmp::Ordering::Equal => {}
 				}
 				ordered(cursor_pos.get(),pos.get())
+			}
+			MotionKind::Line(n) => {
+				let (start,end) = self.line_bounds(*n);
+				(start,end)
+			}
+			MotionKind::LineRange(first, last) => {
+				let (start,_) = self.line_bounds(*first);
+				let (_,end) = self.line_bounds(*last);
+				(start,end)
 			}
 			MotionKind::To(pos) => {
 				let pos = match pos.cmp(&self.cursor.get()) {
@@ -2651,11 +2750,17 @@ impl LineBuf {
 					}
 				}
 			}
-			Verb::RepeatSubstitute => todo!(),
-			Verb::Substitute(old, new, flags) => {
-				if let Ok(regex) = Regex::new(&old) {
-					// We go in reverse here
-					let lines = (0..self.total_lines()).rev();
+			Verb::RepeatSubstitute => {
+				let (start_line,end_line) = match motion {
+					MotionKind::Line(n) => (n,n),
+					MotionKind::LineRange(s,e) => (s,e),
+					_ => (0,self.cursor.max),
+				};
+				// Have to temporarily move sub out of last_substitution
+				// Because of mutable borrowing stuff
+				if let Some(sub) = self.last_substitution.take() {
+					let (ref regex,ref new,flags) = sub;
+					let lines = (start_line..=end_line).rev();
 					for line_no in lines {
 						let (start,end) = self.line_bounds(line_no);
 						let line = self.slice(start..end).unwrap();
@@ -2670,21 +2775,57 @@ impl LineBuf {
 							for (mat_start,mat_end) in line_matches {
 								let real_start = start + mat_start;
 								let real_end = start + mat_end;
+								self.buffer.replace_range(real_start..real_end, new);
+							}
+						} else {
+							let Some((mat_start,mat_end)) = regex.find(line).map(|mat| (mat.start(),mat.end())) else { continue };
+							let real_start = start + mat_start;
+							let real_end = start + mat_end;
+							self.buffer.replace_range(real_start..real_end, new);
+						}
+					}
+					// Now we put it back
+					self.last_substitution = Some(sub);
+				}
+			}
+			Verb::Substitute(old, new, flags) => {
+				let (start_line,end_line) = match motion {
+					MotionKind::Line(n) => (n,n),
+					MotionKind::LineRange(s,e) => (s,e),
+					_ => (0,self.cursor.max),
+				};
+				if let Ok(regex) = Regex::new(&old) {
+					// We go in reverse here
+					let lines = (start_line..=end_line).rev();
+					for line_no in lines {
+						let (start,end) = self.line_bounds(line_no);
+						let line = self.slice(start..end).unwrap_or_default();
+						let global = flags.contains(SubFlags::GLOBAL);
+						if global {
+							let line_matches = regex
+								.find_iter(line)
+								.map(|mat| (mat.start(),mat.end()))
+								.collect::<Vec<_>>()
+								.into_iter()
+								.rev();
+							for (mat_start,mat_end) in line_matches {
+								let real_start = start + mat_start;
+								let real_end = start + mat_end;
 								self.buffer.replace_range(real_start..real_end, &new);
 							}
 						} else {
-							let Some((mat_start,mat_end)) = regex.find(line).map(|mat| (mat.start(),mat.end())) else { return Ok(()) };
+							let Some((mat_start,mat_end)) = regex.find(line).map(|mat| (mat.start(),mat.end())) else { continue };
 							let real_start = start + mat_start;
 							let real_end = start + mat_end;
 							self.buffer.replace_range(real_start..real_end, &new);
 						}
 					}
+					self.last_substitution = Some((regex,new,flags));
 				} else {
 					// TODO: Implement sliding window logical fallback here
 					panic!();
 					return Ok(())
 				}
-				debug!("after sub:\n{}",&self.buffer);
 			}
 			Verb::ExMode |
 			Verb::Complete |

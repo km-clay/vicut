@@ -439,6 +439,15 @@ fn execute(args: &Argv, input: String) -> Result<String,String> {
 		fmt_lines.push(std::mem::take(&mut fields));
 	}
 
+	if fmt_lines.is_empty() {
+		// The user did not send any '-c' commands...?
+		// They might just be editing text with '-m' calls.
+		// Let's just push the entire buffer
+		// If they don't want to see it they can just do > /dev/null
+		let big_line = vicut.editor.buffer;
+		fmt_lines.push(vec![("0".into(),big_line)]);
+	}
+
 	if args.trim_fields {
 		trim_fields(&mut fmt_lines);
 	}
@@ -565,7 +574,7 @@ fn execute_multi_thread(stream: Box<dyn BufRead>, args: &Argv) -> String {
 	output
 }
 
-#[cfg(test)]
+#[cfg(any(test,debug_assertions))]
 fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 	if args.is_empty() {
 		let mut output = String::new();
@@ -588,8 +597,6 @@ fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 	if args.json && args.delimiter.is_some() {
 		eprintln!("vicut: WARNING: --delimiter flag is ignored when --json is used")
 	}
-
-	let mut stdout = String::new();
 
 	use std::io::Cursor;
 	if args.linewise {
@@ -614,7 +621,7 @@ fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 					}
 				};
 			}
-			write!(stdout, "{output}").ok();
+			Ok(output)
 		} else if let Some(num) = args.max_jobs {
 			let pool = rayon::ThreadPoolBuilder::new()
 				.num_threads(num as usize)
@@ -623,15 +630,13 @@ fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 					eprintln!("vicut: Failed to build thread pool: {e}");
 					std::process::exit(1)
 				});
-			let output = pool.install(|| {
+			Ok(pool.install(|| {
 				let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input.to_string())));
 				execute_multi_thread(stream, &args)
-			});
-			write!(stdout, "{output}").ok();
+			}))
 		} else {
 			let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input.to_string())));
-			let output = execute_multi_thread(stream, &args);
-			write!(stdout, "{output}").ok();
+			Ok(execute_multi_thread(stream, &args))
 		}
 	} else {
 		let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input)));
@@ -643,14 +648,26 @@ fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 			}
 		}
 		match execute(&args,input) {
-			Ok(output) => write!(stdout,"{output}").ok(),
-			Err(e) => return Err(format!("vicut: {e}")),
-		};
+			Ok(output) => Ok(output),
+			Err(e) => Err(format!("vicut: {e}")),
+		}
 	}
-	Ok(stdout)
 }
 
+#[allow(unreachable_code)]
 fn main() {
+	#[cfg(debug_assertions)]
+	{
+		let input = "foo bar biz \nfoo bar biz\nfoo bar biz\nfoo bar biz\nfoo bar biz\nfoo bar biz\nfoo bar biz\nfoo bar biz\nfoo bar biz\n";
+		let args = [
+			"-m", "5j",
+			"-c", "2$"
+		];
+		let output = call_main(&args, input).unwrap();
+		print!("{output}");
+		return
+	}
+
 	if std::env::args().skip(1).count() == 0 {
 		eprintln!("USAGE:"); 
 		eprintln!("\tvicut [OPTIONS] [COMMANDS]...");

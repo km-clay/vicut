@@ -141,7 +141,7 @@ fn stuff_from_wiki() {
 	let output = call_main(&args, input).unwrap();
 	assert_eq!(output.trim(),"a | b | c");
 
-	let input = "foo bar biz\nbiz bar foo\nbar biz foo";
+	let input = "foo bar biz\nbiz foo bar\nbar biz foo";
 	let args = [
 		"--json",
     "-c", "e",
@@ -160,12 +160,12 @@ fn stuff_from_wiki() {
   },
   {
     \"1\": \"bar\",
-    \"2\": \"bar\",
+    \"2\": \"foo\",
     \"3\": \"biz\"
   },
   {
     \"1\": \"biz\",
-    \"2\": \"foo\",
+    \"2\": \"bar\",
     \"3\": \"foo\"
   }
 ]");
@@ -242,6 +242,17 @@ fn stuff_from_wiki() {
 	];
 	let output = call_main(&args, input).unwrap();
 	assert_eq!(output.trim(),"31200 --- FiberFast Networks --- Portland, OR, United States --- 321.23 km\n18220 --- MetroLink Broadband --- Austin, TX, United States --- 121.47 km\n29834 --- Skyline Internet --- Denver, CO, United States --- 295.88 km");
+
+	let input = "foo bar foo\nbar foo bar\nfoo bar foo";
+	let args = [
+			"-m", ":%s/foo/###/g<CR>",
+			"-m", ":%s/bar/%%%/g<CR>",
+			"-m", ":%s/%%%/foo/g<CR>",
+			"-m", ":%s/###/bar/g<CR>",
+			"-c", "G"
+	];
+	let output = call_main(&args, input).unwrap();
+	assert_eq!(output.trim(),"bar foo bar\nfoo bar foo\nbar foo bar");
 /*
 	let input = "";
 	let args = [

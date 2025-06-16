@@ -1,5 +1,6 @@
 use log::{debug, trace};
 
+use crate::keys::{KeyCode, KeyEvent, ModKeys};
 use crate::linebuf::{ordered, ClampedUsize};
 use crate::modes::ex::ViEx;
 use crate::modes::search::ViSearch;
@@ -31,10 +32,8 @@ impl ViCut {
 
 	pub fn read_field(&mut self, cmd: &str) -> Result<String,String> {
 		self.load_input(cmd);
-		let (mut start,mut end) = (self.editor.cursor.get(), self.editor.cursor.get());
-		if self.mode.clamp_cursor() {
-			end = self.editor.cursor.ret_add(1);
-		}
+		let mut start = self.editor.cursor.get();
+		let mut end = self.editor.cursor.get();
 
 		loop {
 			let Some(key) = self.reader.read_key() else {
@@ -48,20 +47,35 @@ impl ViCut {
 			let return_to_normal = cmd.flags.contains(CmdFlags::EXIT_CUR_MODE);
 
 
+			dbg!(&cmd);
 			self.exec_cmd(cmd)?;
 			if return_to_normal {
 				self.set_normal_mode();
 			}
 			let new_pos_clamped = self.editor.cursor;
 			let new_pos = new_pos_clamped.get();
-			if new_pos < start {
-				start = new_pos;
-			} else {
-				end = new_pos;
-				if self.mode.clamp_cursor() {
-					end += 1;
+			end = new_pos + 1;
+		}
+
+		if let ModeReport::Search | ModeReport::Ex = self.mode.report_mode() 
+			&& !self.mode.pending_seq().unwrap().is_empty() {
+				// We have run out of keys with a pending sequence.
+				// The user may have done something like "-c :%s/foo/bar/" and did not type the explicit "<CR>" to submit
+				// Let's see if we get a command if we send the enter key for them :)
+				if let Some(mut cmd) = self.mode.handle_key_fallible(KeyEvent(KeyCode::Char('\r'), ModKeys::NONE))? {
+					cmd.alter_line_motion_if_no_verb();
+					let return_to_normal = cmd.flags.contains(CmdFlags::EXIT_CUR_MODE);
+
+
+					dbg!(&cmd);
+					self.exec_cmd(cmd)?;
+					if return_to_normal {
+						self.set_normal_mode();
+					}
+					let new_pos_clamped = self.editor.cursor;
+					let new_pos = new_pos_clamped.get();
+					end = new_pos + 1;
 				}
-			}
 		}
 
 		let (start,end) = ordered(start, end);
@@ -85,8 +99,10 @@ impl ViCut {
 		} else {
 			let start = ClampedUsize::new(start, self.editor.cursor.cap(), true);
 			let end = ClampedUsize::new(end, self.editor.cursor.cap(), false);
+			let start_pos = start.get();
+			let end_pos = end.get();
 			let slice = self.editor
-				.slice(start.get()..end.get())
+				.slice_inclusive(start_pos..=end_pos)
 				.map(|slice| slice.to_string())
 				.ok_or("Failed to slice buffer".to_string());
 			if let Ok(slice) = slice.as_ref() {
