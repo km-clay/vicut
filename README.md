@@ -20,9 +20,9 @@ I wanted a tool that makes field extraction and output formatting intuitive and 
 * `-r`/`--repeat <N> <R>` repeats `N` previous commands `R` times. Repeats can be logically nested.
 * `-n`/`--next` concludes the current field group and starts a new one. Each field group is a separate record in the output.
   
-In this context, `<CMD>` refers to a Normal mode sequence like `di)`, `b2w`, `16vk`, `iInserting some text now<esc>b2w` etc.
+In this context, `<CMD>` refers to a Normal mode sequence like `di)`, `b2w`, `16vk`, `iInserting some text now<esc>b2w`, `:%s/foo/bar/g<CR>5dw`, etc.
 
-This method allows for very powerful text extraction, even from loosely structured inputs.
+This method allows for very powerful text processing, even from loosely structured inputs.
 ### Output Format Options
 Output can be structured in three different ways using these options:
 * `-j`/`--json` emits the extracted field data as a json object, ready to be piped into other programs, such as `jq`
