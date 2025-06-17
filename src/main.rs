@@ -1,6 +1,12 @@
 #![allow(clippy::unnecessary_to_owned,clippy::while_let_on_iterator)]
 use std::{collections::BTreeMap, fmt::Write, fs, io::{self, BufRead, Write as IoWrite}, path::{Path, PathBuf}};
 
+#[cfg(all(target_os = "linux",target_env = "musl"))]
+extern crate tikv_jemallocator;
+
+#[cfg(all(target_os = "linux",target_env = "musl"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use exec::ViCut;
 use log::trace;
