@@ -686,9 +686,7 @@ impl LineBuf {
 	}
 
 	pub fn is_paragraph_start(&mut self, pos: usize) -> bool {
-		let booool = self.grapheme_at(pos) == Some("\n") && self.grapheme_before(pos) == Some("\n");
-		debug!("{booool}");
-		booool
+		self.grapheme_at(pos) == Some("\n") && self.grapheme_before(pos) == Some("\n")
 	}
 	pub fn is_sentence_start(&mut self, pos: usize) -> bool {
 		if self.grapheme_before(pos).is_some_and(is_whitespace) {
@@ -1744,6 +1742,12 @@ impl LineBuf {
 		self.buffer.insert_str(idx, new);
 		self.update_graphemes();
 	}
+	pub fn replace_range(&mut self, start: usize, end: usize, new: &str) {
+		self.update_graphemes_lazy();
+		let Some(start_byte_pos) = self.grapheme_indices().get(start).copied() else { return };
+		let Some(end_byte_pos) = self.grapheme_indices().get(end).copied() else { return };
+		self.buffer.replace_range(start_byte_pos..end_byte_pos, new);
+	}
 	pub fn replace_at_cursor(&mut self, new: &str) {
 		self.replace_at(self.cursor.get(), new);
 	}
@@ -1905,7 +1909,6 @@ impl LineBuf {
 							Direction::Forward => MotionKind::On(end),
 							Direction::Backward => {
 								let cur_paragraph_start = start;
-								debug!("{start}");
 								let mut start_pos = self.cursor.get();
 								for _ in 0..count {
 									if self.is_paragraph_start(start_pos) {
@@ -2784,15 +2787,19 @@ impl LineBuf {
 								.into_iter()
 								.rev();
 							for (mat_start,mat_end) in line_matches {
+								let mat_start = self.find_index_for_byte_pos(mat_start).unwrap();
+								let mat_end = self.find_index_for_byte_pos(mat_end).unwrap();
 								let real_start = start + mat_start;
 								let real_end = start + mat_end;
-								self.buffer.replace_range(real_start..real_end, new);
+								self.replace_range(real_start,real_end, new);
 							}
 						} else {
 							let Some((mat_start,mat_end)) = regex.find(line).map(|mat| (mat.start(),mat.end())) else { continue };
+							let mat_start = self.find_index_for_byte_pos(mat_start).unwrap();
+							let mat_end = self.find_index_for_byte_pos(mat_end).unwrap();
 							let real_start = start + mat_start;
 							let real_end = start + mat_end;
-							self.buffer.replace_range(real_start..real_end, new);
+							self.replace_range(real_start,real_end, new);
 						}
 					}
 					// Now we put it back
@@ -2820,15 +2827,19 @@ impl LineBuf {
 								.into_iter()
 								.rev();
 							for (mat_start,mat_end) in line_matches {
+								let mat_start = self.find_index_for_byte_pos(mat_start).unwrap();
+								let mat_end = self.find_index_for_byte_pos(mat_end).unwrap();
 								let real_start = start + mat_start;
 								let real_end = start + mat_end;
-								self.buffer.replace_range(real_start..real_end, &new);
+								self.replace_range(real_start,real_end, &new);
 							}
 						} else {
 							let Some((mat_start,mat_end)) = regex.find(line).map(|mat| (mat.start(),mat.end())) else { continue };
+							let mat_start = self.find_index_for_byte_pos(mat_start).unwrap();
+							let mat_end = self.find_index_for_byte_pos(mat_end).unwrap();
 							let real_start = start + mat_start;
 							let real_end = start + mat_end;
-							self.buffer.replace_range(real_start..real_end, &new);
+							self.replace_range(real_start,real_end, &new);
 						}
 					}
 					self.last_substitution = Some((regex,new,flags));

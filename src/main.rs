@@ -638,10 +638,10 @@ fn execute_multi_thread_stdin(stream: Box<dyn BufRead>, args: &Argv) -> String {
 fn main() {
 	#[cfg(debug_assertions)]
 	{
-		let input = "this text (has stuff inside) of parenthesis";
+		let input = "This sentence has 'foo' in it.\nThis sentence doesn't.\nThis sentence has 'foo' in it.\nHere's some emojis: 🇺🇸 🇯🇵 🧠 🐍 🐉 🧑‍💻 👨‍👩‍👧‍👦\nThis sentence doesn't.\nThis sentence doesn't.\nThis sentence has 'foo' in it.\nThis sentence doesn't.\nThis sentence has 'foo' in it.\nThis sentence doesn't.";
+
 		let args = [
-			"-m", "5w",
-			"-m", "d[)"
+			"-m", ":%s/foo/bar/g"
 		];
 		let output = call_main(&args, input).unwrap();
 		print!("{output}");
