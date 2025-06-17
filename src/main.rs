@@ -659,6 +659,11 @@ fn main() {
 		print!("{}",get_help());
 		return
 	}
+	if std::env::args().any(|arg| arg == "--version") {
+		println!("vicut {}", env!("CARGO_PKG_VERSION"));
+		return
+	}
+
 	let args = match Argv::parse() {
 		Ok(args) => args,
 		Err(e) => {
