@@ -1,0 +1,1231 @@
+---
+source: src/tests/modes/insert.rs
+expression: cmds
+---
+[
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'a',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'b',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'c',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'd',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'e',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'f',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'g',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'h',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'i',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'j',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'k',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'l',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'm',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'n',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'o',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'p',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'q',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'r',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    's',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    't',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'u',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'v',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'w',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'x',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'y',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'z',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    '1',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    '2',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    '3',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    '4',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    '5',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    '6',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    '7',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    '8',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    '9',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    '0',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    '-',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    '=',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    '[',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    ']',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    ';',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    '\'',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    '<',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    '>',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    '/',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    '\\',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'x',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    '1',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+    ViCmd {
+        register: RegisterName {
+            name: None,
+            count: 1,
+            append: false,
+        },
+        verb: Some(
+            VerbCmd(
+                1,
+                InsertChar(
+                    'b',
+                ),
+            ),
+        ),
+        motion: Some(
+            MotionCmd(
+                1,
+                ForwardChar,
+            ),
+        ),
+        raw_seq: "",
+        flags: CmdFlags(
+            0x0,
+        ),
+    },
+]

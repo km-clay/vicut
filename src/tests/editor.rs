@@ -1,16 +1,6 @@
-use crate::{linebuf::LineBuf, modes::{normal::ViNormal, ViMode}, tests::{LOREM_IPSUM, LOREM_IPSUM_MULTILINE}};
+use crate::{linebuf::LineBuf, modes::{normal::ViNormal, ViMode}, tests::{normal_cmd, LOREM_IPSUM, LOREM_IPSUM_MULTILINE}};
 use pretty_assertions::assert_eq;
 
-
-fn normal_cmd(cmd: &str, buf: &str, cursor: usize) -> (String,usize) {
-	let cmd = ViNormal::new()
-		.cmds_from_raw(cmd)
-		.pop()
-		.unwrap();
-	let mut buf = LineBuf::new().with_initial(buf.to_string(), cursor);
-	buf.exec_cmd(cmd).unwrap();
-	(buf.as_str().to_string(),buf.cursor.get()) 
-}
 
 #[test]
 fn editor_delete_word() {

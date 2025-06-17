@@ -49,103 +49,6 @@ struct Argv {
 }
 
 impl Argv {
-	pub fn parse_raw(args: &[&str]) -> Result<Self,String> {
-		let mut new = Self::default();
-		let mut args = args.iter();
-		while let Some(arg) = args.next() {
-			match *arg {
-				"--json" | "-j" => {
-					new.json = true;
-				}
-				"--trace" => {
-					new.trace = true;
-				}
-				"--linewise" => {
-					new.linewise = true;
-				}
-				"--serial" => {
-					new.single_thread = true;
-				}
-				"--trim-fields" => {
-					new.trim_fields = true;
-				}
-				"--keep-mode" => {
-					new.keep_mode = true;
-				}
-				"--backup" => {
-					new.backup_files = true;
-				}
-				"-i" => {
-					new.edit_inplace = true;
-				}
-				"--backup-extension" => {
-					let Some(next_arg) = args.next() else { 
-						return Err(format!("Expected a string after '{arg}'"))
-					};
-					if next_arg.starts_with('-') {
-						return Err(format!("Expected a string after '{arg}', found {next_arg}"))
-					}
-					new.backup_extension = Some(next_arg.to_string())
-				}
-				"--template" | "-t" => {
-					let Some(next_arg) = args.next() else { 
-						return Err(format!("Expected a format string after '{arg}'"))
-					};
-					if next_arg.starts_with('-') {
-						return Err(format!("Expected a format string after '{arg}', found {next_arg}"))
-					}
-					new.template = Some(next_arg.to_string())
-				}
-				"--delimiter" | "-d" => {
-					let Some(next_arg) = args.next() else { continue };
-					if next_arg.starts_with('-') {
-						return Err(format!("Expected a delimiter after '{arg}', found {next_arg}"))
-					}
-					new.delimiter = Some(next_arg.to_string())
-				}
-				"-n" | "--next" => new.cmds.push(Cmd::BreakGroup),
-				"-r" | "--repeat" => {
-					let cmd_count = args
-						.next()
-						.unwrap_or(&"1")
-						.parse::<usize>()
-						.map_err(|_| format!("Expected a number after '{arg}'"))?;
-					let repeat_count = args
-						.next()
-						.unwrap_or(&"1")
-						.parse::<usize>()
-						.map_err(|_| format!("Expected a number after '{arg}'"))?;
-
-					new.cmds.push(Cmd::Repeat(cmd_count, repeat_count));
-				}
-				"-m" | "--move" => {
-					let Some(arg) = args.next() else { continue };
-					if arg.starts_with('-') {
-						return Err(format!("Expected a motion command after '-m', found {arg}"))
-					}
-					new.cmds.push(Cmd::Motion(arg.to_string()))
-				}
-				"-c" | "--cut" => {
-					let Some(arg) = args.next() else { continue };
-					if arg.starts_with("name=") {
-						let name = arg.strip_prefix("name=").unwrap().to_string();
-						let Some(arg) = args.next() else { continue };
-						if arg.starts_with('-') {
-							return Err(format!("Expected a selection command after '-c', found {arg}"))
-						}
-						new.cmds.push(Cmd::NamedField(name,arg.to_string()));
-					} else {
-						if arg.starts_with('-') {
-							return Err(format!("Expected a selection command after '-c', found {arg}"))
-						}
-						new.cmds.push(Cmd::Field(arg.to_string()));
-					}
-				}
-				_ => new.handle_filename(arg.to_string())
-			}
-		}
-		Ok(new)
-	}
 	pub fn parse() -> Result<Self,String> {
 		let mut new = Self::default();
 		let mut args = std::env::args().skip(1);
@@ -598,6 +501,7 @@ fn exec_cmd(
 }
 
 fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Argv) {
+	/*
 	// Filename, Line number, Line content
 	let mut work: Vec<(PathBuf, usize, String)> = vec![];
 
@@ -624,6 +528,36 @@ fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Argv) {
 			work.push((file.clone(), line_no, line.to_string()));
 		}
 	}
+	*/
+
+	let work: Vec<(PathBuf, usize, String)> = args.files.par_iter()
+		.fold(Vec::new, |mut acc,file| {
+			let contents = fs::read_to_string(file).unwrap_or_else(|e| {
+				eprintln!("vicut: failed to read file '{}': {e}",file.display());
+				std::process::exit(1);
+			});
+			if args.edit_inplace && args.backup_files {
+				let extension = args.backup_extension.as_deref().unwrap_or("bak");
+				let backup_path = file.with_extension(format!(
+						"{}.{extension}",
+						file.extension()
+						.and_then(|ext| ext.to_str())
+						.unwrap_or("")
+				));
+
+				fs::copy(file, &backup_path).unwrap_or_else(|e| {
+					eprintln!("vicut: failed to back up file '{}': {e}", file.display());
+					std::process::exit(1)
+				});
+			}
+			for (line_no,line) in contents.lines().enumerate() {
+				acc.push((file.clone(), line_no, line.to_string()));
+			}
+			acc
+		}).reduce(Vec::new, |mut a, mut b| {
+			a.append(&mut b);
+			a
+		});
 
 	// Process each line's content
 	let results = work.into_par_iter()
@@ -695,94 +629,15 @@ fn execute_multi_thread_stdin(stream: Box<dyn BufRead>, args: &Argv) -> String {
 	output
 }
 
-#[cfg(any(test,debug_assertions))]
-fn call_main(args: &[&str], input: &str) -> Result<String,String> {
-	if args.is_empty() {
-		let mut output = String::new();
-		write!(output,"USAGE:").ok(); 
-		write!(output,"\tvicut [OPTIONS] [COMMANDS]...").ok();
-		writeln!(output).ok();
-		write!(output,"use '--help' for more information").ok();
-		return Err(output)
-	}
-	if args.iter().any(|arg| *arg == "--help" || *arg == "-h") {
-		return Ok(get_help())
-	}
-	let args = match Argv::parse_raw(args) {
-		Ok(args) => args,
-		Err(e) => {
-			return Err(format!("vicut: {e}"));
-		}
-	};
-
-	if args.json && args.delimiter.is_some() {
-		eprintln!("vicut: WARNING: --delimiter flag is ignored when --json is used")
-	}
-
-	use std::io::Cursor;
-	if args.linewise {
-		if args.single_thread {
-			// We need to initialize stream in each branch, since Box<dyn BufReader> does not implement send/sync
-			// So using it in pool.install() doesn't work. We have to initialize it in the closure there.
-
-			let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input)));
-			let mut output = String::new();
-			for result in stream.lines() {
-				match result {
-					Ok(line) => {
-						match execute(&args,line) {
-							Ok(new_line) => write!(output,"{new_line}").ok(),
-							Err(e) => {
-								return Err(format!("vicut: {e}"));
-							}
-						}
-					}
-					Err(e) => {
-						return Err(format!("vicut: {e}"));
-					}
-				};
-			}
-			Ok(output)
-		} else if let Some(num) = args.max_jobs {
-			let pool = rayon::ThreadPoolBuilder::new()
-				.num_threads(num as usize)
-				.build()
-				.unwrap_or_else(|e| {
-					eprintln!("vicut: Failed to build thread pool: {e}");
-					std::process::exit(1)
-				});
-			Ok(pool.install(|| {
-				let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input.to_string())));
-				execute_multi_thread_stdin(stream, &args)
-			}))
-		} else {
-			let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input.to_string())));
-			Ok(execute_multi_thread_stdin(stream, &args))
-		}
-	} else {
-		let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input)));
-		let mut input = String::new();
-		match stream.read_to_string(&mut input) {
-			Ok(_) => {}
-			Err(e) => {
-				return Err(format!("vicut: {e}"));
-			}
-		}
-		match execute(&args,input) {
-			Ok(output) => Ok(output),
-			Err(e) => Err(format!("vicut: {e}")),
-		}
-	}
-}
 
 #[allow(unreachable_code)]
 fn main() {
 	#[cfg(debug_assertions)]
 	{
-		let input = "foo bar biz \nfoo bar biz\nfoo bar biz\nfoo bar biz\nfoo bar biz\nfoo bar biz\nfoo bar biz\nfoo bar biz\nfoo bar biz\n";
+		let input = "this text (has stuff inside) of parenthesis";
 		let args = [
-			"-m", "5j",
-			"-c", "2$"
+			"-m", "5w",
+			"-m", "d[)"
 		];
 		let output = call_main(&args, input).unwrap();
 		print!("{output}");
@@ -978,5 +833,190 @@ fn main() {
 			Ok(output) => { write!(stdout,"{output}").ok(); }
 			Err(e) => eprintln!("vicut: {e}"),
 		};
+	}
+}
+
+/*
+ * Stuff down here is for testing
+ */
+
+/// Used to call the main logic internally, for testing
+#[cfg(any(test,debug_assertions))]
+fn call_main(args: &[&str], input: &str) -> Result<String,String> {
+	if args.is_empty() {
+		let mut output = String::new();
+		write!(output,"USAGE:").ok(); 
+		write!(output,"\tvicut [OPTIONS] [COMMANDS]...").ok();
+		writeln!(output).ok();
+		write!(output,"use '--help' for more information").ok();
+		return Err(output)
+	}
+	if args.iter().any(|arg| *arg == "--help" || *arg == "-h") {
+		return Ok(get_help())
+	}
+	let args = match Argv::parse_raw(args) {
+		Ok(args) => args,
+		Err(e) => {
+			return Err(format!("vicut: {e}"));
+		}
+	};
+
+	if args.json && args.delimiter.is_some() {
+		eprintln!("vicut: WARNING: --delimiter flag is ignored when --json is used")
+	}
+
+	use std::io::Cursor;
+	if args.linewise {
+		if args.single_thread {
+			// We need to initialize stream in each branch, since Box<dyn BufReader> does not implement send/sync
+			// So using it in pool.install() doesn't work. We have to initialize it in the closure there.
+
+			let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input)));
+			let mut output = String::new();
+			for result in stream.lines() {
+				match result {
+					Ok(line) => {
+						match execute(&args,line) {
+							Ok(new_line) => write!(output,"{new_line}").ok(),
+							Err(e) => {
+								return Err(format!("vicut: {e}"));
+							}
+						}
+					}
+					Err(e) => {
+						return Err(format!("vicut: {e}"));
+					}
+				};
+			}
+			Ok(output)
+		} else if let Some(num) = args.max_jobs {
+			let pool = rayon::ThreadPoolBuilder::new()
+				.num_threads(num as usize)
+				.build()
+				.unwrap_or_else(|e| {
+					eprintln!("vicut: Failed to build thread pool: {e}");
+					std::process::exit(1)
+				});
+			Ok(pool.install(|| {
+				let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input.to_string())));
+				execute_multi_thread_stdin(stream, &args)
+			}))
+		} else {
+			let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input.to_string())));
+			Ok(execute_multi_thread_stdin(stream, &args))
+		}
+	} else {
+		let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input)));
+		let mut input = String::new();
+		match stream.read_to_string(&mut input) {
+			Ok(_) => {}
+			Err(e) => {
+				return Err(format!("vicut: {e}"));
+			}
+		}
+		match execute(&args,input) {
+			Ok(output) => Ok(output),
+			Err(e) => Err(format!("vicut: {e}")),
+		}
+	}
+}
+#[cfg(any(test,debug_assertions))]
+impl Argv {
+	pub fn parse_raw(args: &[&str]) -> Result<Self,String> {
+		let mut new = Self::default();
+		let mut args = args.iter();
+		while let Some(arg) = args.next() {
+			match *arg {
+				"--json" | "-j" => {
+					new.json = true;
+				}
+				"--trace" => {
+					new.trace = true;
+				}
+				"--linewise" => {
+					new.linewise = true;
+				}
+				"--serial" => {
+					new.single_thread = true;
+				}
+				"--trim-fields" => {
+					new.trim_fields = true;
+				}
+				"--keep-mode" => {
+					new.keep_mode = true;
+				}
+				"--backup" => {
+					new.backup_files = true;
+				}
+				"-i" => {
+					new.edit_inplace = true;
+				}
+				"--backup-extension" => {
+					let Some(next_arg) = args.next() else { 
+						return Err(format!("Expected a string after '{arg}'"))
+					};
+					if next_arg.starts_with('-') {
+						return Err(format!("Expected a string after '{arg}', found {next_arg}"))
+					}
+					new.backup_extension = Some(next_arg.to_string())
+				}
+				"--template" | "-t" => {
+					let Some(next_arg) = args.next() else { 
+						return Err(format!("Expected a format string after '{arg}'"))
+					};
+					if next_arg.starts_with('-') {
+						return Err(format!("Expected a format string after '{arg}', found {next_arg}"))
+					}
+					new.template = Some(next_arg.to_string())
+				}
+				"--delimiter" | "-d" => {
+					let Some(next_arg) = args.next() else { continue };
+					if next_arg.starts_with('-') {
+						return Err(format!("Expected a delimiter after '{arg}', found {next_arg}"))
+					}
+					new.delimiter = Some(next_arg.to_string())
+				}
+				"-n" | "--next" => new.cmds.push(Cmd::BreakGroup),
+				"-r" | "--repeat" => {
+					let cmd_count = args
+						.next()
+						.unwrap_or(&"1")
+						.parse::<usize>()
+						.map_err(|_| format!("Expected a number after '{arg}'"))?;
+					let repeat_count = args
+						.next()
+						.unwrap_or(&"1")
+						.parse::<usize>()
+						.map_err(|_| format!("Expected a number after '{arg}'"))?;
+
+					new.cmds.push(Cmd::Repeat(cmd_count, repeat_count));
+				}
+				"-m" | "--move" => {
+					let Some(arg) = args.next() else { continue };
+					if arg.starts_with('-') {
+						return Err(format!("Expected a motion command after '-m', found {arg}"))
+					}
+					new.cmds.push(Cmd::Motion(arg.to_string()))
+				}
+				"-c" | "--cut" => {
+					let Some(arg) = args.next() else { continue };
+					if arg.starts_with("name=") {
+						let name = arg.strip_prefix("name=").unwrap().to_string();
+						let Some(arg) = args.next() else { continue };
+						if arg.starts_with('-') {
+							return Err(format!("Expected a selection command after '-c', found {arg}"))
+						}
+						new.cmds.push(Cmd::NamedField(name,arg.to_string()));
+					} else {
+						if arg.starts_with('-') {
+							return Err(format!("Expected a selection command after '-c', found {arg}"))
+						}
+						new.cmds.push(Cmd::Field(arg.to_string()));
+					}
+				}
+				_ => new.handle_filename(arg.to_string())
+			}
+		}
+		Ok(new)
 	}
 }

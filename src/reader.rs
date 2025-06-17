@@ -147,7 +147,7 @@ impl RawReader {
 			b"return" |
 			b"enter" => Some(KeyEvent(KeyCode::Enter, mods)),
 			b"tab" => Some(KeyEvent(KeyCode::Char('\t'), mods)),
-			b"bs" => Some(KeyEvent(KeyCode::Backspace, mods)),
+			b"BS" => Some(KeyEvent(KeyCode::Backspace, mods)),
 			b"del" => Some(KeyEvent(KeyCode::Delete, mods)),
 			b"ins" => Some(KeyEvent(KeyCode::Insert, mods)),
 			b"home" => Some(KeyEvent(KeyCode::Home, mods)),

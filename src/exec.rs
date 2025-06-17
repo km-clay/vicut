@@ -53,7 +53,9 @@ impl ViCut {
 			}
 			let new_pos_clamped = self.editor.cursor;
 			let new_pos = new_pos_clamped.get();
-			end = new_pos + 1;
+			end = new_pos;
+			(start,end) = ordered(start, end);
+			end += 1;
 		}
 
 		if let ModeReport::Search | ModeReport::Ex = self.mode.report_mode() 
@@ -70,13 +72,13 @@ impl ViCut {
 					if return_to_normal {
 						self.set_normal_mode();
 					}
-					let new_pos_clamped = self.editor.cursor;
-					let new_pos = new_pos_clamped.get();
-					end = new_pos + 1;
+					let new_pos = self.editor.cursor.get();
+						end = new_pos;
+					(start,end) = ordered(start, end);
+					end += 1;
 				}
 		}
 
-		let (start,end) = ordered(start, end);
 
 		if let Some((start,mut end)) = self.editor.select_range() {
 			// We are in visual mode if we've made it here
@@ -125,8 +127,16 @@ impl ViCut {
 	}
 
 	pub fn set_normal_mode(&mut self) {
+		let should_go_back_one = self.mode.report_mode() == ModeReport::Insert;
 		self.mode = Box::new(ViNormal::new());
 		self.editor.stop_selecting();
+		if should_go_back_one {
+			let new_pos = self.editor.cursor.ret_sub(1);
+			// Leaving insert mode moves back one, but never crosses line boundaries
+			if self.editor.grapheme_at(new_pos).is_some_and(|gr| gr != "\n") {
+				self.editor.cursor.sub(1);
+			}
+		}
 	}
 
 	pub fn exec_cmd(&mut self, mut cmd: ViCmd) -> Result<(),String> {
@@ -188,8 +198,8 @@ impl ViCut {
 				self.repeat_action = mode.as_replay();
 			}
 
-			self.editor.exec_cmd(cmd)?;
 			self.editor.set_cursor_clamp(self.mode.clamp_cursor());
+			self.editor.exec_cmd(cmd)?;
 
 			if selecting {
 				self.editor.start_selecting(SelectMode::Char(SelectAnchor::End));
@@ -247,7 +257,7 @@ impl ViCut {
 					};
 					let repeat_cmd = ViCmd {
 						register: RegisterName::default(),
-						verb: None,
+						verb: cmd.verb().cloned(),
 						motion: Some(motion),
 						raw_seq: format!("{count};"),
 						flags: CmdFlags::empty()
@@ -262,7 +272,7 @@ impl ViCut {
 					new_motion.0 = *count;
 					let repeat_cmd = ViCmd {
 						register: RegisterName::default(),
-						verb: None,
+						verb: cmd.verb().cloned(),
 						motion: Some(new_motion),
 						raw_seq: format!("{count},"),
 						flags: CmdFlags::empty()

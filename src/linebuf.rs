@@ -662,9 +662,15 @@ impl LineBuf {
 				if let Some(idx) = fwd_indices.next() {
 					if let Some(gr) = self.read_grapheme_at(idx) {
 						if is_whitespace(gr) {
+							if gr == "\n" {
+								return Some(idx)
+							}
 							while let Some(idx) = fwd_indices.next() {
 								if let Some(gr) = self.read_grapheme_at(idx) {
 									if is_whitespace(gr) {
+										if gr == "\n" {
+											return Some(idx)
+										}
 										continue
 									} else {
 										return Some(idx)
@@ -716,7 +722,7 @@ impl LineBuf {
 		if line_no >= self.total_lines() {
 			return None
 		}
-		Some(self.line_bounds(line_no))
+		self.line_bounds(line_no)
 	}
 	pub fn nth_prev_line(&mut self, n: usize) -> Option<(usize,usize)> {
 		let cursor_line_no = self.cursor_line_number();
@@ -727,11 +733,11 @@ impl LineBuf {
 		if line_no >= self.total_lines() {
 			return None
 		}
-		Some(self.line_bounds(line_no))
+		self.line_bounds(line_no)
 	}
 	pub fn this_line(&mut self) -> (usize,usize) {
 		let line_no = self.cursor_line_number();
-		self.line_bounds(line_no)
+		self.line_bounds(line_no).unwrap()
 	}
 	pub fn start_of_line(&mut self) -> usize {
 		self.this_line().0
@@ -745,7 +751,7 @@ impl LineBuf {
 		}
 		let target_line = self.cursor_line_number().saturating_sub(n);
 		let end = self.end_of_line();
-		let (start,_) = self.line_bounds(target_line);
+		let (start,_) = self.line_bounds(target_line)?;
 
 		Some((start,end))
 	}
@@ -755,13 +761,13 @@ impl LineBuf {
 		}
 		let target_line = self.cursor_line_number() + n;
 		let start = self.start_of_line();
-		let (_,end) = self.line_bounds(target_line);
+		let (_,end) = self.line_bounds(target_line)?;
 
 		Some((start,end))
 	}
-	pub fn line_bounds(&mut self, n: usize) -> (usize,usize) {
+	pub fn line_bounds(&mut self, n: usize) -> Option<(usize,usize)> {
 		if n > self.total_lines() {
-			panic!("Attempted to find line {n} when there are only {} lines",self.total_lines())
+			return None
 		}
 
 		let mut start = 0;
@@ -788,7 +794,7 @@ impl LineBuf {
 			}
 		}
 
-		(start, end)
+		Some((start, end))
 	}
 	pub fn handle_edit(&mut self, old: String, new: String, curs_pos: usize) {
 		let edit_is_merging = self.undo_stack.last().is_some_and(|edit| edit.merging);
@@ -1251,6 +1257,7 @@ impl LineBuf {
 		}
 	}
 	pub fn find_unmatched_delim(&mut self, delim: Delim, dir: Direction) -> Option<usize> {
+		println!("finding delim");
 		let (opener,closer) = match delim {
 			Delim::Paren => ("(",")"),
 			Delim::Brace => ("{","}"),
@@ -1600,7 +1607,7 @@ impl LineBuf {
 				let Some(cur_char) = self.grapheme_at(pos).map(|c| c.to_string()) else {
 					return self.grapheme_indices().len()
 				};
-				// The position of the next differing character class will tell us where the end (or start) of the word is
+				// The position of the next differing character class will tell us where the start of the word is
 				let Some(next_ws_pos) = fwd_indices.find(|i| self.grapheme_at(*i).is_some_and(|c| is_other_class_or_is_ws(c, &cur_char))) else {
 					return default
 				};
@@ -1623,8 +1630,10 @@ impl LineBuf {
 
 		match word {
 			Word::Big => {
-				let Some(next_idx) = indices_iter.peek() else { return default };
-				let on_boundary = self.grapheme_at(*next_idx).is_none_or(is_whitespace);
+				let on_boundary = 'bound_check: {
+					let Some(next_idx) = indices_iter.peek() else { break 'bound_check false };
+					self.grapheme_at(*next_idx).is_none_or(is_whitespace)
+				};
 				if on_boundary {
 					let Some(idx) = indices_iter.next() else { return default };
 					pos = idx;
@@ -1658,8 +1667,10 @@ impl LineBuf {
 			}
 			Word::Normal => {
 				let Some(cur_char) = self.grapheme_at(pos).map(|c| c.to_string()) else { return default };
-				let Some(next_idx) = indices_iter.peek() else { return default };
-				let on_boundary = !is_whitespace(&cur_char) && self.grapheme_at(*next_idx).is_none_or(|c| is_other_class_or_is_ws(c, &cur_char));
+				let on_boundary = 'bound_check: {
+					let Some(next_idx) = indices_iter.peek() else { break 'bound_check false };
+					!is_whitespace(&cur_char) && self.grapheme_at(*next_idx).is_some_and(|c| is_other_class_or_is_ws(c, &cur_char))
+				};
 				if on_boundary {
 					let next_idx = indices_iter.next().unwrap();
 					pos = next_idx
@@ -1682,14 +1693,14 @@ impl LineBuf {
 				let Some(cur_char) = self.grapheme_at(pos).map(|c| c.to_string()) else {
 					return self.grapheme_indices().len()
 				};
-				// The position of the next differing character class will tell us where the end (or start) of the word is
+				// The position of the next differing character class will tell us where the start of the word is
 				let Some(next_ws_pos) = indices_iter.find(|i| self.grapheme_at(*i).is_some_and(|c| is_other_class_or_is_ws(c, &cur_char))) else {
 					return default
 				};
 				pos = next_ws_pos;
 
-				if pos == self.grapheme_indices().len() {
-					// We reached the end of the buffer
+				if pos == 0 {
+					// We reached the start of the buffer
 					pos
 				} else {
 					// We hit some other character class, so we go back one
@@ -1966,7 +1977,7 @@ impl LineBuf {
 				let Some(pos) = self.find_next_matching_delim() else {
 					return MotionKind::Null
 				};
-				MotionKind::On(pos)
+				MotionKind::Onto(pos)
 			}
 			MotionCmd(_,Motion::ToBrace(direction)) |
 			MotionCmd(_,Motion::ToBracket(direction)) |
@@ -2037,32 +2048,35 @@ impl LineBuf {
 					self.end_of_line()
 				};
 
-				MotionKind::To(pos.saturating_sub(1)) // Exclude the newline
+				MotionKind::On(pos.saturating_sub(1)) // Exclude the newline
 			}
 			MotionCmd(count,Motion::CharSearch(direction, dest, ch)) => {
-				let ch_str = &format!("{ch}");
+				let mut ch_buf = [0u8;4];
+				let ch_str = ch.encode_utf8(&mut ch_buf);
 				let mut pos = self.cursor;
 				for _ in 0..count {
 					match direction {
 						Direction::Forward => {
-							let mut indices_iter = pos.get()..pos.max;
+							let after = pos.ret_add(1);
+							let mut indices_iter = after..pos.max;
 
-							let Some(ch_pos) = indices_iter.position(|i| {
-								self.grapheme_at(i) == Some(ch_str)
+							let Some(ch_pos) = indices_iter.find(|i| {
+								self.grapheme_at(*i) == Some(ch_str)
 							}) else {
 								return MotionKind::Null
 							};
-							pos.add(ch_pos)
+							pos.set(ch_pos)
 						}
 						Direction::Backward => {
-							let mut indices_iter = 0..pos.get();
+							let before = pos.ret_sub(1);
+							let mut indices_iter = (0..before).rev();
 
-							let Some(ch_pos) = indices_iter.position(|i| {
-								self.grapheme_at(i) == Some(ch_str)
+							let Some(ch_pos) = indices_iter.find(|i| {
+								self.grapheme_at(*i) == Some(ch_str)
 							}) else {
 								return MotionKind::Null
 							};
-							pos.sub(ch_pos.saturating_sub(1))
+							pos.set(ch_pos);
 						}
 					}
 					if dest == Dest::Before {
@@ -2109,7 +2123,7 @@ impl LineBuf {
 						fwd_matches += 1;
 						if fwd_matches == count {
 							let Some(match_idx) = self.find_index_for_byte_pos(mat.start()) else { return MotionKind::Null };
-							return MotionKind::Onto(match_idx)
+							return MotionKind::On(match_idx)
 						}
 					}
 				}
@@ -2136,7 +2150,7 @@ impl LineBuf {
 						bkwd_matches += 1;
 						if bkwd_matches == count {
 							let Some(match_idx) = self.find_index_for_byte_pos(mat.start()) else { return MotionKind::Null };
-							return MotionKind::Onto(match_idx)
+							return MotionKind::On(match_idx)
 						}
 					}
 				}
@@ -2374,7 +2388,7 @@ impl LineBuf {
 			}
 			MotionKind::LineRange(n,_) |
 			MotionKind::Line(n) => {
-				let (start,_) = self.line_bounds(n);
+				let Some((start,_)) = self.line_bounds(n) else { return };
 				self.cursor.set(start)
 			}
 			MotionKind::ExclusiveWithTargetCol((_,_),col) |
@@ -2412,23 +2426,21 @@ impl LineBuf {
 				// For motions which include the character at the cursor during operations
 				// but exclude the character during movements
 				let mut pos = ClampedUsize::new(*pos, self.cursor.max, false);
-				let mut cursor_pos = self.cursor;
+				let cursor_pos = self.cursor;
 
-				// The end of the range must be incremented by one
-				match pos.get().cmp(&self.cursor.get()) {
-					std::cmp::Ordering::Less => cursor_pos.add(1),
-					std::cmp::Ordering::Greater => pos.add(1),
-					std::cmp::Ordering::Equal => {}
+				// We are moving forwards, so add one
+				if pos.get() > cursor_pos.get() {
+					pos.add(1)
 				}
 				ordered(cursor_pos.get(),pos.get())
 			}
 			MotionKind::Line(n) => {
-				let (start,end) = self.line_bounds(*n);
+				let (start,end) = self.line_bounds(*n)?;
 				(start,end)
 			}
 			MotionKind::LineRange(first, last) => {
-				let (start,_) = self.line_bounds(*first);
-				let (_,end) = self.line_bounds(*last);
+				let (start,_) = self.line_bounds(*first)?;
+				let (_,end) = self.line_bounds(*last)?;
 				(start,end)
 			}
 			MotionKind::To(pos) => {
@@ -2761,7 +2773,7 @@ impl LineBuf {
 					let (ref regex,ref new,flags) = sub;
 					let lines = (start_line..=end_line).rev();
 					for line_no in lines {
-						let (start,end) = self.line_bounds(line_no);
+						let Some((start,end)) = self.line_bounds(line_no) else { continue };
 						let line = self.slice(start..end).unwrap();
 						let global = flags.contains(SubFlags::GLOBAL);
 						if global {
@@ -2797,7 +2809,7 @@ impl LineBuf {
 					// We go in reverse here
 					let lines = (start_line..=end_line).rev();
 					for line_no in lines {
-						let (start,end) = self.line_bounds(line_no);
+						let Some((start,end)) = self.line_bounds(line_no) else { continue };
 						let line = self.slice(start..end).unwrap_or_default();
 						let global = flags.contains(SubFlags::GLOBAL);
 						if global {
@@ -2821,6 +2833,15 @@ impl LineBuf {
 					}
 					self.last_substitution = Some((regex,new,flags));
 				} else {
+					/*
+					let Some(haystack) = self.slice_from_cursor() else { return MotionKind::Null };
+					if let Some(pos) = haystack.as_bytes().windows(pat.len()).position(|win| win == pat.as_bytes()) {
+						let Some(idx) = self.find_index_for_byte_pos(pos) else { return MotionKind::Null };
+						MotionKind::Onto(idx)
+					} else {
+						MotionKind::Null
+					}
+					*/
 					// TODO: Implement sliding window logical fallback here
 					panic!();
 					return Ok(())

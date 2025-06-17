@@ -44,6 +44,13 @@ impl ViInsert {
 impl ViMode for ViInsert {
 	fn handle_key(&mut self, key: E) -> Option<ViCmd> {
 		match key {
+			// Carriage return -> newline
+			E(K::Enter, M::NONE) |
+			E(K::Char('\r'), M::NONE) => {
+				self.pending_cmd.set_verb(VerbCmd(1,Verb::InsertChar('\n')));
+				self.pending_cmd.set_motion(MotionCmd(1,Motion::ForwardChar));
+				self.register_and_return()
+			}
 			E(K::Char(ch), M::NONE) => {
 				self.pending_cmd.set_verb(VerbCmd(1,Verb::InsertChar(ch)));
 				self.pending_cmd.set_motion(MotionCmd(1,Motion::ForwardChar));
@@ -55,11 +62,6 @@ impl ViMode for ViInsert {
 				self.register_and_return()
 			}
 			E(K::Char('H'), M::CTRL) |
-			E(K::Enter, M::NONE) => {
-				self.pending_cmd.set_verb(VerbCmd(1,Verb::InsertChar('\n')));
-				self.pending_cmd.set_motion(MotionCmd(1,Motion::ForwardChar));
-				self.register_and_return()
-			}
 			E(K::Backspace, M::NONE) => {
 				self.pending_cmd.set_verb(VerbCmd(1,Verb::Delete));
 				self.pending_cmd.set_motion(MotionCmd(1,Motion::BackwardCharForced));

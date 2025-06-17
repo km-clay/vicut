@@ -511,8 +511,8 @@ impl ViNormal {
 						break 'motion_parse None
 					};
 					match ch {
-						')' => break 'motion_parse Some(MotionCmd(count, Motion::ToParen(Direction::Forward))),
-						'}' => break 'motion_parse Some(MotionCmd(count, Motion::ToBrace(Direction::Forward))),
+						'(' | ')' => break 'motion_parse Some(MotionCmd(count, Motion::ToParen(Direction::Forward))),
+						'{' | '}' => break 'motion_parse Some(MotionCmd(count, Motion::ToBrace(Direction::Forward))),
 						_ => return self.quit_parse()
 					}
 				}
@@ -521,8 +521,8 @@ impl ViNormal {
 						break 'motion_parse None
 					};
 					match ch {
-						'(' => break 'motion_parse Some(MotionCmd(count, Motion::ToParen(Direction::Backward))),
-						'{' => break 'motion_parse Some(MotionCmd(count, Motion::ToBrace(Direction::Backward))),
+						'(' | ')' => break 'motion_parse Some(MotionCmd(count, Motion::ToParen(Direction::Backward))),
+						'{' | '}' => break 'motion_parse Some(MotionCmd(count, Motion::ToBrace(Direction::Backward))),
 						_ => return self.quit_parse()
 					}
 				}
