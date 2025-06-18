@@ -787,13 +787,19 @@ impl LineBuf {
 		}
 
 		let mut end = start;
+		let mut found_newline = false;
 		// Find the end of the line
 		while let Some(idx) = idx_iter.next() {
 			end = (end + 1).min(self.cursor.max);
 			let gr = self.grapheme_at(idx).unwrap();
 			if gr == "\n" {
+				found_newline = true;
 				break
 			}
+		}
+
+		if !found_newline {
+			end = self.cursor.max;
 		}
 
 		Some((start, end))
@@ -1216,6 +1222,13 @@ impl LineBuf {
 		Some((start, end))
 	}
 	pub fn find_next_matching_delim(&mut self) -> Option<usize> {
+		let start = self.start_of_line();
+		let opener_delims = [
+			"[", 
+			"{", 
+			"(", 
+			"<", 
+		];
 		let delims = [
 			"[", "]",
 			"{", "}",
@@ -1223,17 +1236,19 @@ impl LineBuf {
 			"<", ">",
 		];
 		let mut fwd_indices = self.cursor.get()..self.cursor.max;
-		let idx = fwd_indices.find(|idx| self.grapheme_at(*idx).is_some_and(|gr| delims.contains(&gr)))?;
+		let mut bkwd_indices = (start..self.cursor.get()).rev();
+		let idx = bkwd_indices.find(|idx| self.grapheme_at(*idx).is_some_and(|gr| opener_delims.contains(&gr)))
+			.or_else(|| fwd_indices.find(|idx| self.grapheme_at(*idx).is_some_and(|gr| delims.contains(&gr))))?;
 		let search_direction = match self.grapheme_at(idx)? {
 			"[" |
-				"{" |
-				"(" |
-				"<" => Direction::Forward,
-				"]" |
-					"}" |
-					")" |
-					">" => Direction::Backward,
-				_ => unreachable!()
+			"{" |
+			"(" |
+			"<" => Direction::Forward,
+			"]" |
+			"}" |
+			")" |
+			">" => Direction::Backward,
+			_ => unreachable!()
 		};
 		let target_delim = match self.grapheme_at(idx)? {
 			"[" => "]",
@@ -2789,6 +2804,8 @@ impl LineBuf {
 					MotionKind::LineRange(_,e) => e,
 					_ => self.cursor_line_number()
 				};
+				let (_,insert_pos) = self.line_bounds(insert_line).unwrap();
+				let needs_newline = self.grapheme_at(insert_pos) != Some("\n");
 
 				let data = match src {
 					ReadSrc::Cmd(sh_cmd) => {
@@ -2813,11 +2830,15 @@ impl LineBuf {
 							.map_err(|e| format!("Failed to write to file: {e}"))?
 					}
 				};
+				let needs_trailing_newline = !data.ends_with("\n") && insert_pos != self.cursor.max;
+				let mut output = String::new();
+				if needs_newline { output.push('\n'); }
+				output.push_str(&data);
+				if needs_trailing_newline { output.push('\n'); }
 
-				self.insert_str_at(self.cursor.get(), &data);
+				self.insert_str_at(insert_pos, &output);
 			}
 			Verb::Write(dest) => {
-				dbg!(&motion);
 				let (start_line,end_line) = match motion {
 					MotionKind::Line(n) => (n,n),
 					MotionKind::LineRange(s,e) => (s,e),

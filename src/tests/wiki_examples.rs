@@ -223,3 +223,15 @@ fn wiki_example_substitution() {
 		"bar foo bar\nfoo bar foo\nbar foo bar"
 	);
 }
+
+#[test]
+fn wiki_example_append_date() {
+	vicut_integration(
+	 "foo bar foo\nbar foo bar\nfoo bar foo",
+		&[ 
+		// Can't use the actual date command because then the test is non-deterministic
+			"-m", "Go<CR><esc>:r !echo 2025-06-18 10:31:56" 
+		],
+		"foo bar foo\nbar foo bar\nfoo bar foo\n\n\n2025-06-18 10:31:56"
+	);
+}

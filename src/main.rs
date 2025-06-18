@@ -667,13 +667,10 @@ fn main() {
 	{
 		// Testing
 		let input = "foo bar foo\nbar foo bar\nfoo bar foo";
-		println!("{input}");
+		println!("{input}\n");
 
-		let args = [ 
-			"-m", ":%s/foo/###/g<CR>",
-			"-m", ":%s/bar/%%%/g<CR>",
-			"-m", ":%s/%%%/foo/g<CR>",
-			"-m", ":%s/###/bar/g<CR>"
+		let args = [
+			"-m", "Go<esc>:r !echo 2025-06-18 10:31:56" 
 		];
 		let output = call_main(&args, input).unwrap();
 		println!("{output}");
