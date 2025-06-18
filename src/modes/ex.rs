@@ -3,7 +3,7 @@ use std::{iter::Peekable, path::PathBuf, str::Chars};
 use bitflags::bitflags;
 use itertools::Itertools;
 
-use crate::{modes::{common_cmds, ModeReport, ViMode}, vicmd::{Anchor, CmdFlags, LineAddr, Motion, MotionCmd, ReadSrc, RegisterName, Verb, VerbCmd, ViCmd, WriteDest}};
+use crate::{modes::{common_cmds, insert::ViInsert, normal::ViNormal, ModeReport, ViMode}, reader::{KeyReader, RawReader}, vicmd::{Anchor, CmdFlags, LineAddr, Motion, MotionCmd, ReadSrc, RegisterName, Verb, VerbCmd, ViCmd, WriteDest}};
 
 bitflags! {
 	#[derive(Debug,Clone,Copy,PartialEq,Eq)]
@@ -112,7 +112,6 @@ fn get_path(path: &str) -> PathBuf {
 
 
 fn parse_ex_cmd(raw: &str, select_range: Option<(usize,usize)>) -> Result<Option<ViCmd>,Option<String>> {
-	dbg!(raw);
 	let raw = raw.trim();
 	if raw.is_empty() {
 		return Ok(None)
@@ -121,7 +120,6 @@ fn parse_ex_cmd(raw: &str, select_range: Option<(usize,usize)>) -> Result<Option
 	let mut motion = if let Some(motion) = parse_ex_address(&mut chars)?.map(|m| MotionCmd(1, m)) {
 		Some(motion)
 	} else { 
-		dbg!(select_range);
 		select_range.map(|range| MotionCmd(1,Motion::LineRange(LineAddr::Number(range.0),LineAddr::Number(range.1)))) 
 	};
 	let verb = parse_ex_command(&mut chars)?.map(|v| VerbCmd(1, v));
@@ -221,6 +219,10 @@ fn parse_ex_command(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,Opti
 		'g' => parse_global(chars),
 		_ => Err(None)
 	}
+}
+
+fn parse_normal(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,Option<String>> {
+	todo!()
 }
 
 fn parse_read(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,Option<String>> {

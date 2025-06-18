@@ -8,7 +8,7 @@ use super::register::{append_register, read_register, write_register};
 
 //TODO: write tests that take edit results and cursor positions from actual neovim edits and test them against the behavior of this editor
 
-#[derive(Clone,Copy,Debug)]
+#[derive(Clone,Copy,Debug,PartialEq)]
 pub struct RegisterName {
 	name: Option<char>,
 	count: usize,
@@ -70,7 +70,7 @@ bitflags! {
 	}
 }
 
-#[derive(Clone,Default,Debug)]
+#[derive(Clone,Default,Debug,PartialEq)]
 pub struct ViCmd {
 	pub register: RegisterName,
 	pub verb: Option<VerbCmd>,
@@ -132,6 +132,9 @@ impl ViCmd {
 		self.verb.as_ref().is_some_and(|v| matches!(v.1, Verb::ReplaceCharInplace(_,_) | Verb::ToggleCaseInplace(_))) &&
 		self.motion.is_none()
 	}
+	pub fn is_ex_normal(&self) -> bool {
+		self.verb.as_ref().is_some_and(|v| matches!(v.1, Verb::Normal(_)))
+	}
 	pub fn is_line_motion(&self) -> bool {
 		self.motion.as_ref().is_some_and(|m| {
 			matches!(m.1, 
@@ -169,9 +172,9 @@ impl ViCmd {
 	}
 }
 
-#[derive(Clone,Debug)]
+#[derive(Clone,Debug,PartialEq)]
 pub struct VerbCmd(pub usize,pub Verb);
-#[derive(Clone,Debug)]
+#[derive(Clone,Debug,PartialEq)]
 pub struct MotionCmd(pub usize,pub Motion);
 
 impl MotionCmd {
@@ -187,7 +190,7 @@ impl MotionCmd {
 	}
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Verb {
 	Delete,
@@ -215,6 +218,7 @@ pub enum Verb {
 	Read(ReadSrc),
 	Write(WriteDest),
 	SearchMode(usize,Direction),
+	Normal(Vec<ViCmd>), // ex mode 'normal!'
 	ReplaceMode,
 	ExMode,
 	InsertMode,

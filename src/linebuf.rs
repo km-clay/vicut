@@ -1904,7 +1904,6 @@ impl LineBuf {
 				if self.cursor.exclusive && line.ends_with("\n") && self.grapheme_at(target_pos) == Some("\n") {
 					target_pos = target_pos.saturating_sub(1); // Don't land on the newline
 				}
-				dbg!(start,end);
 				MotionKind::InclusiveWithTargetCol((start,end),target_pos)
 			}
 			MotionCmd(count,Motion::WordMotion(to, word, dir)) => {
@@ -2490,11 +2489,6 @@ impl LineBuf {
 				(start,end)
 			}
 			MotionKind::LineRange(first, last) => {
-				dbg!(last);
-				dbg!(first);
-				dbg!(self.line_bounds(0));
-				dbg!(self.line_bounds(*first));
-				dbg!(self.line_bounds(*last));
 				let (start,_) = self.line_bounds(*first)?;
 				let (_,end) = self.line_bounds(*last)?;
 				(start,end)
@@ -2787,12 +2781,10 @@ impl LineBuf {
 					indices_to_remove.push(start);
 				}
 				let mut range_indices = self.grapheme_indices()[start..end].to_vec().into_iter();
-				dbg!(range_indices.clone().map(|idx| (idx, self.grapheme_at(idx).unwrap().to_string())).collect::<Vec<_>>());
 				while let Some(idx) = range_indices.next() {
 					let Some(gr) = self.grapheme_at(idx) else { break };
 					if gr == "\n" {
 						let Some(idx) = range_indices.next() else { break };
-						dbg!(self.grapheme_at(idx));
 						if self.grapheme_at(idx) == Some("\t") {
 							indices_to_remove.push(idx);
 						}
