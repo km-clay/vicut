@@ -29,4 +29,3 @@ fn normal_cmd(cmd: &str, buf: &str, cursor: usize) -> (String,usize) {
 	buf.exec_cmd(cmd).unwrap();
 	(buf.as_str().to_string(),buf.cursor.get()) 
 }
-

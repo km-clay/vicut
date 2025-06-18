@@ -300,7 +300,6 @@ fn format_output_standard(delimiter: &str, lines: Vec<Vec<(String,String)>>) -> 
 				.collect::<Vec<String>>()
 				.join(delimiter);
 			acc.push_str(&fmt_line);
-			acc.push('\n');
 			acc
 		})
 }
@@ -346,10 +345,10 @@ fn format_output_template(template: &str, lines: Vec<Vec<(String,String)>>) -> R
 							cur_line.push_str(field);
 						} else {
 							let mut e = String::new();
-							write!(e,"Did not find a field called '{field_name}' for output template").ok();
-							write!(e,"Captured field names were:").ok();
+							writeln!(e,"Did not find a field called '{field_name}' for output template").ok();
+							writeln!(e,"Captured field names were:").ok();
 							for (name,_) in line {
-								write!(e,"\t{name}").ok();
+								writeln!(e,"\t{name}").ok();
 							}
 							return Err(e)
 						}
@@ -505,34 +504,62 @@ fn exec_cmd(
 }
 
 fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Argv) {
-	/*
-	// Filename, Line number, Line content
-	let mut work: Vec<(PathBuf, usize, String)> = vec![];
+	let work: Vec<(PathBuf, String)> = args.files.par_iter()
+		.fold(Vec::new, |mut acc,file| {
+			let contents = fs::read_to_string(file).unwrap_or_else(|e| {
+				eprintln!("vicut: failed to read file '{}': {e}",file.display());
+				std::process::exit(1);
+			});
+			if args.edit_inplace && args.backup_files {
+				let extension = args.backup_extension.as_deref().unwrap_or("bak");
+				let backup_path = file.with_extension(format!(
+						"{}.{extension}",
+						file.extension()
+						.and_then(|ext| ext.to_str())
+						.unwrap_or("")
+				));
 
-	for file in &args.files {
-		let contents = fs::read_to_string(file).unwrap_or_else(|e| {
-			eprintln!("vicut: failed to read file '{}': {e}",file.display());
-			std::process::exit(1);
+				fs::copy(file, &backup_path).unwrap_or_else(|e| {
+					eprintln!("vicut: failed to back up file '{}': {e}", file.display());
+					std::process::exit(1)
+				});
+			}
+			acc.push((file.clone(), contents.to_string()));
+			acc
+		}).reduce(Vec::new, |mut a, mut b| {
+			a.append(&mut b);
+			a
 		});
-		if args.edit_inplace && args.backup_files {
-			let extension = args.backup_extension.as_deref().unwrap_or("bak");
-			let backup_path = file.with_extension(format!(
-					"{}.{extension}",
-					file.extension()
-					.and_then(|ext| ext.to_str())
-					.unwrap_or("")
-			));
 
-			fs::copy(file, &backup_path).unwrap_or_else(|e| {
-				eprintln!("vicut: failed to back up file '{}': {e}", file.display());
+	// Process each file's content
+	let results = work.into_par_iter()
+		.map(|(path, content)| {
+			let processed = match execute(args, content) {
+				Ok(content) => content,
+				Err(e) => {
+					eprintln!("vicut: error in file '{}': {e}",path.display());
+					std::process::exit(1)
+				}
+			};
+			(path, processed)
+		}).collect::<Vec<_>>();
+
+	// Write back to file
+	for (path, contents) in results {
+		if args.edit_inplace {
+			fs::write(&path, contents).unwrap_or_else(|e| {
+				eprintln!("vicut: failed to write to file '{}': {e}",path.display());
 				std::process::exit(1)
 			});
-		}
-		for (line_no,line) in contents.lines().enumerate() {
-			work.push((file.clone(), line_no, line.to_string()));
+		} else if args.files.len() > 1 {
+			writeln!(stdout, "--- {}\n{}",path.display(), contents).ok();
+		} else {
+			writeln!(stdout, "{contents}").ok();
 		}
 	}
-	*/
+}
+
+fn execute_multi_thread_files_linewise(mut stdout: io::StdoutLock, args: &Argv) {
 
 	let work: Vec<(PathBuf, usize, String)> = args.files.par_iter()
 		.fold(Vec::new, |mut acc,file| {
@@ -597,9 +624,9 @@ fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Argv) {
 				std::process::exit(1)
 			});
 		} else if args.files.len() > 1 {
-			write!(stdout, "--- {}\n{}",path.display(), output_final).ok();
+			writeln!(stdout, "--- {}\n{}",path.display(), output_final).ok();
 		} else {
-			write!(stdout, "{output_final}").ok();
+			writeln!(stdout, "{output_final}").ok();
 		}
 	}
 }
@@ -628,7 +655,7 @@ fn execute_multi_thread_stdin(stream: Box<dyn BufRead>, args: &Argv) -> String {
 	lines.sort_by_key(|(i,_)| *i);
 	let mut output = String::new();
 	for (_,line) in lines {
-		write!(output,"{line}").ok();
+		writeln!(output,"{line}").ok();
 	}
 	output
 }
@@ -638,13 +665,15 @@ fn execute_multi_thread_stdin(stream: Box<dyn BufRead>, args: &Argv) -> String {
 fn main() {
 	#[cfg(debug_assertions)]
 	{
-		let input = "This sentence has 'foo' in it.\nThis sentence doesn't.\nThis sentence has 'foo' in it.\nHere's some emojis: 🇺🇸 🇯🇵 🧠 🐍 🐉 🧑‍💻 👨‍👩‍👧‍👦\nThis sentence doesn't.\nThis sentence doesn't.\nThis sentence has 'foo' in it.\nThis sentence doesn't.\nThis sentence has 'foo' in it.\nThis sentence doesn't.";
+		// Testing
+		let input = "This is some\nMultiline text\nWith trailing\nNewlines\n\n\n\n\n\n\n";
+		println!("{input}");
 
 		let args = [
-			"-m", ":%s/foo/bar/g"
+			"-m", "Gvgeld",
 		];
 		let output = call_main(&args, input).unwrap();
-		print!("{output}");
+		println!("{output}");
 		return
 	}
 
@@ -710,7 +739,7 @@ fn main() {
 						match result {
 							Ok(line) => {
 								match execute(&args,line) {
-									Ok(new_line) => write!(output,"{new_line}").ok(),
+									Ok(new_line) => writeln!(output,"{new_line}").ok(),
 									Err(e) => {
 										eprintln!("vicut: {e}");
 										return;
@@ -732,7 +761,7 @@ fn main() {
 						if args.files.len() > 1 {
 							writeln!(stdout,"--- {}", path.display()).ok();
 						}
-						write!(stdout, "{output}").ok();
+						writeln!(stdout, "{output}").ok();
 					}
 				}
 			} else {
@@ -741,7 +770,7 @@ fn main() {
 					match result {
 						Ok(line) => {
 							match execute(&args,line) {
-								Ok(new_line) => write!(output,"{new_line}").ok(),
+								Ok(new_line) => writeln!(output,"{new_line}").ok(),
 								Err(e) => {
 									eprintln!("vicut: {e}");
 									return;
@@ -755,7 +784,7 @@ fn main() {
 					};
 				}
 			}
-			write!(stdout, "{output}").ok();
+			writeln!(stdout, "{output}").ok();
 
 		} else if let Some(num) = args.max_jobs {
 				let pool = rayon::ThreadPoolBuilder::new()
@@ -768,64 +797,81 @@ fn main() {
 				pool.install(|| {
 					let mut stdout = io::stdout().lock();
 					let output = if !args.files.is_empty() {
-						execute_multi_thread_files(stdout, &args);
+						execute_multi_thread_files_linewise(stdout, &args);
 						// Output has already been handled
 						std::process::exit(0);
 					} else {
 						let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
 						execute_multi_thread_stdin(stream, &args)
 					};
-					write!(stdout, "{output}").ok();
+					writeln!(stdout, "{output}").ok();
 				});
 		} else {
 			let mut stdout = io::stdout().lock();
 			let output = if !args.files.is_empty() {
-				execute_multi_thread_files(stdout, &args);
+				execute_multi_thread_files_linewise(stdout, &args);
 				// Output has already been handled
 				std::process::exit(0);
 			} else {
 				let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
 				execute_multi_thread_stdin(stream, &args)
 			};
-			write!(stdout, "{output}").ok();
+			writeln!(stdout, "{output}").ok();
 		}
 	} else if !args.files.is_empty() {
-		let mut stdout = io::stdout().lock();
-		for path in &args.files {
-			let content = fs::read_to_string(path).unwrap_or_else(|e| {
-				eprintln!("vicut: failed to read file '{}': {e}",path.display());
-				std::process::exit(1)
-			});
-			if args.edit_inplace && args.backup_files {
-				let extension = args.backup_extension.as_deref().unwrap_or("bak");
-				let backup_path = path.with_extension(format!(
-						"{}.{extension}",
-						path.extension()
-						.and_then(|ext| ext.to_str())
-						.unwrap_or("")
-				));
-
-				fs::copy(path, &backup_path).unwrap_or_else(|e| {
-					eprintln!("vicut: failed to back up file '{}': {e}", path.display());
+		if args.single_thread {
+			let mut stdout = io::stdout().lock();
+			for path in &args.files {
+				let content = fs::read_to_string(path).unwrap_or_else(|e| {
+					eprintln!("vicut: failed to read file '{}': {e}",path.display());
 					std::process::exit(1)
 				});
-			}
-			match execute(&args,content) {
-				Ok(mut output) => {
-					if args.edit_inplace {
-						fs::write(path, std::mem::take(&mut output)).unwrap_or_else(|e| {
-							eprintln!("vicut: failed to write to file '{}': {e}",path.display());
-							std::process::exit(1)
-						});
-					} else {
-						if args.files.len() > 1 {
-							writeln!(stdout,"--- {}", path.display()).ok();
-						}
-						write!(stdout,"{output}").ok(); 
-					}
+				if args.edit_inplace && args.backup_files {
+					let extension = args.backup_extension.as_deref().unwrap_or("bak");
+					let backup_path = path.with_extension(format!(
+							"{}.{extension}",
+							path.extension()
+							.and_then(|ext| ext.to_str())
+							.unwrap_or("")
+					));
+
+					fs::copy(path, &backup_path).unwrap_or_else(|e| {
+						eprintln!("vicut: failed to back up file '{}': {e}", path.display());
+						std::process::exit(1)
+					});
 				}
-				Err(e) => eprintln!("vicut: {e}"),
-			};
+				match execute(&args,content) {
+					Ok(mut output) => {
+						if args.edit_inplace {
+							fs::write(path, std::mem::take(&mut output)).unwrap_or_else(|e| {
+								eprintln!("vicut: failed to write to file '{}': {e}",path.display());
+								std::process::exit(1)
+							});
+						} else {
+							if args.files.len() > 1 {
+								writeln!(stdout,"--- {}", path.display()).ok();
+							}
+							writeln!(stdout,"{output}").ok(); 
+						}
+					}
+					Err(e) => eprintln!("vicut: {e}"),
+				};
+			}
+		} else if let Some(num) = args.max_jobs {
+			let pool = rayon::ThreadPoolBuilder::new()
+				.num_threads(num as usize)
+				.build()
+				.unwrap_or_else(|e| {
+					eprintln!("vicut: Failed to build thread pool: {e}");
+					std::process::exit(1)
+				});
+			pool.install(|| {
+				let stdout = io::stdout().lock();
+				execute_multi_thread_files(stdout, &args);
+			});
+		} else {
+			let mut stdout = io::stdout().lock();
+			execute_multi_thread_files(stdout, &args);
 		}
 	} else {
 		let mut stdout = io::stdout().lock();
@@ -839,7 +885,7 @@ fn main() {
 			}
 		}
 		match execute(&args,input) {
-			Ok(output) => { write!(stdout,"{output}").ok(); }
+			Ok(output) => { writeln!(stdout,"{output}").ok(); }
 			Err(e) => eprintln!("vicut: {e}"),
 		};
 	}
@@ -886,7 +932,7 @@ fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 				match result {
 					Ok(line) => {
 						match execute(&args,line) {
-							Ok(new_line) => write!(output,"{new_line}").ok(),
+							Ok(new_line) => writeln!(output,"{new_line}").ok(),
 							Err(e) => {
 								return Err(format!("vicut: {e}"));
 							}

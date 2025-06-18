@@ -308,4 +308,3 @@ impl ViCut {
 		Ok(())
 	}
 }
-

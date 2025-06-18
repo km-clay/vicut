@@ -620,6 +620,9 @@ impl LineBuf {
 			self.last_selection = self.select_range.take();
 		}
 	}
+	pub fn is_selecting(&self) -> bool {
+		self.select_mode.is_some() && self.select_range.is_some()
+	}
 	pub fn total_lines(&mut self) -> usize {
 		self.buffer
 			.chars()
@@ -2098,8 +2101,11 @@ impl LineBuf {
 					match motion {
 						Motion::BackwardChar => target.sub(1),
 						Motion::ForwardChar => {
-							if self.cursor.exclusive && self.grapheme_at(target.ret_add(1)) == Some("\n") {
+							if !self.is_selecting() && self.cursor.exclusive && self.grapheme_at(target.ret_add(1)) == Some("\n") {
 								return MotionKind::Null
+							}
+							if self.is_selecting() && self.grapheme_at(target.get()) == Some("\n") {
+								break
 							}
 							target.add(1);
 							continue
@@ -2404,8 +2410,13 @@ impl LineBuf {
 				if self.select_range().is_none() {
 					self.cursor.set(start)
 				} else {
-					self.cursor.set(end);
-					self.select_mode = Some(SelectMode::Char(SelectAnchor::End));
+					if start < self.cursor.get() {
+						self.cursor.set(start);
+						self.select_mode = Some(SelectMode::Char(SelectAnchor::Start));
+					} else {
+						self.cursor.set(end);
+						self.select_mode = Some(SelectMode::Char(SelectAnchor::End));
+					}
 					self.select_range = Some((start,end));
 				}
 			}
