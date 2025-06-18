@@ -666,11 +666,12 @@ fn main() {
 	#[cfg(debug_assertions)]
 	{
 		// Testing
-		let input = "\tfoo bar foo\n\tbar foo bar\n\tfoo bar foo";
+		let input = "foobar\n1Linelinelineline\n2Linelinelineline\nfoobar\n3Linelinelineline\n4Linelinelineline\nfoobar\n5Linelinelineline\nfoobar\n6Linelinelineline\nfoobar\n7Linelinelineline\nfoobar";
 		println!("{input}\n");
 
 		let args = [
-			"-m", "2<<" 
+			"-m", "4j",
+			"-m", ":g/foo/normal! 3dliWORDSWORDSWORDS"
 		];
 		let output = call_main(&args, input).unwrap();
 		println!("{output}");

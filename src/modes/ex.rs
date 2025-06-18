@@ -19,6 +19,7 @@ bitflags! {
 	}
 }
 
+#[derive(Clone,Debug)]
 pub struct ViEx {
 	pending_cmd: String,
 	select_range: Option<(usize,usize)>,
@@ -122,7 +123,16 @@ fn parse_ex_cmd(raw: &str, select_range: Option<(usize,usize)>) -> Result<Option
 	} else { 
 		select_range.map(|range| MotionCmd(1,Motion::LineRange(LineAddr::Number(range.0),LineAddr::Number(range.1)))) 
 	};
-	let verb = parse_ex_command(&mut chars)?.map(|v| VerbCmd(1, v));
+	let verb = {
+		if chars.peek() == Some(&'g') {
+			chars.next();
+			let Some(result) = parse_global(&mut chars,motion.as_ref().map(|mcmd| &mcmd.1))? else { return Ok(None) };
+			motion = Some(MotionCmd(1,result.0));
+			Some(VerbCmd(1,result.1))
+		} else {
+			parse_ex_command(&mut chars)?.map(|v| VerbCmd(1, v))
+		}
+	};
 	if motion.is_none() && !matches!(verb, Some(VerbCmd(_,Verb::Write(_)))) {
 		motion = Some(MotionCmd(1,Motion::Line(LineAddr::Current)))
 	}
@@ -143,7 +153,7 @@ fn parse_ex_address(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Motion>,Op
 	}
 	let mut chars_clone = chars.clone();
 	let Some(start) = parse_one_addr(&mut chars_clone)? else { return Ok(None) };
-	if let Some(&',') = chars.peek() {
+	if let Some(&',') = chars_clone.peek() {
 		chars_clone.next();
 		let Some(end) = parse_one_addr(&mut chars_clone)? else { return Ok(Some(Motion::Line(start))) };
 		*chars = chars_clone;
@@ -205,6 +215,20 @@ fn parse_one_addr(chars: &mut Peekable<Chars<'_>>) -> Result<Option<LineAddr>,Op
 }
 
 fn parse_ex_command(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,Option<String>> {
+	let mut normal_check = chars.clone();
+
+	// Production ready :D
+	if normal_check.next() == Some('n')
+	&& normal_check.next() == Some('o')
+	&& normal_check.next() == Some('r')
+	&& normal_check.next() == Some('m')
+	&& normal_check.next() == Some('a')
+	&& normal_check.next() == Some('l')
+	&& normal_check.next() == Some('!') {
+		*chars = normal_check;
+		return parse_normal(chars)
+	}
+
 	let Some(first) = chars.next() else {
 		return Ok(None)
 	};
@@ -216,13 +240,15 @@ fn parse_ex_command(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,Opti
 		'r' => parse_read(chars),
 		'w' => parse_write(chars),
 		's' => parse_substitute(chars),
-		'g' => parse_global(chars),
 		_ => Err(None)
 	}
 }
 
 fn parse_normal(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,Option<String>> {
-	todo!()
+	chars.peeking_take_while(|c| c.is_whitespace()).for_each(drop);
+
+	let seq: String = chars.collect();
+	Ok(Some(Verb::Normal(seq)))
 }
 
 fn parse_read(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,Option<String>> {
@@ -272,13 +298,13 @@ fn parse_write(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,Option<St
 	Ok(Some(Verb::Write(dest)))
 }
 
-fn parse_global(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,Option<String>> {
+fn parse_global(chars: &mut Peekable<Chars<'_>>, constraint: Option<&Motion>) -> Result<Option<(Motion,Verb)>,Option<String>> {
 	let is_negated = if chars.peek() == Some(&'!') { chars.next(); true } else { false };
 
 	chars.peeking_take_while(|c| c.is_whitespace()).for_each(drop); // Ignore whitespace
 
 	let Some(delimiter) = chars.next() else {
-		return Ok(Some(Verb::RepeatGlobal))
+		return Ok(Some((Motion::Null,Verb::RepeatGlobal)))
 	};
 	if delimiter.is_alphanumeric() {
 		return Err(None)
@@ -287,10 +313,11 @@ fn parse_global(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,Option<S
 	let Some(command) = parse_ex_command(chars)? else {
 		return Err(Some("Expected a command after global pattern".into()))
 	};
+	let constraint = Box::new(constraint.cloned().unwrap_or(Motion::LineRange(LineAddr::Number(1),LineAddr::Last)));
 	if is_negated {
-		Ok(Some(Verb::NotGlobal(global_pat, Box::new(command))))
+		Ok(Some((Motion::NotGlobal(constraint,global_pat), command)))
 	} else {
-		Ok(Some(Verb::Global(global_pat, Box::new(command))))
+		Ok(Some((Motion::Global(constraint,global_pat), command)))
 	}
 }
 

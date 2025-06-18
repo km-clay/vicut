@@ -135,6 +135,9 @@ impl ViCmd {
 	pub fn is_ex_normal(&self) -> bool {
 		self.verb.as_ref().is_some_and(|v| matches!(v.1, Verb::Normal(_)))
 	}
+	pub fn is_ex_global(&self) -> bool {
+		self.motion.as_ref().is_some_and(|m| matches!(m.1, Motion::Global(_,_) | Motion::NotGlobal(_,_)))
+	}
 	pub fn is_line_motion(&self) -> bool {
 		self.motion.as_ref().is_some_and(|m| {
 			matches!(m.1, 
@@ -212,13 +215,11 @@ pub enum Verb {
 	/// (old_pat,new_pat,flags)
 	Substitute(String,String,SubFlags),
 	RepeatSubstitute,
-	Global(String,Box<Verb>),
-	NotGlobal(String,Box<Verb>),
 	RepeatGlobal,
 	Read(ReadSrc),
 	Write(WriteDest),
 	SearchMode(usize,Direction),
-	Normal(Vec<ViCmd>), // ex mode 'normal!'
+	Normal(String), // ex mode 'normal!'
 	ReplaceMode,
 	ExMode,
 	InsertMode,
@@ -308,6 +309,8 @@ pub enum Motion {
 	LineRange(LineAddr,LineAddr), // x,y
 	PatternSearch(String),
 	PatternSearchRev(String),
+	Global(Box<Motion>,String), // Motion should always be 'Line' or 'LineRange'
+	NotGlobal(Box<Motion>,String), // Motion should always be 'Line' or 'LineRange'
 	NextMatch,
 	PrevMatch,
 	BackwardChar,

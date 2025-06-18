@@ -27,6 +27,12 @@ impl RawReader {
 		let bytes = bytes.iter();
 		self.bytes.extend(bytes);
 	}
+	pub fn get_bytes(&self) -> VecDeque<u8> {
+		self.bytes.clone()
+	}
+	pub fn set_bytes(&mut self, bytes: VecDeque<u8>) {
+		self.bytes = bytes
+	}
 
 	pub fn parse_esc_seq(&mut self) -> Option<KeyEvent> {
 		let mut seq = vec![0x1b];

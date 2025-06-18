@@ -159,6 +159,7 @@ pub enum MotionKind {
 	Inclusive((usize,usize)), // Range, inclusive
 	Exclusive((usize,usize)), // Range, exclusive
 	Line(usize),
+	Lines(Vec<usize>),
 	LineRange(usize,usize),
 
 	// Used for linewise operations like 'dj', left is the selected range, right is the cursor's new position on the line
@@ -1877,6 +1878,44 @@ impl LineBuf {
 	}
 	pub fn eval_motion(&mut self, verb: Option<&Verb>, motion: MotionCmd) -> MotionKind {
 		match motion {
+			MotionCmd(_,Motion::NotGlobal(ref addr, ref pattern)) |
+			MotionCmd(_,Motion::Global(ref addr, ref pattern)) => {
+				let (start_line,end_line) = match **addr {
+					Motion::Line(ref n) => {
+						let line_no = self.eval_line_addr(n.clone()).unwrap();
+						(line_no,line_no)
+					}
+					Motion::LineRange(ref s,ref e) => {
+						let start_ln = self.eval_line_addr(s.clone()).unwrap();
+						let end_ln = self.eval_line_addr(e.clone()).unwrap();
+						(start_ln,end_ln)
+					}
+					_ => (0,self.total_lines())
+				};
+				let mut lines = vec![];
+				let line_range = start_line..end_line;
+				if let Ok(regex) = Regex::new(pattern) {
+					for line_no in line_range {
+						let Some((start,end)) = self.line_bounds(line_no) else { continue };
+						let line = self.slice(start..end).unwrap_or_default();
+
+						match motion.1 {
+							Motion::NotGlobal(_,_) => {
+								let None = regex.find(line).map(|mat| (mat.start(),mat.end())) else { continue };
+							}
+							Motion::Global(_,_) => {
+								let Some(_) = regex.find(line).map(|mat| (mat.start(),mat.end())) else { continue };
+							}
+							_ => unreachable!()
+						}
+						lines.push(line_no);
+					}
+				} else {
+					todo!()
+				}
+				let reversed = lines.into_iter().rev().collect::<Vec<_>>();
+				MotionKind::Lines(reversed)
+			}
 			MotionCmd(count,Motion::WholeLineExclusive) |
 			MotionCmd(count,Motion::WholeLine) => {
 				let Some((start,end)) = (match motion.1 {
@@ -2466,6 +2505,13 @@ impl LineBuf {
 					self.select_range = Some((start,end));
 				}
 			}
+			MotionKind::Lines(_) => {
+				/*
+					This motionkind is only created by :g
+					And global is handled in a Vicut method, not in here
+				 */
+				unreachable!()
+			}
 			MotionKind::Null => { /* Do nothing */ }
 		}
 	}
@@ -2509,6 +2555,7 @@ impl LineBuf {
 						end = ClampedUsize::new(end,self.cursor.max,false).ret_add(1);
 						(start,end)
 					}
+			MotionKind::Lines(_) |
 			MotionKind::Null => return None
 		};
 		Some(range)
@@ -2921,43 +2968,6 @@ impl LineBuf {
 					self.exec_verb(global, motion, register)?
 				}
 			}
-			Verb::NotGlobal(ref pat, ref global_verb) |
-			Verb::Global(ref pat, ref global_verb) => {
-				let (start_line,end_line) = match motion {
-					MotionKind::Line(n) => (n,n),
-					MotionKind::LineRange(s,e) => (s,e),
-					_ => (0,self.total_lines())
-				};
-				if let Ok(regex) = Regex::new(pat) {
-					let lines = start_line..=end_line;
-					for line_no in lines {
-						let Some((start,end)) = self.line_bounds(line_no) else { continue };
-						let line = self.slice(start..end).unwrap_or_default();
-
-						match verb {
-							Verb::NotGlobal(_,_) => {
-								let None = regex.find(line).map(|mat| (mat.start(),mat.end())) else { continue };
-							}
-							Verb::Global(_,_) => {
-								let Some(_) = regex.find(line).map(|mat| (mat.start(),mat.end())) else { continue };
-							}
-							_ => unreachable!()
-						}
-						self.cursor.set(start);
-						let line_cmd = ViCmd {
-							register,
-							verb: Some(VerbCmd(1,*global_verb.clone())),
-							motion: Some(MotionCmd(1,Motion::WholeLine)),
-							raw_seq: "".into(),
-							flags: CmdFlags::empty()
-						};
-						self.exec_cmd(line_cmd)?;
-					}
-					self.last_global = Some(verb);
-				} else {
-					todo!()
-				}
-			}
 			Verb::RepeatSubstitute => {
 				let (start_line,end_line) = match motion {
 					MotionKind::Line(n) => (n,n),
@@ -3054,6 +3064,7 @@ impl LineBuf {
 			}
 			Verb::ExMode |
 			Verb::Complete |
+			Verb::Normal(_) |
 			Verb::EndOfFile |
 			Verb::InsertMode |
 			Verb::NormalMode |

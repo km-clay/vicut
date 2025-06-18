@@ -1,10 +1,11 @@
 use log::{debug, trace};
 
 use crate::keys::{KeyCode, KeyEvent, ModKeys};
-use crate::linebuf::{ordered, ClampedUsize};
+use crate::linebuf::{ordered, ClampedUsize, MotionKind};
 use crate::modes::ex::ViEx;
 use crate::modes::search::ViSearch;
 use crate::reader::{KeyReader, RawReader};
+use crate::vicmd::LineAddr;
 
 use super::linebuf::{LineBuf, SelectAnchor, SelectMode};
 use super::vicmd::{CmdFlags, Motion, MotionCmd, RegisterName, Verb, VerbCmd, ViCmd};
@@ -29,12 +30,7 @@ impl ViCut {
 			editor: LineBuf::new().with_initial(input, cursor),
 		})
 	}
-
-	pub fn read_field(&mut self, cmd: &str) -> Result<String,String> {
-		self.load_input(cmd);
-		let mut start = self.editor.cursor.get();
-		let mut end = self.editor.cursor.get();
-
+	pub fn exec_loop(&mut self) -> Result<(),String> {
 		loop {
 			let Some(key) = self.reader.read_key() else {
 				break
@@ -51,12 +47,22 @@ impl ViCut {
 			if return_to_normal {
 				self.set_normal_mode();
 			}
-			let new_pos_clamped = self.editor.cursor;
-			let new_pos = new_pos_clamped.get();
-			end = new_pos;
-			(start,end) = ordered(start, end);
-			end += 1;
 		}
+		Ok(())
+	}
+
+	pub fn read_field(&mut self, cmd: &str) -> Result<String,String> {
+		self.load_input(cmd);
+		let mut start = self.editor.cursor.get();
+		let mut end;
+
+		self.exec_loop();
+
+		let new_pos_clamped = self.editor.cursor;
+		let new_pos = new_pos_clamped.get();
+		end = new_pos;
+		(start,end) = ordered(start, end);
+		end += 1;
 
 		if let ModeReport::Search | ModeReport::Ex = self.mode.report_mode() 
 			&& !self.mode.pending_seq().unwrap().is_empty() {
@@ -281,6 +287,10 @@ impl ViCut {
 				}
 				_ => unreachable!()
 			}
+		} else if cmd.is_ex_global() {
+			return self.exec_ex_global(cmd)
+		} else if cmd.is_ex_normal() {
+			return self.exec_ex_normal(cmd)
 		}
 
 		if cmd.is_repeatable() {
@@ -305,6 +315,72 @@ impl ViCut {
 			let mut mode: Box<dyn ViMode> = Box::new(ViNormal::new());
 			std::mem::swap(&mut mode, &mut self.mode);
 		}
+		Ok(())
+	}
+
+	// Easier to handle these out here
+	fn exec_ex_global(&mut self, cmd: ViCmd) -> Result<(),String> {
+		let ViCmd { register, verb, motion, raw_seq, flags } = cmd;
+		let MotionKind::Lines(lines) = self.editor.eval_motion(verb.as_ref().map(|vcmd| &vcmd.1), motion.unwrap()) else { unreachable!() };
+		for line in lines {
+			let Some((start,_)) = self.editor.line_bounds(line) else { break };
+			self.editor.cursor.set(start);
+			let new_cmd = ViCmd {
+				register,
+				verb: verb.clone(),
+				motion: Some(MotionCmd(1, Motion::Line(LineAddr::Number(line + 1)))),
+				raw_seq: raw_seq.clone(),
+				flags,
+			};
+			self.exec_cmd(new_cmd)?;
+		}
+
+		Ok(())
+	}
+	fn exec_ex_normal(&mut self, cmd: ViCmd) -> Result<(),String> {
+		let ViCmd { register: _, verb, motion, raw_seq: _, flags: _ } = cmd;
+		let VerbCmd(_,Verb::Normal(seq)) = verb.unwrap() else { unreachable!() };
+		let mut mode: Box<dyn ViMode> = Box::new(ViNormal::new());
+		std::mem::swap(&mut self.mode, &mut mode);
+		match motion.unwrap().1 {
+			Motion::Line(addr) => {
+				let line_no = self.editor.eval_line_addr(addr)
+					.ok_or("Failed to evaluate line address".to_string())?;
+				let (start,_) = self.editor.line_bounds(line_no)
+					.ok_or(format!("Failed to get line bounds for line {line_no}"))?;
+				self.editor.cursor.set(start);
+				let old_bytes = self.reader.get_bytes();
+				self.load_input(&seq);
+
+				self.exec_loop()?;
+
+				self.reader.set_bytes(old_bytes);
+			}
+			Motion::LineRange(start, end) => {
+				let start_ln = self.editor.eval_line_addr(start)
+					.ok_or("Failed to evaluate line address".to_string())?;
+				let end_ln = self.editor.eval_line_addr(end)
+					.ok_or("Failed to evaluate line address".to_string())?;
+				let (start_ln,end_ln) = ordered(start_ln, end_ln);
+
+				for line in start_ln..=end_ln {
+					let mut mode: Box<dyn ViMode> = Box::new(ViNormal::new());
+					std::mem::swap(&mut self.mode, &mut mode);
+
+					let (start,_) = self.editor.line_bounds(line)
+						.ok_or("Failed to evaluate line address".to_string())?;
+					self.editor.cursor.set(start);
+					let old_bytes = self.reader.get_bytes();
+					self.load_input(&seq);
+
+					self.exec_loop()?;
+
+					self.reader.set_bytes(old_bytes);
+				}
+			}
+			_ => unreachable!()
+		}
+		std::mem::swap(&mut self.mode, &mut mode);
 		Ok(())
 	}
 }
