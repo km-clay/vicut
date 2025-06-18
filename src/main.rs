@@ -364,7 +364,6 @@ fn format_output_template(template: &str, lines: Vec<Vec<(String,String)>>) -> R
 		if !cur_line.is_empty() {
 			output.push_str(&std::mem::take(&mut cur_line));
 		}
-		output.push('\n')
 	}
 	Ok(output)
 }
@@ -667,11 +666,14 @@ fn main() {
 	#[cfg(debug_assertions)]
 	{
 		// Testing
-		let input = "This is some\nMultiline text\nWith trailing\nNewlines\n\n\n\n\n\n\n";
+		let input = "foo bar foo\nbar foo bar\nfoo bar foo";
 		println!("{input}");
 
-		let args = [
-			"-m", "Gvgeld",
+		let args = [ 
+			"-m", ":%s/foo/###/g<CR>",
+			"-m", ":%s/bar/%%%/g<CR>",
+			"-m", ":%s/%%%/foo/g<CR>",
+			"-m", ":%s/###/bar/g<CR>"
 		];
 		let output = call_main(&args, input).unwrap();
 		println!("{output}");

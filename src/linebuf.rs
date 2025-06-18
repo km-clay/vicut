@@ -5,7 +5,7 @@ use regex::Regex;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::{modes::ex::SubFlags, vicmd::LineAddr};
+use crate::{modes::ex::SubFlags, vicmd::{LineAddr, ReadSrc, VerbCmd, WriteDest}};
 
 use super::vicmd::{Anchor, Bound, CmdFlags, Dest, Direction, Motion, MotionCmd, RegisterName, TextObj, To, Verb, ViCmd, Word};
 
@@ -341,6 +341,7 @@ pub struct LineBuf {
 	pub last_selection: Option<(usize,usize)>,
 	pub last_pattern_search: Option<Regex>,
 	pub last_substitution: Option<(Regex,String,SubFlags)>,
+	pub last_global: Option<Verb>,
 
 	pub insert_mode_start_pos: Option<usize>,
 	pub saved_col: Option<usize>,
@@ -1747,8 +1748,8 @@ impl LineBuf {
 	}
 	pub fn replace_range(&mut self, start: usize, end: usize, new: &str) {
 		self.update_graphemes_lazy();
-		let Some(start_byte_pos) = self.grapheme_indices().get(start).copied() else { return };
-		let Some(end_byte_pos) = self.grapheme_indices().get(end).copied() else { return };
+		let start_byte_pos = self.grapheme_indices().get(start).copied().unwrap_or(0);
+		let end_byte_pos = self.grapheme_indices().get(end).copied().unwrap_or(self.buffer.len());
 		self.buffer.replace_range(start_byte_pos..end_byte_pos, new);
 	}
 	pub fn replace_at_cursor(&mut self, new: &str) {
@@ -2406,13 +2407,14 @@ impl LineBuf {
 					let end = end.min(col);
 					self.cursor.set(start + end)
 				}
-			MotionKind::Inclusive((start,end)) => {
+			MotionKind::Inclusive((start,mut end)) => {
 				if self.select_range().is_none() {
 					self.cursor.set(start)
 				} else {
 					if start < self.cursor.get() {
 						self.cursor.set(start);
 						self.select_mode = Some(SelectMode::Char(SelectAnchor::Start));
+						end += 1;
 					} else {
 						self.cursor.set(end);
 						self.select_mode = Some(SelectMode::Char(SelectAnchor::End));
@@ -2424,9 +2426,15 @@ impl LineBuf {
 				if self.select_range().is_none() {
 					self.cursor.set(start)
 				} else {
-					let end = end.saturating_sub(1);
-					self.cursor.set(end);
-					self.select_mode = Some(SelectMode::Char(SelectAnchor::End));
+					if start < self.cursor.get() {
+						let start = start + 1;
+						self.cursor.set(start);
+						self.select_mode = Some(SelectMode::Char(SelectAnchor::Start));
+					} else {
+						let end = end.saturating_sub(1);
+						self.cursor.set(end);
+						self.select_mode = Some(SelectMode::Char(SelectAnchor::End));
+					}
 					self.select_range = Some((start,end));
 				}
 			}
@@ -2775,11 +2783,137 @@ impl LineBuf {
 					}
 				}
 			}
+			Verb::Read(src) => {
+				let insert_line = match motion {
+					MotionKind::Line(n) => n,
+					MotionKind::LineRange(_,e) => e,
+					_ => self.cursor_line_number()
+				};
+
+				let data = match src {
+					ReadSrc::Cmd(sh_cmd) => {
+						use std::process::Command;
+
+						let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+						let child = Command::new(shell)
+							.arg("-c")
+							.arg(sh_cmd)
+							.output()
+							.map_err(|e| format!("Failed to spawn child process for write: {e}"))?;
+
+						if child.status.success() {
+							String::from_utf8(child.stdout)
+								.map_err(|e| format!("Command output was not valid UTF-8: {e}"))?
+						} else {
+							return Err(format!("Shell command exited with status {}", child.status.code().unwrap_or(-1)));
+						}
+					}
+					ReadSrc::File(path) => {
+						std::fs::read_to_string(path)
+							.map_err(|e| format!("Failed to write to file: {e}"))?
+					}
+				};
+
+				self.insert_str_at(self.cursor.get(), &data);
+			}
+			Verb::Write(dest) => {
+				dbg!(&motion);
+				let (start_line,end_line) = match motion {
+					MotionKind::Line(n) => (n,n),
+					MotionKind::LineRange(s,e) => (s,e),
+					_ => (0,self.total_lines())
+				};
+				let Some((start,_)) = self.line_bounds(start_line) else { return Ok(()) };
+				let Some((_,end)) = self.line_bounds(end_line) else { return Ok(()) };
+
+				let Some(write_span) = self.slice(start..end) else { return Ok(()) };
+				
+				use std::io::Write;
+				match dest {
+					WriteDest::File(path_buf) => {
+						std::fs::write(path_buf, write_span)
+							.map_err(|e| format!("Failed to write to file: {e}"))?;
+					}
+					WriteDest::FileAppend(path_buf) => {
+						use std::fs::OpenOptions;
+
+						let mut file = OpenOptions::new()
+							.create(true)
+							.append(true)
+							.open(path_buf)
+							.map_err(|e| format!("Failed to open file: {e}"))?;
+
+						file.write_all(write_span.as_bytes())
+							.map_err(|e| format!("Failed to write to file: {e}"))?;
+					}
+					WriteDest::Cmd(sh_cmd) => {
+						use std::process::{Command,Stdio};
+
+						let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+						let mut child = Command::new(shell)
+							.arg("-c")
+							.arg(sh_cmd)
+							.stdin(Stdio::piped())
+							.spawn()
+							.map_err(|e| format!("Failed to spawn child process for write: {e}"))?;
+
+						child.stdin.as_mut().unwrap().write_all(write_span.as_bytes())
+							.map_err(|e| format!("Failed to pipe input to child process: {e}"))?;
+						let status = child.wait()
+							.map_err(|e| format!("Failed to wait for child process: {e}"))?;
+						if !status.success() {
+							eprintln!("Command exited with non-zero status");
+						}
+					}
+				}
+			}
+			Verb::RepeatGlobal => {
+				if let Some(global) = self.last_global.clone() {
+					self.exec_verb(global, motion, register)?
+				}
+			}
+			Verb::NotGlobal(ref pat, ref global_verb) |
+			Verb::Global(ref pat, ref global_verb) => {
+				let (start_line,end_line) = match motion {
+					MotionKind::Line(n) => (n,n),
+					MotionKind::LineRange(s,e) => (s,e),
+					_ => (0,self.total_lines())
+				};
+				if let Ok(regex) = Regex::new(pat) {
+					let lines = start_line..=end_line;
+					for line_no in lines {
+						let Some((start,end)) = self.line_bounds(line_no) else { continue };
+						let line = self.slice(start..end).unwrap_or_default();
+
+						match verb {
+							Verb::NotGlobal(_,_) => {
+								let None = regex.find(line).map(|mat| (mat.start(),mat.end())) else { continue };
+							}
+							Verb::Global(_,_) => {
+								let Some(_) = regex.find(line).map(|mat| (mat.start(),mat.end())) else { continue };
+							}
+							_ => unreachable!()
+						}
+						self.cursor.set(start);
+						let line_cmd = ViCmd {
+							register,
+							verb: Some(VerbCmd(1,*global_verb.clone())),
+							motion: Some(MotionCmd(1,Motion::WholeLine)),
+							raw_seq: "".into(),
+							flags: CmdFlags::empty()
+						};
+						self.exec_cmd(line_cmd)?;
+					}
+					self.last_global = Some(verb);
+				} else {
+					todo!()
+				}
+			}
 			Verb::RepeatSubstitute => {
 				let (start_line,end_line) = match motion {
 					MotionKind::Line(n) => (n,n),
 					MotionKind::LineRange(s,e) => (s,e),
-					_ => (0,self.cursor.max),
+					_ => (0,self.total_lines()),
 				};
 				// Have to temporarily move sub out of last_substitution
 				// Because of mutable borrowing stuff
@@ -2821,7 +2955,7 @@ impl LineBuf {
 				let (start_line,end_line) = match motion {
 					MotionKind::Line(n) => (n,n),
 					MotionKind::LineRange(s,e) => (s,e),
-					_ => (0,self.cursor.max),
+					_ => (0,self.total_lines()),
 				};
 				if let Ok(regex) = Regex::new(&old) {
 					// We go in reverse here

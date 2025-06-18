@@ -1,9 +1,9 @@
-use std::{iter::Peekable, str::Chars};
+use std::{iter::Peekable, path::PathBuf, str::Chars};
 
 use bitflags::bitflags;
 use itertools::Itertools;
 
-use crate::{modes::{common_cmds, ModeReport, ViMode}, vicmd::{Anchor, CmdFlags, LineAddr, Motion, MotionCmd, RegisterName, Verb, VerbCmd, ViCmd}};
+use crate::{modes::{common_cmds, ModeReport, ViMode}, vicmd::{Anchor, CmdFlags, LineAddr, Motion, MotionCmd, ReadSrc, RegisterName, Verb, VerbCmd, ViCmd, WriteDest}};
 
 bitflags! {
 	#[derive(Debug,Clone,Copy,PartialEq,Eq)]
@@ -42,7 +42,10 @@ impl ViMode for ViEx {
 			E(C::Enter, M::NONE) => {
 				match parse_ex_cmd(&self.pending_cmd, self.select_range) {
 					Ok(cmd) => Ok(cmd),
-					Err(_) => Err(format!("Not an editor command: {}",&self.pending_cmd))
+					Err(e) => {
+						let e = e.unwrap_or(format!("Not an editor command: {}",&self.pending_cmd));
+						Err(e)
+					}
 				}
 			}
 			E(C::Esc, M::NONE) => {
@@ -97,19 +100,32 @@ impl ViMode for ViEx {
 	}
 }
 
+fn get_path(path: &str) -> PathBuf {
+	if let Some(stripped) = path.strip_prefix("~/") && let Some(home) = std::env::var_os("HOME") {
+			return PathBuf::from(home).join(stripped)
+	}
+	if path == "~" && let Some(home) = std::env::var_os("HOME") {
+		return PathBuf::from(home)
+	}
+	PathBuf::from(path)
+}
 
-fn parse_ex_cmd(raw: &str, select_range: Option<(usize,usize)>) -> Result<Option<ViCmd>,()> {
+
+fn parse_ex_cmd(raw: &str, select_range: Option<(usize,usize)>) -> Result<Option<ViCmd>,Option<String>> {
 	let raw = raw.trim();
 	if raw.is_empty() {
 		return Ok(None)
 	}
 	let mut chars = raw.chars().peekable();
-	let motion = if let Some(range) = select_range {
+	let mut motion = if let Some(range) = select_range {
 		Some(MotionCmd(1,Motion::Range(range.0,range.1)))
 	} else {
 		parse_ex_address(&mut chars)?.map(|m| MotionCmd(1, m))
 	};
 	let verb = parse_ex_command(&mut chars)?.map(|v| VerbCmd(1, v));
+	if motion.is_none() && !matches!(verb, Some(VerbCmd(_,Verb::Write(_)))) {
+		motion = Some(MotionCmd(1,Motion::Line(LineAddr::Current)))
+	}
 
 	Ok(Some(ViCmd {
 		register: RegisterName::default(),
@@ -120,22 +136,25 @@ fn parse_ex_cmd(raw: &str, select_range: Option<(usize,usize)>) -> Result<Option
 	}))
 }
 
-fn parse_ex_address(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Motion>,()> {
+fn parse_ex_address(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Motion>,Option<String>> {
 	if chars.peek() == Some(&'%') {
 		chars.next();
 		return Ok(Some(Motion::LineRange(LineAddr::Number(1),LineAddr::Last)))
 	}
-	let Some(start) = parse_one_addr(chars)? else { return Ok(Some(Motion::WholeLine)) };
+	let mut chars_clone = chars.clone();
+	let Some(start) = parse_one_addr(&mut chars_clone)? else { return Ok(None) };
 	if let Some(&',') = chars.peek() {
-		chars.next();
-		let Some(end) = parse_one_addr(chars)? else { return Ok(Some(Motion::WholeLine)) };
+		chars_clone.next();
+		let Some(end) = parse_one_addr(&mut chars_clone)? else { return Ok(Some(Motion::Line(start))) };
+		*chars = chars_clone;
 		Ok(Some(Motion::LineRange(start, end)))
 	} else {
+		*chars = chars_clone;
 		Ok(Some(Motion::Line(start)))
 	}
 }
 
-fn parse_one_addr(chars: &mut Peekable<Chars<'_>>) -> Result<Option<LineAddr>,()> {
+fn parse_one_addr(chars: &mut Peekable<Chars<'_>>) -> Result<Option<LineAddr>,Option<String>> {
 	let Some(first) = chars.next() else { return Ok(None) };
 	match first {
 		'0'..='9' => {
@@ -144,7 +163,7 @@ fn parse_one_addr(chars: &mut Peekable<Chars<'_>>) -> Result<Option<LineAddr>,()
 			digits.extend(chars.peeking_take_while(|c| c.is_ascii_digit()));
 
 			let number = digits.parse::<usize>()
-				.map_err(|_| ())?;
+				.map_err(|_| None)?;
 
 			Ok(Some(LineAddr::Number(number)))
 		}
@@ -154,7 +173,7 @@ fn parse_one_addr(chars: &mut Peekable<Chars<'_>>) -> Result<Option<LineAddr>,()
 			digits.extend(chars.peeking_take_while(|c| c.is_ascii_digit()));
 
 			let number = digits.parse::<isize>()
-				.map_err(|_| ())?;
+				.map_err(|_| None)?;
 
 			Ok(Some(LineAddr::Offset(number)))
 		}
@@ -181,11 +200,11 @@ fn parse_one_addr(chars: &mut Peekable<Chars<'_>>) -> Result<Option<LineAddr>,()
 		}
 		'.' => Ok(Some(LineAddr::Current)),
 		'$' => Ok(Some(LineAddr::Last)),
-		_ => Err(())
+		_ => Ok(None)
 	}
 }
 
-fn parse_ex_command(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,()> {
+fn parse_ex_command(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,Option<String>> {
 	let Some(first) = chars.next() else {
 		return Ok(None)
 	};
@@ -194,20 +213,94 @@ fn parse_ex_command(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,()> 
 		'd' => Ok(Some(Verb::Delete)),
 		'y' => Ok(Some(Verb::Yank)),
 		'p' => Ok(Some(Verb::Put(Anchor::After))),
+		'r' => parse_read(chars),
+		'w' => parse_write(chars),
 		's' => parse_substitute(chars),
-		_ => Err(())
+		'g' => parse_global(chars),
+		_ => Err(None)
 	}
 }
 
-fn parse_substitute(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,()> {
+fn parse_read(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,Option<String>> {
+	chars.peeking_take_while(|c| c.is_whitespace()).for_each(drop);
+
+	let is_shell_read = if chars.peek() == Some(&'!') { chars.next(); true } else { false };
+	let arg: String = chars.collect();
+
+	if arg.trim().is_empty() {
+		return Err(Some("Expected file path or shell command after ':r'".into()))
+	}
+
+	if is_shell_read {
+		Ok(Some(Verb::Read(ReadSrc::Cmd(arg))))
+	} else {
+		let arg_path = get_path(arg.trim());
+		Ok(Some(Verb::Read(ReadSrc::File(arg_path))))
+	}
+}
+
+fn parse_write(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,Option<String>> {
+	chars.peeking_take_while(|c| c.is_whitespace()).for_each(drop);
+
+	let is_shell_write = chars.peek() == Some(&'!');
+	if is_shell_write {
+		chars.next(); // consume '!'
+		let arg: String = chars.collect();
+		return Ok(Some(Verb::Write(WriteDest::Cmd(arg))));
+	}
+
+	// Check for >>
+	let mut append_check = chars.clone();
+	let is_file_append = append_check.next() == Some('>') && append_check.next() == Some('>');
+	if is_file_append {
+		*chars = append_check;
+	}
+
+	let arg: String = chars.collect();
+	let arg_path = get_path(arg.trim());
+
+	let dest = if is_file_append {
+		WriteDest::FileAppend(arg_path)
+	} else {
+		WriteDest::File(arg_path)
+	};
+
+	Ok(Some(Verb::Write(dest)))
+}
+
+fn parse_global(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,Option<String>> {
+	let is_negated = if chars.peek() == Some(&'!') { chars.next(); true } else { false };
+
+	chars.peeking_take_while(|c| c.is_whitespace()).for_each(drop); // Ignore whitespace
+
+	let Some(delimiter) = chars.next() else {
+		return Ok(Some(Verb::RepeatGlobal))
+	};
+	if delimiter.is_alphanumeric() {
+		return Err(None)
+	}
+	let global_pat = parse_pattern(chars, delimiter)?;
+	let Some(command) = parse_ex_command(chars)? else {
+		return Err(Some("Expected a command after global pattern".into()))
+	};
+	if is_negated {
+		Ok(Some(Verb::NotGlobal(global_pat, Box::new(command))))
+	} else {
+		Ok(Some(Verb::Global(global_pat, Box::new(command))))
+	}
+}
+
+fn parse_substitute(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,Option<String>> {
+	chars.peeking_take_while(|c| c.is_whitespace()).for_each(drop); // Ignore whitespace
+
 	let Some(delimiter) = chars.next() else {
 		return Ok(Some(Verb::RepeatSubstitute))
 	};
 	if delimiter.is_alphanumeric() {
-		return Err(())
+		return Err(None)
 	}
-	let old_pat = parse_sub_pattern(chars, delimiter)?;
-	let new_pat = parse_sub_pattern(chars, delimiter)?;
+	let old_pat = parse_pattern(chars, delimiter)?;
+	let new_pat = parse_pattern(chars, delimiter)?;
 	let mut flags = SubFlags::empty();
 	while let Some(ch) = chars.next() {
 		match ch {
@@ -215,13 +308,13 @@ fn parse_substitute(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,()> 
 			'i' => flags |= SubFlags::IGNORE_CASE,
 			'I' => flags |= SubFlags::NO_IGNORE_CASE,
 			'n' => flags |= SubFlags::SHOW_COUNT,
-			_ => return Err(())
+			_ => return Err(None)
 		}
 	}
 	Ok(Some(Verb::Substitute(old_pat, new_pat, flags)))
 }
 
-fn parse_sub_pattern(chars: &mut Peekable<Chars<'_>>, delimiter: char) -> Result<String,()> {
+fn parse_pattern(chars: &mut Peekable<Chars<'_>>, delimiter: char) -> Result<String,Option<String>> {
 	let mut pat = String::new();
 	let mut closed = false;
 	while let Some(ch) = chars.next() {
@@ -247,7 +340,7 @@ fn parse_sub_pattern(chars: &mut Peekable<Chars<'_>>, delimiter: char) -> Result
 		}
 	}
 	if !closed {
-		return Err(())
+		Err(Some("Unclosed pattern in ex command".into()))
 	} else {
 		Ok(pat)
 	}

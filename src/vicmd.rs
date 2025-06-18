@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use bitflags::bitflags;
 
 use crate::modes::ex::SubFlags;
@@ -207,6 +209,11 @@ pub enum Verb {
 	/// (old_pat,new_pat,flags)
 	Substitute(String,String,SubFlags),
 	RepeatSubstitute,
+	Global(String,Box<Verb>),
+	NotGlobal(String,Box<Verb>),
+	RepeatGlobal,
+	Read(ReadSrc),
+	Write(WriteDest),
 	SearchMode(usize,Direction),
 	ReplaceMode,
 	ExMode,
@@ -419,6 +426,19 @@ pub enum TextObj {
 
 	/// Custom user-defined objects maybe?
 	Custom(char),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum ReadSrc {
+	File(PathBuf),
+	Cmd(String)
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum WriteDest {
+	File(PathBuf),
+	FileAppend(PathBuf),
+	Cmd(String),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
