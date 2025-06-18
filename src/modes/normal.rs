@@ -479,11 +479,7 @@ impl ViNormal {
 				('U', Some(VerbCmd(_,Verb::ToUpper))) |
 				('~', Some(VerbCmd(_,Verb::ToggleCaseRange))) |
 				('>', Some(VerbCmd(_,Verb::Indent))) |
-				('<', Some(VerbCmd(_,Verb::Dedent))) => break 'motion_parse Some(MotionCmd(count, Motion::WholeLine)),
-				('W', Some(VerbCmd(_, Verb::Change))) => {
-					// Same with 'W'
-					break 'motion_parse Some(MotionCmd(count, Motion::WordMotion(To::End, Word::Big, Direction::Forward)));
-				}
+				('<', Some(VerbCmd(_,Verb::Dedent))) => break 'motion_parse Some(MotionCmd(count, Motion::WholeLineExclusive)),
 				_ => { /* Nothing weird, so let's continue */ }
 			}
 			match ch {

@@ -666,11 +666,11 @@ fn main() {
 	#[cfg(debug_assertions)]
 	{
 		// Testing
-		let input = "foo bar foo\nbar foo bar\nfoo bar foo";
+		let input = "\tfoo bar foo\n\tbar foo bar\n\tfoo bar foo";
 		println!("{input}\n");
 
 		let args = [
-			"-m", "Go<esc>:r !echo 2025-06-18 10:31:56" 
+			"-m", "2<<" 
 		];
 		let output = call_main(&args, input).unwrap();
 		println!("{output}");

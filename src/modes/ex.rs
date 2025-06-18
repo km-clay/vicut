@@ -112,15 +112,17 @@ fn get_path(path: &str) -> PathBuf {
 
 
 fn parse_ex_cmd(raw: &str, select_range: Option<(usize,usize)>) -> Result<Option<ViCmd>,Option<String>> {
+	dbg!(raw);
 	let raw = raw.trim();
 	if raw.is_empty() {
 		return Ok(None)
 	}
 	let mut chars = raw.chars().peekable();
-	let mut motion = if let Some(range) = select_range {
-		Some(MotionCmd(1,Motion::Range(range.0,range.1)))
-	} else {
-		parse_ex_address(&mut chars)?.map(|m| MotionCmd(1, m))
+	let mut motion = if let Some(motion) = parse_ex_address(&mut chars)?.map(|m| MotionCmd(1, m)) {
+		Some(motion)
+	} else { 
+		dbg!(select_range);
+		select_range.map(|range| MotionCmd(1,Motion::LineRange(LineAddr::Number(range.0),LineAddr::Number(range.1)))) 
 	};
 	let verb = parse_ex_command(&mut chars)?.map(|v| VerbCmd(1, v));
 	if motion.is_none() && !matches!(verb, Some(VerbCmd(_,Verb::Write(_)))) {

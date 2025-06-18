@@ -292,6 +292,7 @@ impl Verb {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Motion {
 	WholeLine,
+	WholeLineExclusive,
 	TextObj(TextObj),
 	EndOfLastWord,
 	BeginningOfFirstWord,

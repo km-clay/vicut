@@ -123,6 +123,17 @@ impl ViVisual {
 						break 'verb_parse None
 					}
 				}
+				':' => {
+					return Some(
+						ViCmd {
+							register,
+							verb: Some(VerbCmd(1, Verb::ExMode)),
+							motion: None,
+							raw_seq: self.take_cmd(),
+							flags: CmdFlags::empty(),
+					}
+					)
+				}
 				'.' => {
 					return Some(
 						ViCmd {
@@ -439,6 +450,7 @@ impl ViVisual {
 
 					break 'motion_parse Some(MotionCmd(count, Motion::CharSearch(Direction::Backward, Dest::Before, *ch)))
 				}
+				'G' => break 'motion_parse Some(MotionCmd(count, Motion::EndOfBuffer)),
 				'n' => break 'motion_parse Some(MotionCmd(count, Motion::NextMatch)),
 				'N' => break 'motion_parse Some(MotionCmd(count, Motion::PrevMatch)),
 				';' => break 'motion_parse Some(MotionCmd(count, Motion::RepeatMotion)),

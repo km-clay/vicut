@@ -177,7 +177,7 @@ impl ViCut {
 				// This is to preserve the line buffer's state while we are entering a pattern in search mode
 				// If we continue from here, visual mode selections will be lost for instance.
 				Verb::ExMode => {
-					let mut mode: Box<dyn ViMode> = Box::new(ViEx::new(self.editor.select_range()));
+					let mut mode: Box<dyn ViMode> = Box::new(ViEx::new(self.editor.selected_lines()));
 					std::mem::swap(&mut mode, &mut self.mode);
 
 					return Ok(())
