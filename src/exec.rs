@@ -48,22 +48,6 @@ impl ViCut {
 				self.set_normal_mode();
 			}
 		}
-		Ok(())
-	}
-
-	pub fn read_field(&mut self, cmd: &str) -> Result<String,String> {
-		self.load_input(cmd);
-		let mut start = self.editor.cursor.get();
-		let mut end;
-
-		self.exec_loop();
-
-		let new_pos_clamped = self.editor.cursor;
-		let new_pos = new_pos_clamped.get();
-		end = new_pos;
-		(start,end) = ordered(start, end);
-		end += 1;
-
 		if let ModeReport::Search | ModeReport::Ex = self.mode.report_mode() 
 			&& !self.mode.pending_seq().unwrap().is_empty() {
 				// We have run out of keys with a pending sequence.
@@ -78,12 +62,24 @@ impl ViCut {
 					if return_to_normal {
 						self.set_normal_mode();
 					}
-					let new_pos = self.editor.cursor.get();
-						end = new_pos;
-					(start,end) = ordered(start, end);
-					end += 1;
 				}
 		}
+		Ok(())
+	}
+
+	pub fn read_field(&mut self, cmd: &str) -> Result<String,String> {
+		self.load_input(cmd);
+		let mut start = self.editor.cursor.get();
+		let mut end;
+
+		self.exec_loop()?;
+
+		let new_pos_clamped = self.editor.cursor;
+		let new_pos = new_pos_clamped.get();
+		end = new_pos;
+		(start,end) = ordered(start, end);
+		end += 1;
+
 
 
 		if let Some((start,mut end)) = self.editor.select_range() {
@@ -349,12 +345,9 @@ impl ViCut {
 				let (start,_) = self.editor.line_bounds(line_no)
 					.ok_or(format!("Failed to get line bounds for line {line_no}"))?;
 				self.editor.cursor.set(start);
-				let old_bytes = self.reader.get_bytes();
-				self.load_input(&seq);
+				self.reader.push_bytes_front(seq.as_bytes());
 
 				self.exec_loop()?;
-
-				self.reader.set_bytes(old_bytes);
 			}
 			Motion::LineRange(start, end) => {
 				let start_ln = self.editor.eval_line_addr(start)
@@ -370,12 +363,9 @@ impl ViCut {
 					let (start,_) = self.editor.line_bounds(line)
 						.ok_or("Failed to evaluate line address".to_string())?;
 					self.editor.cursor.set(start);
-					let old_bytes = self.reader.get_bytes();
-					self.load_input(&seq);
+					self.reader.push_bytes_front(seq.as_bytes());
 
 					self.exec_loop()?;
-
-					self.reader.set_bytes(old_bytes);
 				}
 			}
 			_ => unreachable!()

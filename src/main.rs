@@ -664,6 +664,7 @@ fn execute_multi_thread_stdin(stream: Box<dyn BufRead>, args: &Argv) -> String {
 #[allow(unreachable_code)]
 fn main() {
 	#[cfg(debug_assertions)]
+	/*
 	{
 		// Testing
 		let input = "foobar\n1Linelinelineline\n2Linelinelineline\nfoobar\n3Linelinelineline\n4Linelinelineline\nfoobar\n5Linelinelineline\nfoobar\n6Linelinelineline\nfoobar\n7Linelinelineline\nfoobar";
@@ -680,6 +681,7 @@ fn main() {
 		println!("{output}");
 		return
 	}
+	*/
 
 	if std::env::args().skip(1).count() == 0 {
 		eprintln!("USAGE:"); 

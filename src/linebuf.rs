@@ -447,15 +447,10 @@ impl LineBuf {
 	}
 	pub fn grapheme_at(&mut self, pos: usize) -> Option<&str> {
 		self.update_graphemes_lazy();
-		let indices = self.grapheme_indices();
-		let start = indices.get(pos).copied()?;
-		let end = indices.get(pos + 1).copied().or_else(|| {
-			if pos + 1 == self.grapheme_indices().len() {
-				Some(self.buffer.len())
-			} else {
-				None
-			}
-		})?;
+		let indices = &self.grapheme_indices.as_ref().unwrap();
+		if pos + 1 > indices.len() { return None }
+		let start = indices[pos];
+		let end = if pos+1 == indices.len() { self.buffer.len() } else { indices[pos+1] };
 		self.buffer.get(start..end)
 	}
 	pub fn read_grapheme_before(&self, pos: usize) -> Option<&str> {

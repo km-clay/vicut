@@ -30,8 +30,16 @@ impl RawReader {
 	pub fn get_bytes(&self) -> VecDeque<u8> {
 		self.bytes.clone()
 	}
+	pub fn get_chars(&self) -> Vec<char> {
+		self.bytes.iter().map(|b| *b as char).collect()
+	}
 	pub fn set_bytes(&mut self, bytes: VecDeque<u8>) {
 		self.bytes = bytes
+	}
+	pub fn push_bytes_front(&mut self, bytes: &[u8]) {
+		for byte in bytes.iter().rev() {
+			self.bytes.push_front(*byte);
+		}
 	}
 
 	pub fn parse_esc_seq(&mut self) -> Option<KeyEvent> {

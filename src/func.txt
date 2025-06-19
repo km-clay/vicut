@@ -1,0 +1,5 @@
+	pub fn insert_str_at(&mut self, pos: usize, new: &str) {
+		let idx = self.index_byte_pos(pos);
+		self.buffer.insert_str(idx, new);
+		self.update_graphemes();
+	}
