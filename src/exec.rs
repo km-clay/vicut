@@ -86,12 +86,12 @@ impl ViCut {
 			// We are in visual mode if we've made it here
 			// So we are going to use the editor's selected range
 			if matches!(self.editor.select_mode,Some(SelectMode::Char(_))) {
-				end += 1; // Include the cursor's character
+				end = (end + 1).min(self.editor.grapheme_indices().len()); // Include the cursor's character
 			}
 			let slice = self.editor
 				.slice(start..end)
-				.map(|slice| slice.to_string())
-				.ok_or("Failed to slice buffer".to_string());
+				.map(str::to_string)
+				.ok_or(format!("Failed to slice buffer, index was {end} but length was {}",self.editor.grapheme_indices().len()));
 			if let Ok(slice) = slice.as_ref() {
 				trace!("Cutting with visual mode range, got: '{slice}'");
 			} else {

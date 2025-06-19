@@ -12,6 +12,8 @@ use log::trace;
 use serde_json::{Map, Value};
 use rayon::prelude::*;
 
+use crate::{linebuf::MotionKind, vicmd::{LineAddr, Motion, MotionCmd}};
+
 pub mod vicmd;
 pub mod modes;
 pub mod exec;
@@ -30,6 +32,8 @@ enum Cmd {
 	Field(String),
 	NamedField(Name,String),
 	Repeat(usize,usize),
+	Global(String, Vec<Cmd>),
+	NotGlobal(String, Vec<Cmd>),
 	BreakGroup
 }
 
@@ -56,8 +60,8 @@ struct Argv {
 impl Argv {
 	pub fn parse() -> Result<Self,String> {
 		let mut new = Self::default();
-		let mut args = std::env::args().skip(1);
-		while let Some(arg) = args.next() {
+		let mut args = std::env::args().skip(1).peekable();
+		'outer: while let Some(arg) = args.next() {
 			match arg.as_str() {
 				"--json" | "-j" => {
 					new.json = true;
@@ -135,6 +139,82 @@ impl Argv {
 							return Err(format!("Expected a selection command after '-c', found {arg}"))
 						}
 						new.cmds.push(Cmd::Field(arg));
+					}
+				}
+				"-v" | "--not-global" |
+				"-g" | "--global" => {
+					let is_inverted = match arg.as_str() {
+						"-v" | "--not-global" => true,
+						"-g" | "--global" => false,
+						_ => unreachable!()
+					};
+					let mut global_cmds = vec![];
+					let Some(arg) = args.next() else { continue };
+					if arg.starts_with('-') {
+						return Err(format!("Expected a selection command after '-c', found {arg}"))
+					}
+					while let Some(global_arg) = args.next() {
+						match global_arg.as_str() {
+							"-n" | "--next" => new.cmds.push(Cmd::BreakGroup),
+							"-r" | "--repeat" => {
+								let cmd_count = args
+									.next()
+									.unwrap_or("1".into())
+									.parse::<usize>()
+									.map_err(|_| format!("Expected a number after '{global_arg}'"))?;
+								let repeat_count = args
+									.next()
+									.unwrap_or("1".into())
+									.parse::<usize>()
+									.map_err(|_| format!("Expected a number after '{global_arg}'"))?;
+
+								global_cmds.push(Cmd::Repeat(cmd_count, repeat_count));
+							}
+							"-m" | "--move" => {
+								let Some(arg) = args.next() else { continue };
+								if arg.starts_with('-') {
+									return Err(format!("Expected a motion command after '-m', found {arg}"))
+								}
+								global_cmds.push(Cmd::Motion(arg))
+							}
+							"-c" | "--cut" => {
+								let Some(arg) = args.next() else { continue };
+								if arg.starts_with("name=") {
+									let name = arg.strip_prefix("name=").unwrap().to_string();
+									let Some(arg) = args.next() else { continue };
+									if arg.starts_with('-') {
+										return Err(format!("Expected a selection command after '-c', found {arg}"))
+									}
+									global_cmds.push(Cmd::NamedField(name,arg));
+								} else {
+									if arg.starts_with('-') {
+										return Err(format!("Expected a selection command after '-c', found {arg}"))
+									}
+									global_cmds.push(Cmd::Field(arg));
+								}
+							}
+							"--end" => {
+								if is_inverted {
+									new.cmds.push(Cmd::NotGlobal(arg, global_cmds));
+								} else {
+									new.cmds.push(Cmd::Global(arg, global_cmds));
+								}
+								continue 'outer
+							}
+							_ => {
+								return Err("Expected command flag in '-g' scope\nDid you forget to close '-g' with '--end'?".into())
+							}
+						}
+						if args.peek().is_some_and(|arg| !arg.starts_with('-')) { break }
+					}
+
+					// If we got here, we have run out of arguments
+					// Let's just submit the current -g commands. 
+					// no need to be pressed about a missing '--end' when nothing would come after it
+					if is_inverted {
+						new.cmds.push(Cmd::NotGlobal(arg, global_cmds));
+					} else {
+						new.cmds.push(Cmd::Global(arg, global_cmds));
 					}
 				}
 				_ => new.handle_filename(arg)
@@ -220,6 +300,15 @@ fn get_help() -> String {
 	writeln!(help, "\t-c, --cut [name=<NAME>] <VIM_COMMAND>").ok();
 	writeln!(help, "\t\tExecute a Vim command on the buffer, and capture the text between the cursor's start and end positions as a field.").ok();
 	writeln!(help, "\t\tFields can be optionally given a name, which will be used as the key for that field in formatted JSON output.").ok();
+	writeln!(help).ok();
+	writeln!(help, "\t-g, --global").ok();
+	writeln!(help, "\t-v, --not-global").ok();
+	writeln!(help, "\t\tCreates a subscope of command flags that only execute on lines that match a pattern passed to the '-g' flag").ok();
+	writeln!(help, "\t\t'-v' variants only execute on lines that don't match the given pattern").ok();
+	writeln!(help, "\t\t'-g' <PATTERN> and any commands in it's scope count as a single command for the purpose of repeating with '-r'").ok();
+	writeln!(help).ok();
+	writeln!(help, "\t--end").ok();
+	writeln!(help, "\t\tEnds a '-g'/'-v' subscope, allowing you to continue writing commands in the non-conditional outer scope").ok();
 	writeln!(help).ok();
 	writeln!(help, "\t-m, --move <VIM_COMMAND>").ok();
 	writeln!(help, "\t\tLogically identical to -c/--cut, except it does not capture a field.").ok();
@@ -314,7 +403,7 @@ fn format_output_standard(delimiter: &str, lines: Vec<Vec<(String,String)>>) -> 
 				.map(|(_,f)| f) // Ignore the name here, if any
 				.collect::<Vec<String>>()
 				.join(delimiter);
-			acc.push_str(&fmt_line);
+			writeln!(acc,"{fmt_line}").ok();
 			acc
 		})
 }
@@ -391,9 +480,11 @@ fn execute(args: &Argv, input: String) -> Result<Vec<Vec<(String,String)>>,Strin
 	let mut spent_cmds: Vec<&Cmd> = vec![];
 
 	let mut field_num = 0;
+	let has_global = args.cmds.iter().any(|cmd| matches!(cmd,Cmd::NotGlobal(_,_) | Cmd::Global(_,_)));
 	for cmd in &args.cmds {
 		exec_cmd(
 			cmd,
+			args,
 			&mut vicut,
 			&mut field_num,
 			&mut spent_cmds,
@@ -410,7 +501,7 @@ fn execute(args: &Argv, input: String) -> Result<Vec<Vec<(String,String)>>,Strin
 		fmt_lines.push(std::mem::take(&mut fields));
 	}
 
-	if fmt_lines.is_empty() {
+	if fmt_lines.is_empty() && !has_global {
 		// The user did not send any '-c' commands...?
 		// They might just be editing text with '-m' calls.
 		// Let's just push the entire buffer
@@ -436,6 +527,7 @@ fn trim_fields(lines: &mut Vec<Vec<(String,String)>>) {
 
 fn exec_cmd(
 	cmd: &Cmd,
+	args: &Argv,
 	vicut: &mut ViCut,
 	field_num: &mut usize,
 	spent_cmds: &mut Vec<&Cmd>,
@@ -456,6 +548,7 @@ fn exec_cmd(
 					// We use recursion so that we can nest repeats easily
 					exec_cmd(
 						r_cmd,
+						args,
 						vicut,
 						field_num,
 						spent_cmds,
@@ -463,6 +556,36 @@ fn exec_cmd(
 						fmt_lines
 					);
 					spent_cmds.push(r_cmd);
+				}
+			}
+		}
+		Cmd::NotGlobal(_, cmds) |
+		Cmd::Global(_, cmds) => {
+			let motion = match cmd {
+				Cmd::NotGlobal(pat, _)  => Motion::NotGlobal(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pat.to_string()),
+				Cmd::Global(pat, _) => Motion::Global(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pat.to_string()),
+				_ => unreachable!()
+			};
+
+			let MotionKind::Lines(lines) = vicut.editor.eval_motion(None, MotionCmd(1,motion)) else { unreachable!() };
+			let mut scoped_spent_cmds = vec![];
+			for line in lines {
+				let Some((start,_)) = vicut.editor.line_bounds(line) else { continue };
+				vicut.editor.cursor.set(start);
+				for cmd in cmds {
+					exec_cmd(
+						cmd,
+						args,
+						vicut,
+						field_num,
+						&mut scoped_spent_cmds,
+						fields,
+						fmt_lines
+					);
+					scoped_spent_cmds.push(cmd);
+					if !args.keep_mode {
+						vicut.set_normal_mode();
+					}
 				}
 			}
 		}
@@ -561,7 +684,9 @@ fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Argv) {
 				std::process::exit(1)
 			});
 		} else if args.files.len() > 1 {
-			writeln!(stdout, "--- {}\n{}",path.display(), output).ok();
+			if !output.is_empty() {
+				writeln!(stdout, "--- {}\n{}",path.display(), output).ok();
+			}
 		} else {
 			writeln!(stdout, "{output}").ok();
 		}
@@ -635,7 +760,9 @@ fn execute_multi_thread_files_linewise(mut stdout: io::StdoutLock, args: &Argv) 
 				std::process::exit(1)
 			});
 		} else if args.files.len() > 1 {
-			writeln!(stdout, "--- {}\n{}",path.display(), output_final).ok();
+			if !output_final.is_empty() {
+				writeln!(stdout, "--- {}\n{}",path.display(), output_final).ok();
+			}
 		} else {
 			writeln!(stdout, "{output_final}").ok();
 		}

@@ -1919,24 +1919,28 @@ impl LineBuf {
 				};
 				let mut lines = vec![];
 				let line_range = start_line..end_line;
-				if let Ok(regex) = Regex::new(pattern) {
-					for line_no in line_range {
-						let Some((start,end)) = self.line_bounds(line_no) else { continue };
-						let line = self.slice(start..end).unwrap_or_default();
+				match Regex::new(pattern) {
+					Ok(regex) => {
+						for line_no in line_range {
+							let Some((start,end)) = self.line_bounds(line_no) else { continue };
+							let line = self.slice(start..end).unwrap_or_default();
 
-						match motion.1 {
-							Motion::NotGlobal(_,_) => {
-								let None = regex.find(line).map(|mat| (mat.start(),mat.end())) else { continue };
+							match motion.1 {
+								Motion::NotGlobal(_,_) => {
+									let None = regex.find(line).map(|mat| (mat.start(),mat.end())) else { continue };
+								}
+								Motion::Global(_,_) => {
+									let Some(_) = regex.find(line).map(|mat| (mat.start(),mat.end())) else { continue };
+								}
+								_ => unreachable!()
 							}
-							Motion::Global(_,_) => {
-								let Some(_) = regex.find(line).map(|mat| (mat.start(),mat.end())) else { continue };
-							}
-							_ => unreachable!()
+							lines.push(line_no);
 						}
-						lines.push(line_no);
 					}
-				} else {
-					todo!()
+					Err(e) => {
+						eprintln!("vicut: {e}");
+						std::process::exit(1);
+					}
 				}
 				let reversed = lines.into_iter().rev().collect::<Vec<_>>();
 				MotionKind::Lines(reversed)
@@ -2262,66 +2266,45 @@ impl LineBuf {
 			}
 			MotionCmd(_count, Motion::PatternSearchRev(ref pat)) |
 			MotionCmd(_count, Motion::PatternSearch(ref pat)) => {
-				// FIXME: For the love of god do not compile a new regex on every single command
-				// A decent solution for this will most likely be non-trivial though
-				// Precompiling and sharing across threads?
-				if let Ok(regex) = Regex::new(pat) {
-					self.last_pattern_search = Some(regex.clone());
-					let haystack = self.buffer.as_str();
-					let matches = regex.find_iter(haystack).collect::<Vec<_>>();
-					// We will use this match if we don't find any in our desired direction, just like vim
-					let wrap_match: Option<&regex::Match> = match &motion.1 {
-						Motion::PatternSearch(_) => matches.first(),
-						Motion::PatternSearchRev(_) => matches.last(),
-						_ => unreachable!()
-					};
-					let cursor_byte_pos = self.read_cursor_byte_pos();
-					match &motion.1 {
-						Motion::PatternSearch(_) => {
-							for mat in &matches {
-								if mat.start() > cursor_byte_pos {
-									let Some(match_idx) = self.find_index_for_byte_pos(mat.start()) else { return MotionKind::Null };
-									return MotionKind::Onto(match_idx)
+				match Regex::new(pat) {
+					Ok(regex) => {
+						self.last_pattern_search = Some(regex.clone());
+						let haystack = self.buffer.as_str();
+						let matches = regex.find_iter(haystack).collect::<Vec<_>>();
+						// We will use this match if we don't find any in our desired direction, just like vim
+						let wrap_match: Option<&regex::Match> = match &motion.1 {
+							Motion::PatternSearch(_) => matches.first(),
+							Motion::PatternSearchRev(_) => matches.last(),
+							_ => unreachable!()
+						};
+						let cursor_byte_pos = self.read_cursor_byte_pos();
+						match &motion.1 {
+							Motion::PatternSearch(_) => {
+								for mat in &matches {
+									if mat.start() > cursor_byte_pos {
+										let Some(match_idx) = self.find_index_for_byte_pos(mat.start()) else { return MotionKind::Null };
+										return MotionKind::Onto(match_idx)
+									}
 								}
 							}
-						}
-						Motion::PatternSearchRev(_) => {
-							let matches = matches.iter().rev();
-							for mat in matches {
-								if mat.start() < cursor_byte_pos {
-									let Some(match_idx) = self.find_index_for_byte_pos(mat.start()) else { return MotionKind::Null };
-									return MotionKind::Onto(match_idx)
+							Motion::PatternSearchRev(_) => {
+								let matches = matches.iter().rev();
+								for mat in matches {
+									if mat.start() < cursor_byte_pos {
+										let Some(match_idx) = self.find_index_for_byte_pos(mat.start()) else { return MotionKind::Null };
+										return MotionKind::Onto(match_idx)
+									}
 								}
 							}
+							_ => unreachable!()
 						}
-						_ => unreachable!()
+						let Some(mat) = wrap_match else { return MotionKind::Null };
+						let Some(match_idx) = self.find_index_for_byte_pos(mat.start()) else { return MotionKind::Null };
+						MotionKind::Onto(match_idx)
 					}
-					let Some(mat) = wrap_match else { return MotionKind::Null };
-					let Some(match_idx) = self.find_index_for_byte_pos(mat.start()) else { return MotionKind::Null };
-					MotionKind::Onto(match_idx)
-				} else {
-					match &motion.1 {
-						Motion::PatternSearch(_) => {
-							let Some(haystack) = self.slice_from_cursor() else { return MotionKind::Null };
-							if let Some(pos) = haystack.as_bytes().windows(pat.len()).position(|win| win == pat.as_bytes()) {
-								let Some(idx) = self.find_index_for_byte_pos(pos) else { return MotionKind::Null };
-								MotionKind::Onto(idx)
-							} else {
-								MotionKind::Null
-							}
-						}
-						Motion::PatternSearchRev(_) => {
-							let Some(haystack) = self.slice_from_cursor() else { return MotionKind::Null };
-							let haystack_rev = haystack.bytes().rev().collect::<Vec<_>>();
-							let pat_rev = pat.bytes().rev().collect::<Vec<_>>();
-							if let Some(pos) = haystack_rev.windows(pat.len()).position(|win| win == pat_rev) {
-								let Some(idx) = self.find_index_for_byte_pos(pos) else { return MotionKind::Null };
-								MotionKind::Onto(idx)
-							} else {
-								MotionKind::Null
-							}
-						}
-						_ => unreachable!()
+					Err(e) => {
+						eprintln!("vicut: {e}");
+						std::process::exit(1);
 					}
 				}
 			}
@@ -3095,50 +3078,43 @@ impl LineBuf {
 					MotionKind::LineRange(s,e) => (s,e),
 					_ => (0,self.total_lines()),
 				};
-				if let Ok(regex) = Regex::new(&old) {
-					// We go in reverse here
-					let lines = (start_line..=end_line).rev();
-					for line_no in lines {
-						let Some((start,end)) = self.line_bounds(line_no) else { continue };
-						let line = self.slice(start..end).unwrap_or_default();
-						let global = flags.contains(SubFlags::GLOBAL);
-						if global {
-							let line_matches = regex
-								.find_iter(line)
-								.map(|mat| (mat.start(),mat.end()))
-								.collect::<Vec<_>>()
-								.into_iter()
-								.rev();
-							for (mat_start,mat_end) in line_matches {
+				match Regex::new(&old) {
+					Ok(regex) => {
+						// We go in reverse here
+						let lines = (start_line..=end_line).rev();
+						for line_no in lines {
+							let Some((start,end)) = self.line_bounds(line_no) else { continue };
+							let line = self.slice(start..end).unwrap_or_default();
+							let global = flags.contains(SubFlags::GLOBAL);
+							if global {
+								let line_matches = regex
+									.find_iter(line)
+									.map(|mat| (mat.start(),mat.end()))
+									.collect::<Vec<_>>()
+									.into_iter()
+									.rev();
+								for (mat_start,mat_end) in line_matches {
+									let mat_start = self.find_index_for_byte_pos(mat_start).unwrap();
+									let mat_end = self.find_index_for_byte_pos(mat_end).unwrap();
+									let real_start = start + mat_start;
+									let real_end = start + mat_end;
+									self.replace_range(real_start,real_end, &new);
+								}
+							} else {
+								let Some((mat_start,mat_end)) = regex.find(line).map(|mat| (mat.start(),mat.end())) else { continue };
 								let mat_start = self.find_index_for_byte_pos(mat_start).unwrap();
 								let mat_end = self.find_index_for_byte_pos(mat_end).unwrap();
 								let real_start = start + mat_start;
 								let real_end = start + mat_end;
 								self.replace_range(real_start,real_end, &new);
 							}
-						} else {
-							let Some((mat_start,mat_end)) = regex.find(line).map(|mat| (mat.start(),mat.end())) else { continue };
-							let mat_start = self.find_index_for_byte_pos(mat_start).unwrap();
-							let mat_end = self.find_index_for_byte_pos(mat_end).unwrap();
-							let real_start = start + mat_start;
-							let real_end = start + mat_end;
-							self.replace_range(real_start,real_end, &new);
 						}
+						self.last_substitution = Some((regex,new,flags));
 					}
-					self.last_substitution = Some((regex,new,flags));
-				} else {
-					/*
-					let Some(haystack) = self.slice_from_cursor() else { return MotionKind::Null };
-					if let Some(pos) = haystack.as_bytes().windows(pat.len()).position(|win| win == pat.as_bytes()) {
-						let Some(idx) = self.find_index_for_byte_pos(pos) else { return MotionKind::Null };
-						MotionKind::Onto(idx)
-					} else {
-						MotionKind::Null
+					Err(e) => {
+						eprintln!("vicut: {e}");
+						std::process::exit(1);
 					}
-					*/
-					// TODO: Implement sliding window logical fallback here
-					panic!();
-					return Ok(())
 				}
 			}
 			Verb::ExMode |
