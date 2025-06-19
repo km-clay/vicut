@@ -376,7 +376,7 @@ fn format_output_template(template: &str, lines: Vec<Vec<(String,String)>>) -> R
 			}
 		}
 		if !cur_line.is_empty() {
-			output.push_str(&std::mem::take(&mut cur_line));
+			writeln!(output,"{}",std::mem::take(&mut cur_line)).ok();
 		}
 	}
 	Ok(output)
