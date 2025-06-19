@@ -1,5 +1,5 @@
 #![allow(clippy::unnecessary_to_owned,clippy::while_let_on_iterator)]
-use std::{collections::BTreeMap, fmt::Write, fs, io::{self, BufRead, Write as IoWrite}, path::{Path, PathBuf}};
+use std::{collections::BTreeMap, fmt::Write, fs, io::{self, BufRead, Write as IoWrite}, path::PathBuf};
 
 extern crate tikv_jemallocator;
 
@@ -275,6 +275,20 @@ fn init_logger(trace: bool) {
 	builder.init();
 }
 
+fn format_output(args: &Argv, lines: Vec<Vec<(String,String)>>) -> String {
+	if args.json {
+		Ok(format_output_json(lines))
+	} else if let Some(template) = args.template.as_deref() {
+		format_output_template(template, lines)
+	} else {
+		let delimiter = args.delimiter.as_deref().unwrap_or(" ");
+		Ok(format_output_standard(delimiter, lines))
+	}.unwrap_or_else(|e| {
+		eprintln!("vicut: failed to format output: {e}");
+		std::process::exit(1)
+	})
+}
+
 fn format_output_json(lines: Vec<Vec<(String,String)>>) -> String {
 	let array: Vec<Value> = lines
 		.into_iter()
@@ -368,8 +382,7 @@ fn format_output_template(template: &str, lines: Vec<Vec<(String,String)>>) -> R
 	Ok(output)
 }
 
-fn execute(args: &Argv, input: String) -> Result<String,String> {
-	let delimiter = args.delimiter.as_deref().unwrap_or("\t");
+fn execute(args: &Argv, input: String) -> Result<Vec<Vec<(String,String)>>,String> {
 	let mut fields: Vec<(String,String)> = vec![];
 	let mut fmt_lines: Vec<Vec<(String,String)>> = vec![];
 
@@ -410,13 +423,7 @@ fn execute(args: &Argv, input: String) -> Result<String,String> {
 		trim_fields(&mut fmt_lines);
 	}
 
-	if args.json {
-		Ok(format_output_json(fmt_lines))
-	} else if let Some(template) = args.template.as_deref() {
-		format_output_template(template, fmt_lines)
-	} else {
-		Ok(format_output_standard(delimiter, fmt_lines))
-	}
+	Ok(fmt_lines)
 }
 
 fn trim_fields(lines: &mut Vec<Vec<(String,String)>>) {
@@ -546,15 +553,17 @@ fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Argv) {
 
 	// Write back to file
 	for (path, contents) in results {
+		let output = format_output(args, contents);
+
 		if args.edit_inplace {
-			fs::write(&path, contents).unwrap_or_else(|e| {
+			fs::write(&path, output).unwrap_or_else(|e| {
 				eprintln!("vicut: failed to write to file '{}': {e}",path.display());
 				std::process::exit(1)
 			});
 		} else if args.files.len() > 1 {
-			writeln!(stdout, "--- {}\n{}",path.display(), contents).ok();
+			writeln!(stdout, "--- {}\n{}",path.display(), output).ok();
 		} else {
-			writeln!(stdout, "{contents}").ok();
+			writeln!(stdout, "{output}").ok();
 		}
 	}
 }
@@ -606,9 +615,11 @@ fn execute_multi_thread_files_linewise(mut stdout: io::StdoutLock, args: &Argv) 
 	// Separate content by file
 	let mut per_file: BTreeMap<PathBuf, Vec<(usize,String)>> = BTreeMap::new();
 	for (path, line_no, processed) in results {
+		let output = format_output(args, processed);
+
 		per_file.entry(path)
 			.or_default()
-			.push((line_no,processed));
+			.push((line_no,output));
 	}
 	// Write back to file
 	for (path, mut lines) in per_file {
@@ -653,11 +664,11 @@ fn execute_multi_thread_stdin(stream: Box<dyn BufRead>, args: &Argv) -> String {
 		})
 	.collect();
 	lines.sort_by_key(|(i,_)| *i);
-	let mut output = String::new();
-	for (_,line) in lines {
-		writeln!(output,"{line}").ok();
+	let mut fmt_lines = vec![];
+	for (_,mut line) in lines {
+		fmt_lines.append(&mut line);
 	}
-	output
+	format_output(args, fmt_lines)
 }
 
 
@@ -670,11 +681,16 @@ fn main() {
 		println!("{input}\n");
 
 		let args = [
-			"-m", ":d<CR>:1,2p<CR>",
+			"--json",
+			"-c", "e",
+			"-m", "w",
+			"-r", "2", "2",
+			"-n",
+			"-m", "gg",
+			"-r", "5", "2"
 		];
 		let output = call_main(&args, input).unwrap();
 		println!("{output}");
-		return
 	}
 
 	if std::env::args().skip(1).count() == 0 {
@@ -713,7 +729,7 @@ fn main() {
 
 			// We need to initialize stream in each branch, since Box<dyn BufReader> does not implement send/sync
 			// So using it in pool.install() doesn't work. We have to initialize it in the closure there.
-			let mut output = String::new();
+			let mut lines = vec![];
 			if !args.files.is_empty() {
 				for path in &args.files {
 					let file = fs::File::open(path).unwrap_or_else(|e| {
@@ -739,7 +755,9 @@ fn main() {
 						match result {
 							Ok(line) => {
 								match execute(&args,line) {
-									Ok(new_line) => writeln!(output,"{new_line}").ok(),
+									Ok(mut new_line) => {
+										lines.append(&mut new_line);
+									}
 									Err(e) => {
 										eprintln!("vicut: {e}");
 										return;
@@ -752,6 +770,7 @@ fn main() {
 							}
 						};
 					}
+					let mut output = format_output(&args, std::mem::take(&mut lines));
 					if args.edit_inplace {
 						fs::write(path, std::mem::take(&mut output)).unwrap_or_else(|e| {
 							eprintln!("vicut: failed to write to file '{}': {e}",path.display());
@@ -770,7 +789,9 @@ fn main() {
 					match result {
 						Ok(line) => {
 							match execute(&args,line) {
-								Ok(new_line) => writeln!(output,"{new_line}").ok(),
+									Ok(mut new_line) => {
+										lines.append(&mut new_line);
+									}
 								Err(e) => {
 									eprintln!("vicut: {e}");
 									return;
@@ -784,6 +805,7 @@ fn main() {
 					};
 				}
 			}
+			let output = format_output(&args, lines);
 			writeln!(stdout, "{output}").ok();
 
 		} else if let Some(num) = args.max_jobs {
@@ -841,7 +863,8 @@ fn main() {
 					});
 				}
 				match execute(&args,content) {
-					Ok(mut output) => {
+					Ok(output) => {
+						let mut output = format_output(&args, output);
 						if args.edit_inplace {
 							fs::write(path, std::mem::take(&mut output)).unwrap_or_else(|e| {
 								eprintln!("vicut: failed to write to file '{}': {e}",path.display());
@@ -870,11 +893,12 @@ fn main() {
 				execute_multi_thread_files(stdout, &args);
 			});
 		} else {
-			let mut stdout = io::stdout().lock();
+			let stdout = io::stdout().lock();
 			execute_multi_thread_files(stdout, &args);
 		}
 	} else {
 		let mut stdout = io::stdout().lock();
+		let mut lines = vec![];
 		let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
 		let mut input = String::new();
 		match stream.read_to_string(&mut input) {
@@ -885,9 +909,13 @@ fn main() {
 			}
 		}
 		match execute(&args,input) {
-			Ok(output) => { writeln!(stdout,"{output}").ok(); }
+			Ok(mut output) => {
+				lines.append(&mut output);
+			}
 			Err(e) => eprintln!("vicut: {e}"),
 		};
+		let output = format_output(&args, lines);
+		writeln!(stdout,"{output}").ok();
 	}
 }
 
@@ -927,12 +955,14 @@ fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 			// So using it in pool.install() doesn't work. We have to initialize it in the closure there.
 
 			let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input)));
-			let mut output = String::new();
+			let mut lines = vec![];
 			for result in stream.lines() {
 				match result {
 					Ok(line) => {
 						match execute(&args,line) {
-							Ok(new_line) => writeln!(output,"{new_line}").ok(),
+							Ok(mut new_line) => {
+								lines.append(&mut new_line);
+							}
 							Err(e) => {
 								return Err(format!("vicut: {e}"));
 							}
@@ -943,6 +973,7 @@ fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 					}
 				};
 			}
+			let output = format_output(&args, lines);
 			Ok(output)
 		} else if let Some(num) = args.max_jobs {
 			let pool = rayon::ThreadPoolBuilder::new()
@@ -970,7 +1001,10 @@ fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 			}
 		}
 		match execute(&args,input) {
-			Ok(output) => Ok(output),
+			Ok(output) => {
+				let output = format_output(&args, output);
+				Ok(output)
+			}
 			Err(e) => Err(format!("vicut: {e}")),
 		}
 	}
