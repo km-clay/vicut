@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use bitflags::bitflags;
 
-use crate::modes::ex::SubFlags;
+use crate::{modes::ex::SubFlags, register::REGISTERS};
 
 use super::register::{append_register, read_register, write_register};
 
@@ -38,11 +38,14 @@ impl RegisterName {
 	pub fn count(&self) -> usize {
 		self.count
 	}
-	pub fn write_to_register(&self, buf: String) {
+	pub fn is_whole_line(&self) -> bool {
+		REGISTERS.with_borrow(|reg| reg.get_reg(self.name).is_some_and(|r| r.is_whole_line()))
+	}
+	pub fn write_to_register(&self, buf: String, is_whole_line: bool) {
 		if self.append {
 			append_register(self.name, buf);
 		} else {
-			write_register(self.name, buf);
+			write_register(self.name, buf,is_whole_line);
 		}
 	}
 	pub fn read_from_register(&self) -> Option<String> {

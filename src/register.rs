@@ -8,8 +8,8 @@ pub fn read_register(ch: Option<char>) -> Option<String> {
 	REGISTERS.with_borrow(|regs| regs.get_reg(ch).map(|r| r.buf().clone()))
 }
 
-pub fn write_register(ch: Option<char>, buf: String) {
-	REGISTERS.with_borrow_mut(|regs| if let Some(r) = regs.get_reg_mut(ch) { r.write(buf) })
+pub fn write_register(ch: Option<char>, buf: String, is_whole_line: bool) {
+	REGISTERS.with_borrow_mut(|regs| if let Some(r) = regs.get_reg_mut(ch) { r.write(buf); r.set_is_whole_line(is_whole_line); })
 }
 
 pub fn append_register(ch: Option<char>, buf: String) {
@@ -51,33 +51,33 @@ impl Registers {
 	pub const fn new() -> Self {
 		// default() isn't constant :(
 		Self {
-			default: Register(String::new()),
-			a: Register(String::new()),
-			b: Register(String::new()),
-			c: Register(String::new()),
-			d: Register(String::new()),
-			e: Register(String::new()),
-			f: Register(String::new()),
-			g: Register(String::new()),
-			h: Register(String::new()),
-			i: Register(String::new()),
-			j: Register(String::new()),
-			k: Register(String::new()),
-			l: Register(String::new()),
-			m: Register(String::new()),
-			n: Register(String::new()),
-			o: Register(String::new()),
-			p: Register(String::new()),
-			q: Register(String::new()),
-			r: Register(String::new()),
-			s: Register(String::new()),
-			t: Register(String::new()),
-			u: Register(String::new()),
-			v: Register(String::new()),
-			w: Register(String::new()),
-			x: Register(String::new()),
-			y: Register(String::new()),
-			z: Register(String::new()),
+			default: Register::new(),
+			a: Register::new(),
+			b: Register::new(),
+			c: Register::new(),
+			d: Register::new(),
+			e: Register::new(),
+			f: Register::new(),
+			g: Register::new(),
+			h: Register::new(),
+			i: Register::new(),
+			j: Register::new(),
+			k: Register::new(),
+			l: Register::new(),
+			m: Register::new(),
+			n: Register::new(),
+			o: Register::new(),
+			p: Register::new(),
+			q: Register::new(),
+			r: Register::new(),
+			s: Register::new(),
+			t: Register::new(),
+			u: Register::new(),
+			v: Register::new(),
+			w: Register::new(),
+			x: Register::new(),
+			y: Register::new(),
+			z: Register::new(),
 		}
 	}
 	pub fn get_reg(&self, ch: Option<char>) -> Option<&Register> {
@@ -151,18 +151,33 @@ impl Registers {
 }
 
 #[derive(Clone,Default,Debug)]
-pub struct Register(String);
+pub struct Register {
+	content: String,
+	is_whole_line: bool
+}
 impl Register {
+	pub const fn new() -> Self {
+		Self {
+			content: String::new(),
+			is_whole_line: false
+		}
+	}
 	pub fn buf(&self) -> &String {
-		&self.0
+		&self.content
 	}
 	pub fn write(&mut self, buf: String) {
-		self.0 = buf
+		self.content = buf
 	}
 	pub fn append(&mut self, buf: String) {
-		self.0.push_str(&buf)
+		self.content.push_str(&buf)
 	}
 	pub fn clear(&mut self) {
-		self.0.clear()
+		self.content.clear()
+	}
+	pub fn is_whole_line(&self) -> bool {
+		self.is_whole_line
+	}
+	pub fn set_is_whole_line(&mut self, yn: bool) {
+		self.is_whole_line = yn;
 	}
 }

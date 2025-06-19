@@ -2556,7 +2556,7 @@ impl LineBuf {
 		Some(range)
 	}
 	#[allow(clippy::unnecessary_to_owned)]
-	pub fn exec_verb(&mut self, verb: Verb, motion: MotionKind, register: RegisterName) -> Result<(),String> {
+	pub fn exec_verb(&mut self, verb: Verb, motion: MotionKind, register: RegisterName, is_whole_line: bool) -> Result<(),String> {
 		match verb {
 			Verb::Delete |
 			Verb::Yank |
@@ -2573,7 +2573,7 @@ impl LineBuf {
 					self.update_graphemes();
 					drained
 				};
-				register.write_to_register(register_text);
+				register.write_to_register(register_text, is_whole_line);
 				match motion {
 					MotionKind::ExclusiveWithTargetCol((_,_),pos) |
 						MotionKind::InclusiveWithTargetCol((_,_),pos) => {
@@ -2739,12 +2739,66 @@ impl LineBuf {
 				let Some(content) = register.read_from_register() else {
 					return Ok(())
 				};
-				let insert_idx = match anchor {
-					Anchor::After => self.cursor.ret_add(1),
-					Anchor::Before => self.cursor.get()
-				};
-				self.insert_str_at(insert_idx, &content);
-				self.cursor.add(content.len().saturating_sub(1));
+				match motion {
+					MotionKind::Line(n) => {
+							let Some((start,end)) = self.line_bounds(n) else { dbg!("returning"); return Ok(()) };
+							let insert_idx = match anchor {
+								Anchor::After => end,
+								Anchor::Before => start
+							};
+							if insert_idx == self.cursor.max {
+								self.push('\n');
+								self.push_str(content.trim_end_matches('\n'));
+							} else {
+								self.insert_str_at(insert_idx, &content);
+							}
+							self.cursor.set(insert_idx);
+							let first_non_ws = self.eval_motion(None, MotionCmd(1,Motion::FirstGraphicalOnScreenLine));
+							self.move_cursor(first_non_ws);
+					}
+					MotionKind::LineRange(s,e) => {
+						dbg!(s,e);
+						let lines = (s..=e).rev();
+						for line in lines {
+							let Some((start,end)) = self.line_bounds(line) else { dbg!("returning"); return Ok(()) };
+							dbg!(start,end);
+							let insert_idx = match anchor {
+								Anchor::After => end,
+								Anchor::Before => start
+							};
+							dbg!(insert_idx);
+							if insert_idx == self.cursor.max {
+								self.push('\n');
+								self.push_str(content.trim_end_matches('\n'));
+							} else {
+								self.insert_str_at(insert_idx, &content);
+							}
+							self.cursor.set(insert_idx);
+							let first_non_ws = self.eval_motion(None, MotionCmd(1,Motion::FirstGraphicalOnScreenLine));
+							self.move_cursor(first_non_ws);
+						}
+					}
+					_ => {
+						if register.is_whole_line() {
+							let insert_idx = match anchor {
+								Anchor::After => self.end_of_line(),
+								Anchor::Before => self.start_of_line()
+							};
+							self.insert_str_at(insert_idx, &content);
+							let down_line = self.eval_motion(None, MotionCmd(1,Motion::LineDownCharwise));
+							self.move_cursor(down_line);
+							let first_non_ws = self.eval_motion(None, MotionCmd(1,Motion::FirstGraphicalOnScreenLine));
+							self.move_cursor(first_non_ws);
+						} else {
+							let insert_idx = match anchor {
+								Anchor::After => self.cursor.ret_add(1),
+								Anchor::Before => self.cursor.get()
+							};
+							self.insert_str_at(insert_idx, &content);
+							self.cursor.add(content.len().saturating_sub(1));
+						}
+					}
+				}
 			}
 			Verb::SwapVisualAnchor => {
 				if let Some((start,end)) = self.select_range() && let Some(mut mode) = self.select_mode {
@@ -2960,7 +3014,7 @@ impl LineBuf {
 			}
 			Verb::RepeatGlobal => {
 				if let Some(global) = self.last_global.clone() {
-					self.exec_verb(global, motion, register)?
+					self.exec_verb(global, motion, register,/*is_whole_line:*/true)?
 				}
 			}
 			Verb::RepeatSubstitute => {
@@ -3080,6 +3134,9 @@ impl LineBuf {
 		let is_char_insert = cmd.verb.as_ref().is_some_and(|v| v.1.is_char_insert());
 		let is_line_motion = cmd.is_line_motion();
 		let is_undo_op = cmd.is_undo_op();
+		let is_whole_line = cmd.motion.as_ref().is_some_and(|m| {
+			matches!(m.1, Motion::WholeLine | Motion::WholeLineExclusive | Motion::Line(_) | Motion::LineRange(_,_))
+		});
 		let edit_is_merging = self.undo_stack.last().is_some_and(|edit| edit.merging);
 
 		// Merge character inserts into one edit
@@ -3135,7 +3192,7 @@ impl LineBuf {
 		};
 
 		if let Some(verb) = verb.clone() {
-			self.exec_verb(verb.1, motion_eval, register)?;
+			self.exec_verb(verb.1, motion_eval, register, is_whole_line)?;
 		} else {
 			self.apply_motion(motion_eval);
 		}

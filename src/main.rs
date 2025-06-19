@@ -664,24 +664,18 @@ fn execute_multi_thread_stdin(stream: Box<dyn BufRead>, args: &Argv) -> String {
 #[allow(unreachable_code)]
 fn main() {
 	#[cfg(debug_assertions)]
-	/*
 	{
 		// Testing
-		let input = "foobar\n1Linelinelineline\n2Linelinelineline\nfoobar\n3Linelinelineline\n4Linelinelineline\nfoobar\n5Linelinelineline\nfoobar\n6Linelinelineline\nfoobar\n7Linelinelineline\nfoobar";
+		let input = "Foo\nBar\nBiz";
 		println!("{input}\n");
 
 		let args = [
-			"-m", "4j",
-			"-m", ":g/foo/normal! 3cl###",
-			"-m", ":g/bar/normal! w3cl%%%",
-			"-m", ":g/###/normal! 3clbar",
-			"-m", ":g/%%%/normal! w3clfoo",
+			"-m", ":d<CR>:1,2p<CR>",
 		];
 		let output = call_main(&args, input).unwrap();
 		println!("{output}");
 		return
 	}
-	*/
 
 	if std::env::args().skip(1).count() == 0 {
 		eprintln!("USAGE:"); 
