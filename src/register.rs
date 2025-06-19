@@ -1,4 +1,4 @@
-use std::{cell::RefCell, sync::Mutex};
+use std::cell::RefCell;
 
 thread_local! {
 	pub static REGISTERS: RefCell<Registers> = const { RefCell::new(Registers::new()) };

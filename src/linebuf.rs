@@ -1261,6 +1261,7 @@ impl LineBuf {
 			">" => Direction::Backward,
 			_ => unreachable!()
 		};
+		// 'target_delim' is the character that will decrement the depth counter
 		let target_delim = match self.grapheme_at(idx)? {
 			"[" => "]",
 			"]" => "[",
@@ -1272,15 +1273,44 @@ impl LineBuf {
 			">" => "<",
 			_ => unreachable!()
 		};
+		// 'new_delim' is the character that will increment the depth counter
+		let new_delim = self.read_grapheme_at(idx)?;
+		let mut depth = 0u32;
 
 		match search_direction {
 			Direction::Forward => {
 				let mut fwd_indices = idx..self.cursor_max();
-				fwd_indices.find(|idx| self.grapheme_at(*idx).is_some_and(|gr| gr == target_delim) && !self.grapheme_is_escaped(*idx))
+				while let Some(idx) = fwd_indices.next() {
+					let gr = self.read_grapheme_at(idx)?;
+					match gr {
+						_ if gr == new_delim => depth += 1,
+						_ if gr == target_delim => {
+							depth = depth.saturating_sub(1);
+							if depth == 0 {
+								return Some(idx)
+							}
+						}
+						_ => { /* Keep going */ }
+					}
+				}
+				None
 			}
 			Direction::Backward => {
-				let mut bkwd_indices = 0..idx;
-				bkwd_indices.find(|idx| self.grapheme_at(*idx).is_some_and(|gr| gr == target_delim) && !self.grapheme_is_escaped(*idx))
+				let mut bkwd_indices = (0..idx).rev();
+				while let Some(idx) = bkwd_indices.next() {
+					let gr = self.read_grapheme_at(idx)?;
+					match gr {
+						_ if gr == new_delim => depth += 1,
+						_ if gr == target_delim => {
+							depth -= 1;
+							if depth == 0 {
+								return Some(idx)
+							}
+						}
+						_ => { /* Keep going */ }
+					}
+				}
+				None
 			}
 		}
 	}
