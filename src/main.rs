@@ -671,7 +671,10 @@ fn main() {
 
 		let args = [
 			"-m", "4j",
-			"-m", ":g/foo/normal! 3dliWORDSWORDSWORDS"
+			"-m", ":g/foo/normal! 3cl###",
+			"-m", ":g/bar/normal! w3cl%%%",
+			"-m", ":g/###/normal! 3clbar",
+			"-m", ":g/%%%/normal! w3clfoo",
 		];
 		let output = call_main(&args, input).unwrap();
 		println!("{output}");
