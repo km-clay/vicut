@@ -61,7 +61,7 @@ Output can be structured in three different ways using these options:
 * `--jobs` Restricts the number of threads `--linewise` can create for operating on lines.
 * `--trim-fields` Trims leading and trailing whitespace from fields extracted by `-c`.
 
-#### ℹ️ In-depth usage info, examples, and comparisons with other tools can be found on the [wiki](https://github.com/km-clay/vicut/wiki)
+#### ℹ️ Examples and more in-depth usage ideas can be found on the [wiki](https://github.com/km-clay/vicut/wiki)
 
 ## 🚀 Performance
 While tools like `awk` and `sed` do beat `vicut` in speed for full-buffer processing, `vicut`'s `--linewise` mode emulates the stream processing behaviors of `awk` and `sed` by treating each line of input as an independent buffer, and processing each in parallel. This allows `vicut`'s performance to scale horizontally across CPU cores, giving it an edge over traditional Unix text processors for non-trivial inputs— even while executing more semantically rich operations like Vim motions.
