@@ -167,8 +167,8 @@ pub enum MotionKind {
 	LineRange(usize,usize),
 
 	// Used for linewise operations like 'dj', left is the selected range, right is the cursor's new position on the line
-	InclusiveWithTargetCol((usize,usize),usize), 
-	ExclusiveWithTargetCol((usize,usize),usize), 
+	InclusiveWithTargetCol((usize,usize),usize),
+	ExclusiveWithTargetCol((usize,usize),usize),
 	Null
 }
 
@@ -262,7 +262,7 @@ pub struct ClampedUsize {
 impl ClampedUsize {
 	pub fn new(value: usize, max: usize, exclusive: bool) -> Self {
 		let mut c = Self { value: 0, max, exclusive };
-		c.set(value); 
+		c.set(value);
 		c
 	}
 	pub fn get(self) -> usize {
@@ -555,7 +555,7 @@ impl LineBuf {
 	}
 	pub fn slice_from_cursor(&mut self) -> Option<&str> {
 		self.slice_from(self.cursor.get())
-	}	
+	}
 	pub fn remove(&mut self, pos: usize) {
 		let idx = self.index_byte_pos(pos);
 		self.buffer.remove(idx);
@@ -902,7 +902,7 @@ impl LineBuf {
 				TextObj::Tag(bound) => todo!(),
 				TextObj::Custom(_) => todo!(),
 		}
-	} 
+	}
 	pub fn text_obj_word(&mut self, count: usize, bound: Bound, word: Word) -> Option<(usize,usize)> {
 		match bound {
 			Bound::Inside => {
@@ -992,7 +992,7 @@ impl LineBuf {
 						}
 					}
 				}
-				
+
 				break
 			}
 		}
@@ -1045,7 +1045,7 @@ impl LineBuf {
 		let (mut start, mut end) = if let Some(pos) = start_pos {
 			let start = pos;
 			let mut forward_indices = start+1..self.cursor.max;
-			let mut end = None;  
+			let mut end = None;
 			let mut opener_count: u32 = 0;
 
 			while let Some(idx) = forward_indices.next() {
@@ -1163,7 +1163,7 @@ impl LineBuf {
 			// Found one, only one more to go
 			let start = pos;
 			let mut forward_indices = start+1..end;
-			let mut end = None;  
+			let mut end = None;
 
 			while let Some(idx) = forward_indices.next() {
 				match self.grapheme_at(idx)? {
@@ -1239,10 +1239,10 @@ impl LineBuf {
 	pub fn find_next_matching_delim(&mut self) -> Option<usize> {
 		let (start,end) = self.this_line();
 		let opener_delims = [
-			"[", 
-			"{", 
-			"(", 
-			"<", 
+			"[",
+			"{",
+			"(",
+			"<",
 		];
 		let delims = [
 			"[", "]",
@@ -1495,7 +1495,7 @@ impl LineBuf {
 					// If we hit a different character class, we return here
 					if self.grapheme_at(other_class_pos).is_some_and(|c| !is_whitespace(c)) || include_last_char {
 						return other_class_pos
-					} 
+					}
 				}
 
 				// We are now certainly on a whitespace character. Advance until a non-whitespace character.
@@ -1546,7 +1546,7 @@ impl LineBuf {
 				}
 
 				// Return the next visible grapheme position
-				
+
 				indices_iter.find(|i| self.grapheme_at(*i).is_some_and(|c| !is_whitespace(c))).unwrap_or(default)
 			}
 			Word::Normal => {
@@ -1583,11 +1583,11 @@ impl LineBuf {
 					// If we hit a different character class, we return here
 					if self.grapheme_at(other_class_pos).is_some_and(|c| !is_whitespace(c)) || include_last_char {
 						return other_class_pos
-					} 
+					}
 				}
 
 				// We are now certainly on a whitespace character. Advance until a non-whitespace character.
-				
+
 				indices_iter.find(
 					|i| {
 						self.grapheme_at(*i)
@@ -1961,7 +1961,7 @@ impl LineBuf {
 				}) else { return MotionKind::Null };
 
 				let target_col = if let Some(col) = self.saved_col {
-					col 
+					col
 				} else {
 					let col = self.cursor_col();
 					self.saved_col = Some(col);
@@ -2147,7 +2147,7 @@ impl LineBuf {
 			MotionCmd(_,Motion::BeginningOfLine) => MotionKind::On(self.start_of_line()),
 			MotionCmd(count,Motion::EndOfLine) => {
 				let pos = if count == 1 {
-					self.end_of_line() 
+					self.end_of_line()
 				} else if let Some((_,end)) = self.select_lines_down(count.saturating_sub(1)) {
 					end
 				} else {
@@ -2328,7 +2328,7 @@ impl LineBuf {
 				};
 
 				let target_col = if let Some(col) = self.saved_col {
-					col 
+					col
 				} else {
 					let col = self.cursor_col();
 					self.saved_col = Some(col);
@@ -2366,7 +2366,7 @@ impl LineBuf {
 				};
 
 				let target_col = if let Some(col) = self.saved_col {
-					col 
+					col
 				} else {
 					let col = self.cursor_col();
 					self.saved_col = Some(col);
@@ -2529,7 +2529,7 @@ impl LineBuf {
 	pub fn range_from_motion(&mut self, motion: &MotionKind) -> Option<(usize,usize)> {
 		let range = match motion {
 			MotionKind::On(pos) => ordered(self.cursor.get(), *pos),
-			MotionKind::Onto(pos) => { 
+			MotionKind::Onto(pos) => {
 				// For motions which include the character at the cursor during operations
 				// but exclude the character during movements
 				let mut pos = ClampedUsize::new(*pos, self.cursor.max, false);
@@ -2843,7 +2843,7 @@ impl LineBuf {
 						}
 						last_was_whitespace = false;
 						continue
-					} 
+					}
 					last_was_whitespace = is_whitespace(gr);
 				}
 			}
@@ -2938,41 +2938,36 @@ impl LineBuf {
 				let Ok(program) = env::var("EQUALPRG") else {
 					eprintln!("vicut: '$EQUALPRG' is not set, ignoring '=' call");
 					eprintln!("vicut: The '=' operator requires a path to a formatter program in the '$EQUALPRG' environment variable");
-					return Ok(())
+					return Ok(());
 				};
-				let Some((start,end)) = self.range_from_motion(&motion) else { return Ok(()) };
+				let Some((start, end)) = self.range_from_motion(&motion) else {
+					return Ok(());
+				};
 				let start_ln = self.index_line_number(start);
 				let end_ln = self.index_line_number(end);
-				let Some((start,_)) = self.line_bounds(start_ln) else { return Ok(()) };
-				let Some((_,end)) = self.line_bounds(end_ln) else { return Ok(()) };
-				let Some(slice) = self.slice(start..end) else { return Ok(()) };
-
+				let Some((start, _)) = self.line_bounds(start_ln) else {
+					return Ok(());
+				};
+				let Some((_, end)) = self.line_bounds(end_ln) else {
+					return Ok(());
+				};
+				let Some(slice) = self.slice(start..end) else {
+					return Ok(());
+				};
 
 				let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
-				let mut child = Command::new(shell)
+				let bytes = Command::new(shell)
 					.arg("-c")
 					.arg(program)
 					.stdin(Stdio::piped())
 					.stdout(Stdio::piped())
 					.spawn()
-					.map_err(|e| format!("Failed to spawn child process for write: {e}"))?;
-
-				child.stdin.as_mut().unwrap().write_all(slice.as_bytes())
-					.map_err(|e| format!("Failed to pipe input to child process: {e}"))?;
-
-				let status = child.wait()
-					.map_err(|e| format!("Failed to wait for child process: {e}"))?;
-				if !status.success() {
-					eprintln!("Command exited with non-zero status");
-				}
-
-				let mut output = String::new();
-				child.stdout
-					.as_mut()
-					.unwrap()
-					.read_to_string(&mut output)
-					.map_err(|e| format!("Failed to read from child stdout: {e}"))?;
-
+					.and_then(|mut child| {
+						child.stdin.as_mut().unwrap().write_all(slice.as_bytes())?;
+						child.wait_with_output()
+					})
+				.map_err(|e| format!("Failed to run command: {e}"))?;
+				let output = String::from_utf8_lossy(&bytes.stdout).to_string();
 
 				self.replace_range(start, end, &output);
 			}
@@ -3024,7 +3019,7 @@ impl LineBuf {
 				let Some((_,end)) = self.line_bounds(end_line) else { return Ok(()) };
 
 				let Some(write_span) = self.slice(start..end) else { return Ok(()) };
-				
+
 				match dest {
 					WriteDest::File(path_buf) => {
 						std::fs::write(path_buf, write_span)
@@ -3182,8 +3177,8 @@ impl LineBuf {
 		let edit_is_merging = self.undo_stack.last().is_some_and(|edit| edit.merging);
 
 		// Merge character inserts into one edit
-		if edit_is_merging 
-			&& cmd.verb.as_ref().is_none_or(|v| !v.1.is_char_insert()) 
+		if edit_is_merging
+			&& cmd.verb.as_ref().is_none_or(|v| !v.1.is_char_insert())
 			&& let Some(edit) = self.undo_stack.last_mut() {
 				edit.stop_merge();
 		}
