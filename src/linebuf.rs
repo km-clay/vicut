@@ -1,3 +1,6 @@
+use std::env;
+use std::io::{Read, Write as IoWrite};
+use std::process::{Command,Stdio};
 use std::ops::{Range, RangeInclusive};
 use std::fmt::Write;
 
@@ -2901,7 +2904,6 @@ impl LineBuf {
 					self.remove(*idx)
 				}
 			}
-			Verb::Equalize => todo!(),
 			Verb::InsertModeLineBreak(anchor) => {
 				let (mut start,end) = self.this_line();
 				if start == 0 && end == self.cursor.max {
@@ -2932,6 +2934,48 @@ impl LineBuf {
 					}
 				}
 			}
+			Verb::Equalize => {
+				let Ok(program) = env::var("EQUALPRG") else {
+					eprintln!("vicut: '$EQUALPRG' is not set, ignoring '=' call");
+					eprintln!("vicut: The '=' operator requires a path to a formatter program in the '$EQUALPRG' environment variable");
+					return Ok(())
+				};
+				let Some((start,end)) = self.range_from_motion(&motion) else { return Ok(()) };
+				let start_ln = self.index_line_number(start);
+				let end_ln = self.index_line_number(end);
+				let Some((start,_)) = self.line_bounds(start_ln) else { return Ok(()) };
+				let Some((_,end)) = self.line_bounds(end_ln) else { return Ok(()) };
+				let Some(slice) = self.slice(start..end) else { return Ok(()) };
+
+
+				let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+				let mut child = Command::new(shell)
+					.arg("-c")
+					.arg(program)
+					.stdin(Stdio::piped())
+					.stdout(Stdio::piped())
+					.spawn()
+					.map_err(|e| format!("Failed to spawn child process for write: {e}"))?;
+
+				child.stdin.as_mut().unwrap().write_all(slice.as_bytes())
+					.map_err(|e| format!("Failed to pipe input to child process: {e}"))?;
+
+				let status = child.wait()
+					.map_err(|e| format!("Failed to wait for child process: {e}"))?;
+				if !status.success() {
+					eprintln!("Command exited with non-zero status");
+				}
+
+				let mut output = String::new();
+				child.stdout
+					.as_mut()
+					.unwrap()
+					.read_to_string(&mut output)
+					.map_err(|e| format!("Failed to read from child stdout: {e}"))?;
+
+
+				self.replace_range(start, end, &output);
+			}
 			Verb::Read(src) => {
 				let insert_line = match motion {
 					MotionKind::Line(n) => n,
@@ -2943,8 +2987,6 @@ impl LineBuf {
 
 				let data = match src {
 					ReadSrc::Cmd(sh_cmd) => {
-						use std::process::Command;
-
 						let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
 						let child = Command::new(shell)
 							.arg("-c")
@@ -2983,7 +3025,6 @@ impl LineBuf {
 
 				let Some(write_span) = self.slice(start..end) else { return Ok(()) };
 				
-				use std::io::Write;
 				match dest {
 					WriteDest::File(path_buf) => {
 						std::fs::write(path_buf, write_span)
@@ -3002,8 +3043,6 @@ impl LineBuf {
 							.map_err(|e| format!("Failed to write to file: {e}"))?;
 					}
 					WriteDest::Cmd(sh_cmd) => {
-						use std::process::{Command,Stdio};
-
 						let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
 						let mut child = Command::new(shell)
 							.arg("-c")

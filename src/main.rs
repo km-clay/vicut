@@ -1,4 +1,5 @@
 #![allow(clippy::unnecessary_to_owned,clippy::while_let_on_iterator)]
+#![feature(let_chains)]
 use std::{collections::BTreeMap, env::Args, fmt::Write, fs, io::{self, BufRead, Write as IoWrite}, iter::{Peekable, Skip}, path::PathBuf};
 
 extern crate tikv_jemallocator;
@@ -456,9 +457,13 @@ fn format_output_json(lines: Vec<Vec<(String,String)>>) -> String {
 	serde_json::to_string_pretty(&json).unwrap()
 }
 
+fn no_fields_extracted(lines: &[Vec<(String,String)>]) -> bool {
+	lines.len() == 1 && lines.first().is_some_and(|ln| ln.first().is_some_and(|field| field.0 == "0"))
+}
+
 fn format_output_standard(delimiter: &str, lines: Vec<Vec<(String,String)>>) -> String {
 	// Let's check to see if we are outputting the whole buffer
-	if lines.len() == 1 && lines.first().is_some_and(|ln| ln.first().is_some_and(|field| field.0 == "0")) {
+	if no_fields_extracted(&lines)  {
 		// The "0" field is only used when the user doesn't slice any fields
 		lines.into_iter()
 			.fold(String::new(), |mut acc,line| {
