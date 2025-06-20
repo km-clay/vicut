@@ -65,7 +65,7 @@ impl Argv {
 	pub fn parse() -> Result<Self,String> {
 		let mut new = Self::default();
 		let mut args = std::env::args().skip(1).peekable();
-		'outer: while let Some(arg) = args.next() {
+		while let Some(arg) = args.next() {
 			match arg.as_str() {
 				"--json" | "-j" => {
 					new.json = true;
@@ -133,6 +133,11 @@ impl Argv {
 					let Some(arg) = args.next() else { continue };
 					if arg.starts_with("name=") {
 						let name = arg.strip_prefix("name=").unwrap().to_string();
+						if name == "0" {
+							// We use '0' as a sentinel value to say "We didn't slice any fields, so this field is the entire buffer"
+							// So we can't let people use it arbitrarily, or weird shit starts happening
+							return Err("Field name '0' is a reserved field name.".into())
+						}
 						let Some(arg) = args.next() else { continue };
 						if arg.starts_with('-') {
 							return Err(format!("Expected a selection command after '-c', found {arg}"))
@@ -452,18 +457,41 @@ fn format_output_json(lines: Vec<Vec<(String,String)>>) -> String {
 }
 
 fn format_output_standard(delimiter: &str, lines: Vec<Vec<(String,String)>>) -> String {
-	lines.into_iter()
-		.fold(String::new(), |mut acc,line| {
-			// Accumulate all line fields into one string,
-			// Fold all lines into one string
-			let fmt_line = line
-				.into_iter()
-				.map(|(_,f)| f) // Ignore the name here, if any
-				.collect::<Vec<String>>()
-				.join(delimiter);
-			write!(acc,"{fmt_line}").ok();
-			acc
-		})
+	// Let's check to see if we are outputting the whole buffer
+	if lines.len() == 1 && lines.first().is_some_and(|ln| ln.first().is_some_and(|field| field.0 == "0")) {
+		// The "0" field is only used when the user doesn't slice any fields
+		lines.into_iter()
+			.fold(String::new(), |mut acc,line| {
+				// Accumulate all line fields into one string,
+				// Fold all lines into one string
+				let fmt_line = line
+					.into_iter()
+					.map(|(_,f)| f) // Ignore the name here, if any
+					.collect::<Vec<String>>()
+					.join(delimiter);
+				write!(acc,"{fmt_line}").ok();
+				acc
+			})
+	} else {
+		let mut fields = vec![];
+		let mut records = vec![];
+		let mut output = String::new();
+		for line in lines {
+			for field in line {
+				fields.push(field.1);
+			}
+			let record = std::mem::take(&mut fields).join(delimiter);
+			records.push(record);
+		}
+		for record in records {
+			if record.ends_with('\n') {
+				write!(output, "{record}").ok();
+			} else {
+				writeln!(output,"{record}").ok();
+			}
+		}
+		output
+	}
 }
 
 fn format_output_template(template: &str, lines: Vec<Vec<(String,String)>>) -> Result<String,String> {
@@ -566,7 +594,7 @@ fn execute(args: &Argv, input: String) -> Result<Vec<Vec<(String,String)>>,Strin
 	// We don't want to spam the output with entire files with no matches in that case, 
 	// But if the files vector is empty, the user is working on stdin, so they will probably
 	// want to see that output, with or without globals.
-	if fmt_lines.is_empty() && (!args.files.is_empty() && !has_global) || (args.files.is_empty()) {
+	if fmt_lines.is_empty() && ((!args.files.is_empty() && !has_global) || (args.files.is_empty())) {
 		let big_line = vicut.editor.buffer;
 		fmt_lines.push(vec![("0".into(),big_line)]);
 	}
@@ -645,8 +673,7 @@ fn exec_cmd(
 		Cmd::Global { pattern, then_cmds, else_cmds, polarity } => {
 			let motion = match polarity {
 				false  => Motion::NotGlobal(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pattern.to_string()),
-				true => Motion::Global(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pattern.to_string()),
-				_ => unreachable!()
+				true => Motion::Global(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pattern.to_string())
 			};
 
 			let MotionKind::Lines(lines) = vicut.editor.eval_motion(None, MotionCmd(1,motion)) else { unreachable!() };
@@ -731,9 +758,6 @@ fn exec_cmd(
 			}
 		}
 	}
-}
-
-fn handle_global() {
 }
 
 fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Argv) {
@@ -872,12 +896,13 @@ fn execute_multi_thread_files_linewise(mut stdout: io::StdoutLock, args: &Argv) 
 	}
 }
 
-fn execute_multi_thread_stdin(stream: Box<dyn BufRead>, args: &Argv) -> String {
-	let lines: Vec<_> = stream.lines().collect::<Result<_,_>>().unwrap_or_else(|e| {
-		eprintln!("vicut: {e}");
-		std::process::exit(1);
+fn execute_multi_thread_stdin(mut stream: Box<dyn BufRead>, args: &Argv) -> String {
+	let mut input = String::new();
+	stream.read_to_string(&mut input).unwrap_or_else(|e| {
+		eprintln!("vicut: failed to read input: {e}");
+		std::process::exit(1)
 	});
-
+	let lines = get_lines(&input);
 	// Pair each line with its original index
 	let mut lines: Vec<_> = lines
 		.into_par_iter()
@@ -980,25 +1005,22 @@ fn main() {
 							std::process::exit(1)
 						});
 					}
-					let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(file));
-					for result in stream.lines() {
-						match result {
-							Ok(line) => {
-								match execute(&args,line) {
-									Ok(mut new_line) => {
-										lines.append(&mut new_line);
-									}
-									Err(e) => {
-										eprintln!("vicut: {e}");
-										return;
-									}
-								}
+					let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(file));
+					let mut input = String::new();
+					stream.read_to_string(&mut input).unwrap_or_else(|e| {
+						eprintln!("vicut: failed to read file '{}': {e}",path.display());
+						std::process::exit(1)
+					});
+					for line in get_lines(&input) {
+						match execute(&args,line) {
+							Ok(mut new_line) => {
+								lines.append(&mut new_line);
 							}
 							Err(e) => {
 								eprintln!("vicut: {e}");
 								return;
 							}
-						};
+						}
 					}
 					let mut output = format_output(&args, std::mem::take(&mut lines));
 					if args.edit_inplace {
@@ -1014,25 +1036,22 @@ fn main() {
 					}
 				}
 			} else {
-				let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
-				for result in stream.lines() {
-					match result {
-						Ok(line) => {
-							match execute(&args,line) {
-									Ok(mut new_line) => {
-										lines.append(&mut new_line);
-									}
-								Err(e) => {
-									eprintln!("vicut: {e}");
-									return;
-								}
-							}
+				let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
+				let mut input = String::new();
+				stream.read_to_string(&mut input).unwrap_or_else(|e| {
+					eprintln!("vicut: failed to read input: {e}");
+					std::process::exit(1)
+				});
+				for line in get_lines(&input) {
+					match execute(&args,line) {
+						Ok(mut new_line) => {
+							lines.append(&mut new_line);
 						}
 						Err(e) => {
 							eprintln!("vicut: {e}");
 							return;
 						}
-					};
+					}
 				}
 			}
 			let output = format_output(&args, lines);
@@ -1184,24 +1203,19 @@ fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 			// We need to initialize stream in each branch, since Box<dyn BufReader> does not implement send/sync
 			// So using it in pool.install() doesn't work. We have to initialize it in the closure there.
 
-			let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input)));
+			let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input)));
+			let mut input = String::new();
+			stream.read_to_string(&mut input).unwrap();
 			let mut lines = vec![];
-			for result in stream.lines() {
-				match result {
-					Ok(line) => {
-						match execute(&args,line) {
-							Ok(mut new_line) => {
-								lines.append(&mut new_line);
-							}
-							Err(e) => {
-								return Err(format!("vicut: {e}"));
-							}
-						}
+			for line in get_lines(&input) {
+				match execute(&args,line) {
+					Ok(mut new_line) => {
+						lines.append(&mut new_line);
 					}
 					Err(e) => {
 						return Err(format!("vicut: {e}"));
 					}
-				};
+				}
 			}
 			let output = format_output(&args, lines);
 			Ok(output)
@@ -1224,6 +1238,7 @@ fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 	} else {
 		let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input)));
 		let mut input = String::new();
+		let mut lines = vec![];
 		match stream.read_to_string(&mut input) {
 			Ok(_) => {}
 			Err(e) => {
@@ -1231,12 +1246,13 @@ fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 			}
 		}
 		match execute(&args,input) {
-			Ok(output) => {
-				let output = format_output(&args, output);
-				Ok(output)
+			Ok(mut output) => {
+				lines.append(&mut output);
 			}
-			Err(e) => Err(format!("vicut: {e}")),
-		}
+			Err(e) => eprintln!("vicut: {e}"),
+		};
+		let output = format_output(&args, lines);
+		Ok(output)
 	}
 }
 #[cfg(any(test,debug_assertions))]

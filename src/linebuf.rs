@@ -1,4 +1,5 @@
 use std::ops::{Range, RangeInclusive};
+use std::fmt::Write;
 
 use log::debug;
 use regex::Regex;
@@ -1315,7 +1316,6 @@ impl LineBuf {
 		}
 	}
 	pub fn find_unmatched_delim(&mut self, delim: Delim, dir: Direction) -> Option<usize> {
-		println!("finding delim");
 		let (opener,closer) = match delim {
 			Delim::Paren   => ("(",")"),
 			Delim::Brace   => ("{","}"),
@@ -2966,9 +2966,9 @@ impl LineBuf {
 				};
 				let needs_trailing_newline = !data.ends_with("\n") && insert_pos != self.cursor.max;
 				let mut output = String::new();
-				if needs_newline { output.push('\n'); }
-				output.push_str(&data);
-				if needs_trailing_newline { output.push('\n'); }
+				if needs_newline { writeln!(output).ok(); }
+				write!(output,"{data}").ok();
+				if needs_trailing_newline { writeln!(output).ok(); }
 
 				self.insert_str_at(insert_pos, &output);
 			}

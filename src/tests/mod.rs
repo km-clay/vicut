@@ -15,8 +15,10 @@ pub mod wiki_examples;
 fn vicut_integration(input: &str, args: &[&str], expected: &str) {
 	let output = call_main(args, input).unwrap();
 	let output = output.strip_suffix("\n").unwrap_or(&output);
+	/*
 	println!("got: {output:?}");
 	println!("expected: {expected:?}");
+	*/
 	assert_eq!(output,expected)
 }
 
