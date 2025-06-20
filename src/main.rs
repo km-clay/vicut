@@ -1,5 +1,5 @@
 #![allow(clippy::unnecessary_to_owned,clippy::while_let_on_iterator)]
-use std::{collections::BTreeMap, fmt::Write, fs, io::{self, BufRead, Write as IoWrite}, path::PathBuf};
+use std::{collections::BTreeMap, env::Args, fmt::Write, fs, io::{self, BufRead, Write as IoWrite}, iter::{Peekable, Skip}, path::PathBuf};
 
 extern crate tikv_jemallocator;
 
@@ -32,8 +32,12 @@ enum Cmd {
 	Field(String),
 	NamedField(Name,String),
 	Repeat(usize,usize),
-	Global(String, Vec<Cmd>),
-	NotGlobal(String, Vec<Cmd>),
+	Global{
+		pattern: String,
+		then_cmds: Vec<Cmd>,
+		else_cmds: Option<Vec<Cmd>>,
+		polarity: bool // Whether to execute on a match, or on no match
+	},
 	BreakGroup
 }
 
@@ -143,84 +147,138 @@ impl Argv {
 				}
 				"-v" | "--not-global" |
 				"-g" | "--global" => {
-					let is_inverted = match arg.as_str() {
-						"-v" | "--not-global" => true,
-						"-g" | "--global" => false,
-						_ => unreachable!()
-					};
-					let mut global_cmds = vec![];
-					let Some(arg) = args.next() else { continue };
-					if arg.starts_with('-') {
-						return Err(format!("Expected a selection command after '-c', found {arg}"))
-					}
-					while let Some(global_arg) = args.next() {
-						match global_arg.as_str() {
-							"-n" | "--next" => new.cmds.push(Cmd::BreakGroup),
-							"-r" | "--repeat" => {
-								let cmd_count = args
-									.next()
-									.unwrap_or("1".into())
-									.parse::<usize>()
-									.map_err(|_| format!("Expected a number after '{global_arg}'"))?;
-								let repeat_count = args
-									.next()
-									.unwrap_or("1".into())
-									.parse::<usize>()
-									.map_err(|_| format!("Expected a number after '{global_arg}'"))?;
-
-								global_cmds.push(Cmd::Repeat(cmd_count, repeat_count));
-							}
-							"-m" | "--move" => {
-								let Some(arg) = args.next() else { continue };
-								if arg.starts_with('-') {
-									return Err(format!("Expected a motion command after '-m', found {arg}"))
-								}
-								global_cmds.push(Cmd::Motion(arg))
-							}
-							"-c" | "--cut" => {
-								let Some(arg) = args.next() else { continue };
-								if arg.starts_with("name=") {
-									let name = arg.strip_prefix("name=").unwrap().to_string();
-									let Some(arg) = args.next() else { continue };
-									if arg.starts_with('-') {
-										return Err(format!("Expected a selection command after '-c', found {arg}"))
-									}
-									global_cmds.push(Cmd::NamedField(name,arg));
-								} else {
-									if arg.starts_with('-') {
-										return Err(format!("Expected a selection command after '-c', found {arg}"))
-									}
-									global_cmds.push(Cmd::Field(arg));
-								}
-							}
-							"--end" => {
-								if is_inverted {
-									new.cmds.push(Cmd::NotGlobal(arg, global_cmds));
-								} else {
-									new.cmds.push(Cmd::Global(arg, global_cmds));
-								}
-								continue 'outer
-							}
-							_ => {
-								return Err("Expected command flag in '-g' scope\nDid you forget to close '-g' with '--end'?".into())
-							}
-						}
-						if args.peek().is_some_and(|arg| !arg.starts_with('-')) { break }
-					}
-
-					// If we got here, we have run out of arguments
-					// Let's just submit the current -g commands. 
-					// no need to be pressed about a missing '--end' when nothing would come after it
-					if is_inverted {
-						new.cmds.push(Cmd::NotGlobal(arg, global_cmds));
-					} else {
-						new.cmds.push(Cmd::Global(arg, global_cmds));
-					}
+					let global = new.handle_global_arg(arg.as_str(), &mut args);
+					new.cmds.push(global);
 				}
 				_ => new.handle_filename(arg)
 			}
 		}
 		Ok(new)
+	}
+	fn handle_global_arg(&mut self,arg: &str, args: &mut Peekable<Skip<Args>>) -> Cmd {
+		let polarity = match arg {
+			"-v" | "--not-global" => false,
+			"-g" | "--global" => true,
+			_ => unreachable!("found arg: {arg}")
+		};
+		let mut then_cmds = vec![];
+		let mut else_cmds = None;
+		let Some(arg) = args.next() else { 
+			return Cmd::Global {
+				pattern: arg.into(),
+				then_cmds,
+				else_cmds,
+				polarity 
+			};
+		};
+		if arg.starts_with('-') {
+			eprintln!("Expected a selection command after '-c', found {arg}");
+			std::process::exit(1)
+		}
+		while let Some(global_arg) = args.next() {
+			match global_arg.as_str() {
+				"-n" | "--next" => self.cmds.push(Cmd::BreakGroup),
+				"-r" | "--repeat" => {
+					let cmd_count = args
+						.next()
+						.unwrap_or("1".into())
+						.parse::<usize>()
+						.unwrap_or_else(|_| {
+							eprintln!("Expected a number after '{global_arg}'");
+							std::process::exit(1)
+						});
+					let repeat_count = args
+						.next()
+						.unwrap_or("1".into())
+						.parse::<usize>()
+						.unwrap_or_else(|_| {
+							eprintln!("Expected a number after '{global_arg}'");
+							std::process::exit(1)
+						});
+
+					if let Some(else_cmds) = else_cmds.as_mut() {
+						else_cmds.push(Cmd::Repeat(cmd_count, repeat_count));
+					} else {
+						then_cmds.push(Cmd::Repeat(cmd_count, repeat_count));
+					}
+				}
+				"-m" | "--move" => {
+					let Some(arg) = args.next() else { continue };
+					if arg.starts_with('-') {
+						eprintln!("Expected a motion command after '-m', found {arg}");
+						std::process::exit(1);
+					}
+					if let Some(else_cmds) = else_cmds.as_mut() {
+						else_cmds.push(Cmd::Motion(arg))
+					} else {
+						then_cmds.push(Cmd::Motion(arg))
+					}
+				}
+				"-c" | "--cut" => {
+					let Some(arg) = args.next() else { continue };
+					if arg.starts_with("name=") {
+						let name = arg.strip_prefix("name=").unwrap().to_string();
+						let Some(arg) = args.next() else { continue };
+						if arg.starts_with('-') {
+							eprintln!("Expected a selection command after '-c', found {arg}");
+							std::process::exit(1);
+						}
+						if let Some(cmds) = else_cmds.as_mut() {
+							cmds.push(Cmd::NamedField(name,arg));
+						} else {
+							then_cmds.push(Cmd::NamedField(name,arg));
+						}
+					} else {
+						if arg.starts_with('-') {
+							eprintln!("Expected a selection command after '-c', found {arg}");
+							std::process::exit(1);
+						}
+						if let Some(cmds) = else_cmds.as_mut() {
+							cmds.push(Cmd::Field(arg));
+						} else {
+							then_cmds.push(Cmd::Field(arg));
+						}
+					}
+				}
+				"-g" | "--global" |
+				"-v" | "--not-global" => {
+					let nested = self.handle_global_arg(&global_arg, args);
+					if let Some(cmds) = else_cmds.as_mut() {
+						cmds.push(nested);
+					} else {
+						then_cmds.push(nested);
+					}
+				}
+				"--else" => {
+					// Now we start working on this
+					else_cmds = Some(vec![]);
+				}
+				"--end" => {
+					// We're done here
+					return Cmd::Global {
+						pattern: arg,
+						then_cmds,
+						else_cmds,
+						polarity 
+					};
+				}
+				_ => {
+					eprintln!("Expected command flag in '-g' scope\nDid you forget to close '-g' with '--end'?");
+					std::process::exit(1);
+				}
+			}
+			if args.peek().is_some_and(|arg| !arg.starts_with('-')) { break }
+		}
+
+		// If we got here, we have run out of arguments
+		// Let's just submit the current -g commands. 
+		// no need to be pressed about a missing '--end' when nothing would come after it
+		Cmd::Global {
+			pattern: arg,
+			then_cmds,
+			else_cmds,
+			polarity 
+		}
 	}
 	fn handle_filename(&mut self, filename: String) {
 		let path = PathBuf::from(filename.trim().to_string());
@@ -480,7 +538,7 @@ fn execute(args: &Argv, input: String) -> Result<Vec<Vec<(String,String)>>,Strin
 	let mut spent_cmds: Vec<&Cmd> = vec![];
 
 	let mut field_num = 0;
-	let has_global = args.cmds.iter().any(|cmd| matches!(cmd,Cmd::NotGlobal(_,_) | Cmd::Global(_,_)));
+	let has_global = args.cmds.iter().any(|cmd| matches!(cmd,Cmd::Global {..}));
 	for cmd in &args.cmds {
 		exec_cmd(
 			cmd,
@@ -501,7 +559,14 @@ fn execute(args: &Argv, input: String) -> Result<Vec<Vec<(String,String)>>,Strin
 		fmt_lines.push(std::mem::take(&mut fields));
 	}
 
-	if fmt_lines.is_empty() && !has_global {
+	// Let's figure out if we want to print the whole buffer
+	// fmt_lines is empty, so the user didn't write any -c commands
+	// if args has files it is working on, and the command list has a global, that means 
+	// that the user is probably searching for something, potentially in a group of files.
+	// We don't want to spam the output with entire files with no matches in that case, 
+	// But if the files vector is empty, the user is working on stdin, so they will probably
+	// want to see that output, with or without globals.
+	if fmt_lines.is_empty() && (!args.files.is_empty() && !has_global) || (args.files.is_empty()) {
 		// The user did not send any '-c' commands...?
 		// They might just be editing text with '-m' calls.
 		// Let's just push the entire buffer
@@ -559,20 +624,37 @@ fn exec_cmd(
 				}
 			}
 		}
-		Cmd::NotGlobal(_, cmds) |
-		Cmd::Global(_, cmds) => {
-			let motion = match cmd {
-				Cmd::NotGlobal(pat, _)  => Motion::NotGlobal(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pat.to_string()),
-				Cmd::Global(pat, _) => Motion::Global(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pat.to_string()),
+		Cmd::Global { pattern, then_cmds, else_cmds, polarity } => {
+			let motion = match polarity {
+				false  => Motion::NotGlobal(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pattern.to_string()),
+				true => Motion::Global(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pattern.to_string()),
 				_ => unreachable!()
 			};
 
 			let MotionKind::Lines(lines) = vicut.editor.eval_motion(None, MotionCmd(1,motion)) else { unreachable!() };
 			let mut scoped_spent_cmds = vec![];
-			for line in lines {
-				let Some((start,_)) = vicut.editor.line_bounds(line) else { continue };
-				vicut.editor.cursor.set(start);
-				for cmd in cmds {
+			if !lines.is_empty() {
+				for line in lines {
+					let Some((start,_)) = vicut.editor.line_bounds(line) else { continue };
+					vicut.editor.cursor.set(start);
+					for cmd in then_cmds {
+						exec_cmd(
+							cmd,
+							args,
+							vicut,
+							field_num,
+							&mut scoped_spent_cmds,
+							fields,
+							fmt_lines
+						);
+						scoped_spent_cmds.push(cmd);
+						if !args.keep_mode {
+							vicut.set_normal_mode();
+						}
+					}
+				}
+			} else if let Some(else_cmds) = else_cmds {
+				for cmd in else_cmds {
 					exec_cmd(
 						cmd,
 						args,
@@ -631,6 +713,9 @@ fn exec_cmd(
 			}
 		}
 	}
+}
+
+fn handle_global() {
 }
 
 fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Argv) {
