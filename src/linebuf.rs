@@ -2754,7 +2754,7 @@ impl LineBuf {
 				};
 				match motion {
 					MotionKind::Line(n) => {
-							let Some((start,end)) = self.line_bounds(n) else { dbg!("returning"); return Ok(()) };
+							let Some((start,end)) = self.line_bounds(n) else { return Ok(()) };
 							let insert_idx = match anchor {
 								Anchor::After => end,
 								Anchor::Before => start
@@ -2770,16 +2770,13 @@ impl LineBuf {
 							self.move_cursor(first_non_ws);
 					}
 					MotionKind::LineRange(s,e) => {
-						dbg!(s,e);
 						let lines = (s..=e).rev();
 						for line in lines {
-							let Some((start,end)) = self.line_bounds(line) else { dbg!("returning"); return Ok(()) };
-							dbg!(start,end);
+							let Some((start,end)) = self.line_bounds(line) else { return Ok(()) };
 							let insert_idx = match anchor {
 								Anchor::After => end,
 								Anchor::Before => start
 							};
-							dbg!(insert_idx);
 							if insert_idx == self.cursor.max {
 								self.push('\n');
 								self.push_str(content.trim_end_matches('\n'));

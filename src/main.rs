@@ -461,7 +461,7 @@ fn format_output_standard(delimiter: &str, lines: Vec<Vec<(String,String)>>) -> 
 				.map(|(_,f)| f) // Ignore the name here, if any
 				.collect::<Vec<String>>()
 				.join(delimiter);
-			writeln!(acc,"{fmt_line}").ok();
+			write!(acc,"{fmt_line}").ok();
 			acc
 		})
 }
@@ -567,10 +567,6 @@ fn execute(args: &Argv, input: String) -> Result<Vec<Vec<(String,String)>>,Strin
 	// But if the files vector is empty, the user is working on stdin, so they will probably
 	// want to see that output, with or without globals.
 	if fmt_lines.is_empty() && (!args.files.is_empty() && !has_global) || (args.files.is_empty()) {
-		// The user did not send any '-c' commands...?
-		// They might just be editing text with '-m' calls.
-		// Let's just push the entire buffer
-		// If they don't want to see it they can just do > /dev/null
 		let big_line = vicut.editor.buffer;
 		fmt_lines.push(vec![("0".into(),big_line)]);
 	}
@@ -588,6 +584,28 @@ fn trim_fields(lines: &mut Vec<Vec<(String,String)>>) {
 			*field = field.trim().to_string()
 		}
 	}
+}
+
+fn get_lines(value: &str) -> Vec<String> {
+	let mut cur_line = String::new();
+	let mut lines = vec![];
+	let mut chars = value.chars();
+
+	while let Some(ch) = chars.next() {
+		match ch {
+			'\n' => {
+				cur_line.push(ch);
+				lines.push(std::mem::take(&mut cur_line))
+			}
+			_ => cur_line.push(ch)
+		}
+	}
+
+	if !cur_line.is_empty() {
+		lines.push(std::mem::take(&mut cur_line))
+	}
+
+	lines
 }
 
 fn exec_cmd(
@@ -773,7 +791,7 @@ fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Argv) {
 				writeln!(stdout, "--- {}\n{}",path.display(), output).ok();
 			}
 		} else {
-			writeln!(stdout, "{output}").ok();
+			write!(stdout, "{output}").ok();
 		}
 	}
 }
@@ -800,7 +818,7 @@ fn execute_multi_thread_files_linewise(mut stdout: io::StdoutLock, args: &Argv) 
 					std::process::exit(1)
 				});
 			}
-			for (line_no,line) in contents.lines().enumerate() {
+			for (line_no,line) in get_lines(&contents).into_iter().enumerate() {
 				acc.push((file.clone(), line_no, line.to_string()));
 			}
 			acc
@@ -849,7 +867,7 @@ fn execute_multi_thread_files_linewise(mut stdout: io::StdoutLock, args: &Argv) 
 				writeln!(stdout, "--- {}\n{}",path.display(), output_final).ok();
 			}
 		} else {
-			writeln!(stdout, "{output_final}").ok();
+			write!(stdout, "{output_final}").ok();
 		}
 	}
 }
