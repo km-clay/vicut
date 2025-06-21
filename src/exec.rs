@@ -145,7 +145,7 @@ impl ViCut {
 	}
 
 	pub fn exec_cmd(&mut self, mut cmd: ViCmd) -> Result<(),String> {
-		let mut selecting = false;
+		let mut select_mode = None;
 		let mut is_insert_mode = false;
 		if cmd.is_mode_transition() {
 			let count = cmd.verb_count();
@@ -165,7 +165,7 @@ impl ViCut {
 
 				Verb::VisualModeSelectLast => {
 					if self.mode.report_mode() != ModeReport::Visual {
-						self.editor.start_selecting(SelectMode::Char(SelectAnchor::End));
+						self.editor.start_selecting(SelectMode::Char(SelectAnchor::Start));
 					}
 					let mut mode: Box<dyn ViMode> = Box::new(ViVisual::new());
 					std::mem::swap(&mut mode, &mut self.mode);
@@ -174,7 +174,15 @@ impl ViCut {
 					return self.editor.exec_cmd(cmd)
 				}
 				Verb::VisualMode => {
-					selecting = true;
+					select_mode = Some(SelectMode::Char(SelectAnchor::Start));
+					Box::new(ViVisual::new())
+				}
+				Verb::VisualModeLine => {
+					select_mode = Some(SelectMode::Line(SelectAnchor::Start));
+					Box::new(ViVisual::new())
+				}
+				Verb::VisualModeBlock => {
+					select_mode = Some(SelectMode::Block(SelectAnchor::Start));
 					Box::new(ViVisual::new())
 				}
 
@@ -206,8 +214,8 @@ impl ViCut {
 			self.editor.set_cursor_clamp(self.mode.clamp_cursor());
 			self.editor.exec_cmd(cmd)?;
 
-			if selecting {
-				self.editor.start_selecting(SelectMode::Char(SelectAnchor::End));
+			if let Some(select_mode) = select_mode {
+				self.editor.start_selecting(select_mode);
 			} else {
 				self.editor.stop_selecting();
 			}

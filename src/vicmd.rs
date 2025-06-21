@@ -189,6 +189,8 @@ impl ViCmd {
 				Verb::NormalMode |
 				Verb::VisualModeSelectLast |
 				Verb::VisualMode |
+				Verb::VisualModeLine |
+				// Verb::VisualModeBlock | not implemented yet
 				Verb::ReplaceMode
 			)
 		})

@@ -122,9 +122,11 @@ fn is_other_class_or_is_ws(a: &str, b: &str) -> bool {
 	}
 }
 
-/// The side of the selection that is attached to the cursor.
+/// The side of the selection that is anchored in place.
 ///
-/// Start means the cursor is moving the left anchor, End means the cursor is moving the right anchor.
+/// Start means the anchor is on the left side of the selection,
+/// End means the anchor is on the right side of the selection.
+/// The cursor is always on the opposite side of the anchor.
 #[derive(Default,Clone,Copy,PartialEq,Eq,Debug)]
 pub enum SelectAnchor {
 	#[default]
@@ -141,6 +143,13 @@ pub enum SelectMode {
 }
 
 impl SelectMode {
+	pub fn set_anchor(&mut self, anchor: SelectAnchor) {
+		match self {
+			SelectMode::Char(a) |
+			SelectMode::Line(a) |
+			SelectMode::Block(a) => *a = anchor
+		}
+	}
 	pub fn anchor(&self) -> &SelectAnchor {
 		match self {
 			SelectMode::Char(anchor) |
@@ -154,8 +163,8 @@ impl SelectMode {
 				SelectMode::Line(anchor) |
 				SelectMode::Block(anchor) => {
 					*anchor = match anchor {
-						SelectAnchor::Start => SelectAnchor::End,
-						SelectAnchor::End => SelectAnchor::Start
+						SelectAnchor::End => SelectAnchor::Start,
+						SelectAnchor::Start => SelectAnchor::End
 					}
 				}
 		}
@@ -658,10 +667,12 @@ impl LineBuf {
 	}
 	pub fn start_selecting(&mut self, mode: SelectMode) {
 		self.select_mode = Some(mode);
-		let range_start = self.cursor;
-		let mut range_end = self.cursor;
-		range_end.add(1);
-		self.select_range = Some((range_start.get(),range_end.get()));
+		let (range_start,range_end) = match mode {
+			SelectMode::Char(_) => (self.cursor.get(),self.cursor.ret_add(1)),
+			SelectMode::Line(_) => self.this_line(),
+			SelectMode::Block(_) => todo!()
+		};
+		self.select_range = Some((range_start,range_end));
 	}
 	pub fn stop_selecting(&mut self) {
 		self.select_mode = None;
@@ -2488,33 +2499,65 @@ impl LineBuf {
 			let Some((mut start,mut end)) = self.select_range else {
 				return
 			};
+			// If we are in select mode, we need to update the selection range
 			match mode {
 				SelectMode::Char(anchor) => {
+					// Just use literal cursor position
 					match anchor {
-						SelectAnchor::Start => {
+						SelectAnchor::End => {
 							start = self.cursor.get();
 						}
-						SelectAnchor::End => {
+						SelectAnchor::Start => {
 							end = self.cursor.get();
 						}
 					}
+					if start >= end {
+						mode.invert_anchor();
+						std::mem::swap(&mut start, &mut end);
+
+						self.select_mode = Some(mode);
+					}
+					self.select_range = Some((start,end));
 				}
-				SelectMode::Line(anchor) => todo!(),
+				SelectMode::Line(anchor) => {
+					let old_end = end;
+					// If we are in line select mode, we need to update based on the cursor's line
+					match anchor {
+						SelectAnchor::End => {
+							start = self.start_of_line();
+						}
+						SelectAnchor::Start => {
+							end = self.end_of_line();
+						}
+					}
+					if start >= end {
+						mode.invert_anchor();
+						std::mem::swap(&mut start, &mut end);
+						end = old_end; // Hack powers activate
+						               // I have no idea why this works
+													 // And I'm not going to question it
+													 // or alter this code ever again
+						match mode.anchor() {
+							SelectAnchor::End => {
+								start = self.start_of_line();
+							}
+							SelectAnchor::Start => {
+								end = self.end_of_line();
+							}
+						}
+
+						self.select_mode = Some(mode);
+					}
+					self.select_range = Some((start,end));
+				}
 				SelectMode::Block(anchor) => todo!(),
 			}
-			if start >= end {
-				mode.invert_anchor();
-				std::mem::swap(&mut start, &mut end);
-
-				self.select_mode = Some(mode);
-			}
-			self.select_range = Some((start,end));
 		}
 	}
 	pub fn move_cursor(&mut self, motion: MotionKind) {
 		match motion {
 			MotionKind::Onto(pos) | // Onto follows On's behavior for cursor movements
-				MotionKind::On(pos) => self.cursor.set(pos),
+			MotionKind::On(pos) => self.cursor.set(pos),
 			MotionKind::To(pos) => {
 				self.cursor.set(pos);
 
@@ -2545,11 +2588,15 @@ impl LineBuf {
 				} else {
 					if start < self.cursor.get() {
 						self.cursor.set(start);
-						self.select_mode = Some(SelectMode::Char(SelectAnchor::Start));
+						if let Some(mode) = self.select_mode.as_mut() {
+							mode.set_anchor(SelectAnchor::End);
+						}
 						end += 1;
 					} else {
 						self.cursor.set(end);
-						self.select_mode = Some(SelectMode::Char(SelectAnchor::End));
+						if let Some(mode) = self.select_mode.as_mut() {
+							mode.set_anchor(SelectAnchor::Start);
+						}
 					}
 					self.select_range = Some((start,end));
 				}
@@ -2561,11 +2608,15 @@ impl LineBuf {
 					if start < self.cursor.get() {
 						let start = start + 1;
 						self.cursor.set(start);
-						self.select_mode = Some(SelectMode::Char(SelectAnchor::Start));
+						if let Some(mode) = self.select_mode.as_mut() {
+							mode.set_anchor(SelectAnchor::End);
+						}
 					} else {
 						let end = end.saturating_sub(1);
 						self.cursor.set(end);
-						self.select_mode = Some(SelectMode::Char(SelectAnchor::End));
+						if let Some(mode) = self.select_mode.as_mut() {
+							mode.set_anchor(SelectAnchor::Start);
+						}
 					}
 					self.select_range = Some((start,end));
 				}
@@ -2869,13 +2920,34 @@ impl LineBuf {
 			}
 			Verb::SwapVisualAnchor => {
 				if let Some((start,end)) = self.select_range() && let Some(mut mode) = self.select_mode {
-					mode.invert_anchor();
-					let new_cursor_pos = match mode.anchor() {
-						SelectAnchor::Start => start,
-						SelectAnchor::End => end,
-					};
-					self.cursor.set(new_cursor_pos);
-					self.select_mode = Some(mode)
+					match mode {
+						SelectMode::Char(anchor) => {
+							mode.invert_anchor();
+							let new_cursor_pos = match anchor {
+								SelectAnchor::End => start,
+								SelectAnchor::Start => end,
+							};
+							self.cursor.set(new_cursor_pos);
+							self.select_mode = Some(mode)
+						}
+						SelectMode::Line(anchor) => {
+							mode.invert_anchor();
+							let cursor_col = self.cursor_col();
+							let anchor_pos = match anchor {
+								SelectAnchor::End => end,
+								SelectAnchor::Start => start,
+							};
+							let new_cursor_pos = {
+								let line_no = self.index_line_number(anchor_pos);
+								let (start,end) = self.line_bounds(line_no).unwrap_or((0,self.cursor.max));
+								let line_len = end.saturating_sub(start);
+								(start + cursor_col).min(line_len)
+							};
+							self.cursor.set(new_cursor_pos);
+							self.select_mode = Some(mode)
+						}
+						SelectMode::Block(anchor) => todo!(),
+					}
 				}
 			}
 			Verb::JoinLines => {
@@ -3227,7 +3299,7 @@ impl LineBuf {
 		let is_undo_op = cmd.is_undo_op();
 		let is_whole_line = cmd.motion.as_ref().is_some_and(|m| {
 			matches!(m.1, Motion::WholeLine | Motion::WholeLineExclusive | Motion::Line(_) | Motion::LineRange(_,_))
-		});
+		}) || self.select_mode.is_some_and(|m| matches!(m, SelectMode::Line(_)));
 		let edit_is_merging = self.undo_stack.last().is_some_and(|edit| edit.merging);
 
 		// Merge character inserts into one edit
@@ -3257,9 +3329,9 @@ impl LineBuf {
 				.map(|m| self.eval_motion(verb_ref.as_ref(), m))
 				.unwrap_or(MotionKind::Null);
 			let mode = match flags {
-				CmdFlags::VISUAL => SelectMode::Char(SelectAnchor::End),
-				CmdFlags::VISUAL_LINE => SelectMode::Line(SelectAnchor::End),
-				CmdFlags::VISUAL_BLOCK => SelectMode::Block(SelectAnchor::End),
+				CmdFlags::VISUAL => SelectMode::Char(SelectAnchor::Start),
+				CmdFlags::VISUAL_LINE => SelectMode::Line(SelectAnchor::Start),
+				CmdFlags::VISUAL_BLOCK => SelectMode::Block(SelectAnchor::Start),
 				_ => unreachable!()
 			};
 			// Start a selection
