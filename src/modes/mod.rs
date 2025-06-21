@@ -1,10 +1,11 @@
-use std::iter::Peekable;
-use std::str::Chars;
+//! The logic for the various emulations of Vim modes is held in this module.
+//!
+//! All parsing of KeyEvents into ViCmds takes place in this module.
 
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::keys::{KeyCode as K, KeyEvent as E, ModKeys as M};
-use super::vicmd::{Anchor, Bound, CmdFlags, Dest, Direction, Motion, MotionCmd, RegisterName, TextObj, To, Verb, VerbCmd, ViCmd, Word};
+use super::vicmd::{Motion, MotionCmd, To, Verb, VerbCmd, ViCmd};
 
 pub mod normal;
 pub mod insert;

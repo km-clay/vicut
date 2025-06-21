@@ -1,7 +1,12 @@
 [package]
 name = "vicut"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/km-clay/vicut"
+description = "A CLI text processor that uses Vim commands to transform text and extract fields"
+keywords = ["cli", "vim", "fields", "text", "slice"]
+categories = ["command-line-utilities", "text-editors", "text-processing", "value-formatting"]
 
 [dependencies]
 bitflags = "2.9.1"

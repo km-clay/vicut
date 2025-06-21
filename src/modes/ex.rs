@@ -3,7 +3,7 @@ use std::{iter::Peekable, path::PathBuf, str::Chars};
 use bitflags::bitflags;
 use itertools::Itertools;
 
-use crate::{modes::{common_cmds, insert::ViInsert, normal::ViNormal, ModeReport, ViMode}, reader::{KeyReader, RawReader}, vicmd::{Anchor, CmdFlags, LineAddr, Motion, MotionCmd, ReadSrc, RegisterName, Verb, VerbCmd, ViCmd, WriteDest}};
+use crate::{modes::{common_cmds, ModeReport, ViMode}, vicmd::{Anchor, CmdFlags, LineAddr, Motion, MotionCmd, ReadSrc, RegisterName, Verb, VerbCmd, ViCmd, WriteDest}};
 
 bitflags! {
 	#[derive(Debug,Clone,Copy,PartialEq,Eq)]
@@ -120,8 +120,8 @@ fn parse_ex_cmd(raw: &str, select_range: Option<(usize,usize)>) -> Result<Option
 	let mut chars = raw.chars().peekable();
 	let mut motion = if let Some(motion) = parse_ex_address(&mut chars)?.map(|m| MotionCmd(1, m)) {
 		Some(motion)
-	} else { 
-		select_range.map(|range| MotionCmd(1,Motion::LineRange(LineAddr::Number(range.0),LineAddr::Number(range.1)))) 
+	} else {
+		select_range.map(|range| MotionCmd(1,Motion::LineRange(LineAddr::Number(range.0),LineAddr::Number(range.1))))
 	};
 	let verb = {
 		if chars.peek() == Some(&'g') {
@@ -206,7 +206,7 @@ fn parse_one_addr(chars: &mut Peekable<Chars<'_>>) -> Result<Option<LineAddr>,Op
 				'?' => Ok(Some(LineAddr::PatternRev(pattern))),
 				_ => unreachable!()
 			}
-			
+
 		}
 		'.' => Ok(Some(LineAddr::Current)),
 		'$' => Ok(Some(LineAddr::Last)),

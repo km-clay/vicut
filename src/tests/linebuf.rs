@@ -1,7 +1,5 @@
 use crate::linebuf::LineBuf;
 
-use super::super::*;
-
 #[test]
 fn linebuf_empty_linebuf() {
 	let mut buf = LineBuf::new();

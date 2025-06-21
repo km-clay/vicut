@@ -1,4 +1,4 @@
-use crate::tests::{normal_cmd, vicut_integration};
+use crate::tests::vicut_integration;
 
 use super::*;
 

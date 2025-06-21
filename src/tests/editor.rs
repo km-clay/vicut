@@ -1,4 +1,4 @@
-use crate::{linebuf::LineBuf, modes::{normal::ViNormal, ViMode}, tests::{normal_cmd, LOREM_IPSUM, LOREM_IPSUM_MULTILINE}};
+use crate::tests::{normal_cmd, LOREM_IPSUM};
 use pretty_assertions::assert_eq;
 
 
@@ -226,7 +226,7 @@ fn editor_delete_line_up() {
 		239),
 		("Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.\nExcepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.\nCurabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, turpis et commodo pharetra.".into(), 242,)
 	)
-} 
+}
 
 #[test]
 fn editor_sentence_operations() {

@@ -1,4 +1,7 @@
-use log::{debug, trace};
+//! This module contains the `ViCut` struct, which is the central container for state in the program.
+//!
+//! Everything that moves through this program passes through the `ViCut` struct at some point.
+use log::trace;
 
 use crate::keys::{KeyCode, KeyEvent, ModKeys};
 use crate::linebuf::{ordered, ClampedUsize, MotionKind};
@@ -48,7 +51,7 @@ impl ViCut {
 				self.set_normal_mode();
 			}
 		}
-		if let ModeReport::Search | ModeReport::Ex = self.mode.report_mode() 
+		if let ModeReport::Search | ModeReport::Ex = self.mode.report_mode()
 			&& !self.mode.pending_seq().unwrap().is_empty() {
 				// We have run out of keys with a pending sequence.
 				// The user may have done something like "-c :%s/foo/bar/" and did not type the explicit "<CR>" to submit
@@ -297,7 +300,7 @@ impl ViCut {
 				cmd.motion = Some(MotionCmd(1,Motion::Range(range.0, range.1)))
 			}
 			self.repeat_action = Some(CmdReplay::Single(cmd.clone()));
-		} 
+		}
 
 		if cmd.is_char_search() {
 			self.repeat_motion = cmd.motion.clone()

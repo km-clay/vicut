@@ -1,15 +1,18 @@
+//! This module contains the core editor logic. This logic is held in the monolithic `LineBuf` struct.
+//!
+//! `LineBuf` is responsible for any and all mutations of the internal buffer.
+
 use std::env;
-use std::io::{Read, Write as IoWrite};
+use std::io::Write as IoWrite;
 use std::process::{Command,Stdio};
 use std::ops::{Range, RangeInclusive};
 use std::fmt::Write;
 
-use log::debug;
 use regex::Regex;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::{modes::ex::SubFlags, vicmd::{LineAddr, ReadSrc, VerbCmd, WriteDest}};
+use crate::{modes::ex::SubFlags, vicmd::{LineAddr, ReadSrc, WriteDest}};
 
 use super::vicmd::{Anchor, Bound, CmdFlags, Dest, Direction, Motion, MotionCmd, RegisterName, TextObj, To, Verb, ViCmd, Word};
 
@@ -73,8 +76,8 @@ impl From<&str> for CharClass {
 		for c in value[first.len_utf8()..].chars() {
 			match c {
 				c if c.is_alphanumeric() || c == '_' => flags |= 0b10,
-				c if c.is_whitespace()   => flags |= 0b01,
-				_                        => {}
+				c if c.is_whitespace() => flags |= 0b01,
+				_ => {}
 			}
 			if flags == 0b11 {
 				return CharClass::Other;
@@ -119,6 +122,9 @@ fn is_other_class_or_is_ws(a: &str, b: &str) -> bool {
 	}
 }
 
+/// The side of the selection that is attached to the cursor.
+///
+/// Start means the cursor is moving the left anchor, End means the cursor is moving the right anchor.
 #[derive(Default,Clone,Copy,PartialEq,Eq,Debug)]
 pub enum SelectAnchor {
 	#[default]
@@ -126,6 +132,7 @@ pub enum SelectAnchor {
 	Start
 }
 
+/// Visual selection modes
 #[derive(Clone,Copy,PartialEq,Eq,Debug)]
 pub enum SelectMode {
 	Char(SelectAnchor),
@@ -155,6 +162,9 @@ impl SelectMode {
 	}
 }
 
+/// The main driver for motion logic in `LineBuf`
+///
+/// All of the motions passed in through `ViCmd`s are eventually watered down to one of these.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MotionKind {
 	To(usize), // Absolute position, exclusive
@@ -163,7 +173,9 @@ pub enum MotionKind {
 	Inclusive((usize,usize)), // Range, inclusive
 	Exclusive((usize,usize)), // Range, exclusive
 	Line(usize),
+	/// A list of specific lines
 	Lines(Vec<usize>),
+	/// A range between a start and end line
 	LineRange(usize,usize),
 
 	// Used for linewise operations like 'dj', left is the selected range, right is the cursor's new position on the line
@@ -171,9 +183,6 @@ pub enum MotionKind {
 	ExclusiveWithTargetCol((usize,usize),usize),
 	Null
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MotionRange {}
 
 impl MotionKind {
 	pub fn inclusive(range: RangeInclusive<usize>) -> Self {
@@ -184,6 +193,7 @@ impl MotionKind {
 	}
 }
 
+/// Used for undo/redo logic.
 #[derive(Default,Debug)]
 pub struct Edit {
 	pub pos: usize,
@@ -248,11 +258,11 @@ impl Edit {
 	}
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
-/// A usize which will always exist between 0 and a given upper bound
+/// A `usize` which will always exist between `0` and a given upper bound
 ///
-/// * The upper bound can be both inclusive and exclusive
-/// * Used for the LineBuf cursor to enforce the `0 <= cursor < self.buffer.len()` invariant.
+/// * The upper bound can be either inclusive or exclusive
+/// * Used for the `LineBuf` cursor to strictly enforce the `0 <= cursor < self.buffer.len()` invariant.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 pub struct ClampedUsize {
 	value: usize,
 	max: usize,
@@ -334,6 +344,37 @@ impl ClampedUsize {
 	}
 }
 
+/// The central buffer and state manager for `vicut`'s editing logic.
+///
+/// `LineBuf` operates entirely on **grapheme clusters** (not `char`s or byte offsets),
+/// allowing it to handle complex Unicode text safely and predictably.
+///
+/// ### Internals
+/// - `buffer`: The raw text.
+/// - `grapheme_indices`: Cached start byte indices for each grapheme cluster.
+///   - Set to `None` when edits occur; lazily recomputed on demand.
+/// - `cursor`: Points to a grapheme index in the buffer.
+///
+/// ### Selections and Motion
+/// - `select_mode` and `select_range`: Represent active selections.
+/// - `last_selection`: Stores the most recent selection span.
+/// - `saved_col`: Used for vertical motion and visual alignment.
+///
+/// ### Command History
+/// - `last_pattern_search`: Most recent `/pattern` used.
+/// - `last_substitution`: Stores the last `:s` command and flags.
+/// - `last_global`: Stores the last global command (`:g`, `:v`, etc).
+///
+/// ### Insert Mode
+/// - `insert_mode_start_pos`: Marks where insert mode began (for `.`, undo).
+///
+/// ### Undo/Redo
+/// - `undo_stack` / `redo_stack`: Hold `Edit` entries representing mutations.
+///
+/// ### Notes
+/// Slicing, motion, and indexing are always performed using grapheme indices,
+/// with utility methods handling conversion to/from byte offsets internally.
+/// This design ensures high-level methods remain boundary-safe and Unicode-aware.
 #[derive(Default,Debug)]
 pub struct LineBuf {
 	pub buffer: String,
@@ -367,6 +408,7 @@ impl LineBuf {
 			self.update_graphemes();
 		}
 	}
+	/// Set the initial state of the editor
 	pub fn with_initial(mut self, buffer: String, cursor: usize) -> Self {
 		self.buffer = buffer;
 		self.update_graphemes();
@@ -819,6 +861,13 @@ impl LineBuf {
 
 		Some((start, end))
 	}
+	/// Compare the old and new buffers, and update the undo stack
+	///
+	/// This function is called whenever the buffer is edited.
+	/// It compares the old and new buffers, and updates the undo stack accordingly.
+	///
+	/// If the edit is merging, it will try to merge the edit into the last edit in the undo stack.
+	/// If the edit is not merging, it will push the edit to the undo stack.
 	pub fn handle_edit(&mut self, old: String, new: String, curs_pos: usize) {
 		let edit_is_merging = self.undo_stack.last().is_some_and(|edit| edit.merging);
 		if edit_is_merging {
@@ -845,6 +894,7 @@ impl LineBuf {
 		}
 	}
 
+	/// Check if a character is a word boundary
 	pub fn is_word_bound(&mut self, pos: usize, word: Word, dir: Direction) -> bool {
 		let clamped_pos = ClampedUsize::new(pos, self.cursor.max, true);
 		let cur_char = self.grapheme_at(clamped_pos.get()).map(|c| c.to_string()).unwrap();
@@ -925,6 +975,10 @@ impl LineBuf {
 			}
 		}
 	}
+	/// Get the span of the current `sentence`
+	///
+	/// A sentence is defined as a "sequence of characters with punctuation at the end, followed by any number of closing delimiters, followed by whitespace, which is itself followed by non-whitespace"
+	/// Thanks vim!
 	pub fn text_obj_sentence(&mut self, start_pos: usize, count: usize, bound: Bound) -> Option<(usize, usize)> {
 		let mut start = None;
 		let mut end = None;
@@ -962,10 +1016,9 @@ impl LineBuf {
 
 		Some((start,end))
 	}
-
-
-
-
+	/// Get the span of the current `paragraph`
+	///
+	/// A paragraph is a block of text delimited by empty lines.
 	pub fn text_obj_paragraph(&mut self, start_pos: usize, count: usize, bound: Bound) -> Option<(usize, usize)> {
 		// FIXME: This is a pretty naive approach
 		let mut start = None;
@@ -1016,6 +1069,7 @@ impl LineBuf {
 		}
 		Some((start,end))
 	}
+	/// Get the span of the next delimited block in this line
 	pub fn text_obj_delim(&mut self, count: usize, text_obj: TextObj, bound: Bound) -> Option<(usize,usize)> {
 		let mut backward_indices = (0..self.cursor.get()).rev();
 		let (opener,closer) = match text_obj {

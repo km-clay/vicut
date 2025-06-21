@@ -1,17 +1,26 @@
+//! This module contains logic for emulation of Vim's registers feature.
+//!
+//! It contains the `Registers` struct, which is held in a thread local, global variable.
 use std::cell::RefCell;
 
 thread_local! {
+	/// The global state for all registers.
+	///
+	/// This variable is thread local, so it can be freely mutated.
 	pub static REGISTERS: RefCell<Registers> = const { RefCell::new(Registers::new()) };
 }
 
+/// Attempt to read from the register corresponding to the given character
 pub fn read_register(ch: Option<char>) -> Option<String> {
 	REGISTERS.with_borrow(|regs| regs.get_reg(ch).map(|r| r.buf().clone()))
 }
 
+/// Attempt to write to the register corresponding to the given character
 pub fn write_register(ch: Option<char>, buf: String, is_whole_line: bool) {
 	REGISTERS.with_borrow_mut(|regs| if let Some(r) = regs.get_reg_mut(ch) { r.write(buf); r.set_is_whole_line(is_whole_line); })
 }
 
+/// Attempt to append text to the register corresponding to the given character
 pub fn append_register(ch: Option<char>, buf: String) {
 	REGISTERS.with_borrow_mut(|regs| if let Some(r) = regs.get_reg_mut(ch) { r.append(buf) })
 }
@@ -49,7 +58,9 @@ pub struct Registers {
 
 impl Registers {
 	pub const fn new() -> Self {
-		// default() isn't constant :(
+		// Wish I could use Self::default() here
+		// but Default::default() is not a const fn
+		// So here we go
 		Self {
 			default: Register::new(),
 			a: Register::new(),
@@ -80,6 +91,7 @@ impl Registers {
 			z: Register::new(),
 		}
 	}
+	/// Get a register by name. Read only.
 	pub fn get_reg(&self, ch: Option<char>) -> Option<&Register> {
 		let Some(ch) = ch else {
 			return Some(&self.default)
@@ -114,6 +126,7 @@ impl Registers {
 			_ => None
 		}
 	}
+	/// Get a mutable reference to a register by name.
 	pub fn get_reg_mut(&mut self, ch: Option<char>) -> Option<&mut Register> {
 		let Some(ch) = ch else {
 			return Some(&mut self.default)
@@ -150,6 +163,10 @@ impl Registers {
 	}
 }
 
+/// A single register.
+///
+/// The `is_whole_line` field is flipped to `true` when you do something like `dd` to delete an entire line
+/// If content is `put` from the register, behavior changes depending on this field.
 #[derive(Clone,Default,Debug)]
 pub struct Register {
 	content: String,

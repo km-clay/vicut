@@ -1,130 +1,114 @@
-use crate::tests::{vicut_integration, LOREM_IPSUM, LOREM_IPSUM_MULTILINE};
+use crate::tests::{vicut_integration, LOREM_IPSUM_MULTILINE};
 
 use super::*;
-
-fn normal_mode_motion_and_verb0() {
-	vicut_integration(
-
-		LOREM_IPSUM_MULTILINE,
-		&[
-		"-m", "2j8w",
-		],
-"Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
-Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.
-Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.
-Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
-Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, turpis et commodo pharetra.",
-	);
-}
-
 
 /*
  * Verbs:
  gv
- g~ 
- gu 
+ g~
+ gu
  gU
- g? 
- .  
- x  
- X  
- s  
- S  
- p  
- P  
- >  
- <  
- :  
- /  
- ?  
- r  
- R  
- ~  
- u  
- v  
- V  
- o  
- O  
- a  
- A  
- i  
- I  
- J  
- y  
- d  
- c  
- Y  
- D  
- C  
- =  
+ g?
+ .
+ x
+ X
+ s
+ S
+ p
+ P
+ >
+ <
+ :
+ /
+ ?
+ r
+ R
+ ~
+ u
+ v
+ V
+ o
+ O
+ a
+ A
+ i
+ I
+ J
+ y
+ d
+ c
+ Y
+ D
+ C
+ =
  */
 
 /*
  * Motions:
  Doubled verbs for whole line motion
- b 
- B 
- f 
- F 
- t 
- T 
- n 
- N 
- % 
- G 
- ; 
- , 
- | 
- ^ 
- 0 
- $ 
- k 
- j 
- h 
- l 
- w 
- W 
- e 
- E 
- v 
- V 
+ b
+ B
+ f
+ F
+ t
+ T
+ n
+ N
+ %
+ G
+ ;
+ ,
+ |
+ ^
+ 0
+ $
+ k
+ j
+ h
+ l
+ w
+ W
+ e
+ E
+ v
+ V
  ])
  ]}
  [)
  [}
- ) 
- ( 
- } 
- { 
- iw 
- aw 
- iW 
- aW 
- is 
- as 
- ip 
- ap 
- i" 
- a" 
+ )
+ (
+ }
+ {
+ iw
+ aw
+ iW
+ aW
+ is
+ as
+ ip
+ ap
+ i"
+ a"
  i'
  a'
- i` 
- a` 
- i) 
- a) 
- i} 
- a} 
+ i`
+ a`
+ i)
+ a)
+ i}
+ a}
  i]
  a]
- i> 
- a> 
- gg 
- ge 
- gE 
- gk 
- gj 
- g_ 
- g0 
+ i>
+ a>
+ gg
+ ge
+ gE
+ gk
+ gj
+ g_
+ g0
  g^
  */
 
@@ -182,7 +166,7 @@ fn start_of_prev_word() {
 	);
 }
 
- //f 
+ //f
 
  #[test]
 fn normal_rot13_findchar() {
@@ -206,7 +190,7 @@ Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, tur
 	);
 }
 
- //F 
+ //F
 
  #[test]
 fn normal_to_upper_findcharrev() {
@@ -231,7 +215,7 @@ Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, tur
 }
 
 
- //t 
+ //t
 
  #[test]
 fn normal_togglecase_tochar() {
@@ -255,7 +239,7 @@ Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, tur
 	);
 }
 
- //T 
+ //T
 
  #[test]
 fn normal_delete_tocharrev() {
@@ -279,7 +263,7 @@ Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, tur
 	);
 }
 
- //n 
+ //n
 
  #[test]
 fn normal_delete_to_next_match() {
@@ -300,7 +284,7 @@ Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deseru
 Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, turpis et commodo pharetra.",
 	);
 }
- //N 
+ //N
 
  #[test]
 fn normal_prev_match() {
@@ -321,7 +305,7 @@ Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliqu
 Duis aute irure dolor in reprehenderit in voluptate .",
 	);
 }
- //% 
+ //%
 
  #[test]
 fn normal_matching_delim() {
@@ -344,7 +328,7 @@ Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deseru
 Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, turpis et commodo pharetra.",
 	);
 }
- //G 
+ //G
 
  #[test]
 fn normal_end_of_buffer() {
@@ -365,7 +349,7 @@ Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliqu
 Duis aute irure dolor in reprehenderit in voluptate ",
 	);
 }
- //; 
+ //;
 
 #[test]
 fn normal_search_repeat() {
@@ -388,7 +372,7 @@ Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deseru
 Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, turpis et commodo pharetra.",
 	);
 }
- //, 
+ //,
 
  #[test]
 fn normal_search_repeat_rev() {
@@ -411,7 +395,7 @@ Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deseru
 Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, turpis et commodo pharetra.",
 	);
 }
- //| 
+ //|
 
  #[test]
 fn normal_to_column() {
@@ -434,7 +418,7 @@ Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deseru
 Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, turpis et commodo pharetra.",
 	);
 }
- //^ 
+ //^
 
  #[test]
 fn normal_to_first_non_whitespace() {
@@ -457,7 +441,7 @@ Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deseru
 Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, turpis et commodo pharetra.",
 	);
 }
- //0 
+ //0
 
  #[test]
 fn normal_to_start_of_line() {
@@ -480,7 +464,7 @@ Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deseru
 Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, turpis et commodo pharetra.",
 	);
 }
- //$ 
+ //$
 
  #[test]
 fn normal_to_end_of_line() {
@@ -503,7 +487,7 @@ Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deseru
 Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, turpis et commodo pharetra.",
 	);
 }
- //k 
+ //k
 
  #[test]
 fn normal_up_line() {
@@ -524,7 +508,7 @@ Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deseru
 Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, turpis et commodo pharetra.",
 	);
 }
- //j 
+ //j
 
  #[test]
 fn normal_down_line() {
@@ -545,7 +529,7 @@ Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliqu
 Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, turpis et commodo pharetra.",
 	);
 }
- //h 
+ //h
 
  #[test]
 fn normal_backward_char() {
@@ -568,7 +552,7 @@ Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deseru
 Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, turpis et commodo pharetra.",
 	);
 }
- //l 
+ //l
 
  #[test]
 fn normal_forward_char() {
@@ -586,7 +570,7 @@ Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deseru
 Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, turpis et commodo pharetra.",
 	);
 }
- //v 
+ //v
 
  #[test]
 fn normal_visual_selection() {
@@ -656,7 +640,7 @@ fn normal_to_unmatched_brace_rev() {
 		"This text inside} of braces"
 	);
 }
- //) 
+ //)
 
  #[test]
 fn normal_sentence_forward() {
@@ -674,7 +658,7 @@ Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deseru
 Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, turpis et commodo pharetra.",
 	);
 }
- //( 
+ //(
 
 	 #[test]
 fn normal_sentence_backward() {
@@ -692,7 +676,7 @@ Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deseru
 Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, turpis et commodo pharetra.",
 	);
 }
- //} 
+ //}
 
 #[test]
 #[ignore]
@@ -713,7 +697,7 @@ Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, tur
 "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
 Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.
 
-Duis aute irure dolor in reprehenderit in voluptate 
+Duis aute irure dolor in reprehenderit in voluptate
 
 Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, turpis et commodo pharetra.",
 	);

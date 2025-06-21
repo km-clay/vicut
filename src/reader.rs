@@ -1,11 +1,22 @@
+//! This module contains the logic for converting command strings like 'di)' into key events.
+//!
+//! The main driver of this logic is the `RawReader` struct, which implements the `KeyReader` trait.
+//!
 use std::collections::VecDeque;
 
 use crate::keys::{KeyCode, KeyEvent, ModKeys};
 
+/// Structs implementing this trait can be used to produce KeyEvents.
+/// Having this as a trait leaves us open to implementing different input methods in the future.
+/// An interactive mode perhaps?
 pub trait KeyReader {
 	fn read_key(&mut self) -> Option<KeyEvent>;
 }
 
+/// Struct for reading raw command input strings.
+///
+/// `RawReader`'s main job is to read a command string like 'd2w' and convert it into KeyEvents
+/// KeyEvents are the tokens that our mode structs use to parse new Vim commands.
 #[derive(Default,Debug)]
 pub struct RawReader {
 	pub bytes: VecDeque<u8>,
@@ -42,6 +53,7 @@ impl RawReader {
 		}
 	}
 
+	/// Parse an escape sequence
 	pub fn parse_esc_seq(&mut self) -> Option<KeyEvent> {
 		let mut seq = vec![0x1b];
 		let b1 = self.bytes.pop_front()?;
@@ -117,6 +129,9 @@ impl RawReader {
 			_ => Some(KeyEvent(KeyCode::Esc, ModKeys::empty())),
 		}
 	}
+	/// Parse a byte alias
+	///
+	/// This is where aliases like `<esc>` and `<CR>` are parsed into KeyEvents
 	pub fn parse_byte_alias(&mut self) -> Option<KeyEvent> {
 		let mut buf = vec![];
 		let mut byte_iter = self.bytes.iter().copied();
@@ -196,6 +211,7 @@ impl RawReader {
 }
 
 impl KeyReader for RawReader {
+	/// Read a single KeyEvent from the internal byte deque.
 	fn read_key(&mut self) -> Option<KeyEvent> {
 		use core::str;
 

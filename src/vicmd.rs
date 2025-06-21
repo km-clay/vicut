@@ -1,3 +1,7 @@
+//! Logic describing Vim commands is held here.
+//!
+//! Parsing happens in the `modes` module. This module just holds the structs and enums.
+//! ViCmd is described in this module, and is probably *the single most load-bearing struct in the codebase*.
 use std::path::PathBuf;
 
 use bitflags::bitflags;
@@ -73,12 +77,22 @@ bitflags! {
 	}
 }
 
+/// A Vim Command
+///
+/// ## Fields
+/// `register`: The register to use for yank/delete/change/put.
+/// `verb`: The verb to execute, if any.
+/// `motion`: The motion to execute, if any.
+/// `raw_seq`: The raw sequence of characters that produced this ViCmd.
+/// `flags`: Bitflags which alter the execution properties of the command.
+///
+/// Used extensively throughout the `exec`, `modes`, and `linebuf` modules.
 #[derive(Clone,Default,Debug,PartialEq)]
 pub struct ViCmd {
 	pub register: RegisterName,
 	pub verb: Option<VerbCmd>,
 	pub motion: Option<MotionCmd>,
-	pub raw_seq: String, 
+	pub raw_seq: String,
 	pub flags: CmdFlags,
 }
 
@@ -104,6 +118,9 @@ impl ViCmd {
 	pub fn motion_count(&self) -> usize {
 		self.motion.as_ref().map(|m| m.0).unwrap_or(1)
 	}
+	/// Combine verb and motion counts
+	///
+	/// This makes things easier to execute later. This is always executed when a ViCmd is parsed.
 	pub fn normalize_counts(&mut self) {
 		let Some(verb) = self.verb.as_mut() else { return };
 		let Some(motion) = self.motion.as_mut() else { return };
@@ -143,7 +160,7 @@ impl ViCmd {
 	}
 	pub fn is_line_motion(&self) -> bool {
 		self.motion.as_ref().is_some_and(|m| {
-			matches!(m.1, 
+			matches!(m.1,
 				Motion::LineUp |
 				Motion::LineDown |
 				Motion::LineUpCharwise |
@@ -163,7 +180,7 @@ impl ViCmd {
 	}
 	pub fn is_mode_transition(&self) -> bool {
 		self.verb.as_ref().is_some_and(|v| {
-			matches!(v.1, 
+			matches!(v.1,
 				Verb::Change |
 				Verb::InsertMode |
 				Verb::ExMode |
@@ -178,8 +195,10 @@ impl ViCmd {
 	}
 }
 
+/// A count, and a `Verb`
 #[derive(Clone,Debug,PartialEq)]
 pub struct VerbCmd(pub usize,pub Verb);
+/// A count, and a `Motion`
 #[derive(Clone,Debug,PartialEq)]
 pub struct MotionCmd(pub usize,pub Motion);
 
@@ -196,13 +215,16 @@ impl MotionCmd {
 	}
 }
 
+/// Vim operators
+///
+/// This enum contains all of the currently supported Vim operators. These are parsed in `modes`, and executed in `linebuf`
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Verb {
 	Delete,
 	Change,
 	Yank,
-	Rot13, // lol
+	Rot13,
 	ReplaceChar(char), // char to replace with, number of chars to replace
 	ReplaceCharInplace(char,u16), // char to replace with, number of chars to replace
 	ToggleCaseInplace(u16), // Number of chars to toggle
@@ -288,7 +310,7 @@ impl Verb {
 		)
 	}
 	pub fn is_char_insert(&self) -> bool {
-		matches!(self, 
+		matches!(self,
 			Self::Change |
 			Self::InsertChar(_) |
 			Self::ReplaceChar(_) |
@@ -297,6 +319,9 @@ impl Verb {
 	}
 }
 
+/// Vim motions
+///
+/// This enum contains all of the currently supported Vim motions. These are parsed in `modes`, and executed in `linebuf`
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Motion {
 	WholeLine,
@@ -312,26 +337,22 @@ pub enum Motion {
 	LineRange(LineAddr,LineAddr), // x,y
 	PatternSearch(String),
 	PatternSearchRev(String),
-	Global(Box<Motion>,String), // Motion should always be 'Line' or 'LineRange'
-	NotGlobal(Box<Motion>,String), // Motion should always be 'Line' or 'LineRange'
+	/// The first field should *always* be `Line(_)` or `LineRange(_,_)`
+	Global(Box<Motion>,String),
+	/// The first field should *always* be `Line(_)` or `LineRange(_,_)`
+	NotGlobal(Box<Motion>,String),
 	NextMatch,
 	PrevMatch,
 	BackwardChar,
 	ForwardChar,
-	BackwardCharForced, // These two variants can cross line boundaries
+	/// Can cross line boundaries
+	BackwardCharForced,
+	/// Can cross line boundaries
 	ForwardCharForced,
 	LineUp,
-	LineUpCharwise,
-	ScreenLineUp,
-	ScreenLineUpCharwise,
 	LineDown,
+	LineUpCharwise,
 	LineDownCharwise,
-	ScreenLineDown, 
-	ScreenLineDownCharwise, 
-	BeginningOfScreenLine,
-	FirstGraphicalOnScreenLine,
-	HalfOfScreen,
-	HalfOfScreenLineText,
 	WholeBuffer,
 	BeginningOfBuffer,
 	EndOfBuffer,
@@ -343,26 +364,20 @@ pub enum Motion {
 	Range(usize,usize),
 	RepeatMotion,
 	RepeatMotionRev,
+
+	// TODO: Not sure how to implement these in a non-interactive way...
+	ScreenLineUp,
+	ScreenLineUpCharwise,
+	ScreenLineDown,
+	ScreenLineDownCharwise,
+	BeginningOfScreenLine,
+	FirstGraphicalOnScreenLine,
+	HalfOfScreen,
+	HalfOfScreenLineText,
 	Null
 }
 
-#[derive(Clone,Copy,PartialEq,Eq,Debug)]
-pub enum MotionBehavior {
-	Exclusive,
-	Inclusive,
-	Linewise
-}
-
 impl Motion {
-	pub fn behavior(&self) -> MotionBehavior {
-		if self.is_linewise() {
-			MotionBehavior::Linewise
-		} else if self.is_exclusive() {
-			MotionBehavior::Exclusive
-		} else {
-			MotionBehavior::Inclusive
-		}
-	}
 	pub fn is_exclusive(&self) -> bool {
 		matches!(&self,
 			Self::BeginningOfLine |
@@ -397,11 +412,18 @@ impl Motion {
 	}
 }
 
+/// Apply a verb before, or after the target
+///
+/// Used with stuff like `put` to choose where to perform the action
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Anchor {
 	After,
 	Before
 }
+
+/// Vim Text Objects
+///
+/// Used with Motion::TextObj(_)
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum TextObj {
 	/// `iw`, `aw` — inner word, around word
@@ -432,19 +454,28 @@ pub enum TextObj {
 	/// `i<`, `a<`
 	Angle(Bound),
 
-	/// `it`, `at` — HTML/XML tags 
+	/// `it`, `at` — HTML/XML tags
 	Tag(Bound),
 
 	/// Custom user-defined objects maybe?
 	Custom(char),
 }
 
+/// The source to read from for ex mode's `:r`
+///
+/// * `:r <FILE>` -> ReadSrc::File(_)
+/// * `:r !<COMMAND>` -> ReadSrc::Cmd(_)
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ReadSrc {
 	File(PathBuf),
 	Cmd(String)
 }
 
+/// The target for ex mode's `:w`
+///
+/// * `:w <FILE>` -> WriteDest::File(_)
+/// * `:w >> <FILE>` -> WriteDest::FileAppend(_)
+/// * `:w !<COMMAND>` -> WriteDest::Cmd(_)
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum WriteDest {
 	File(PathBuf),
@@ -452,6 +483,7 @@ pub enum WriteDest {
 	Cmd(String),
 }
 
+/// Line Addresses used by ex mode
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum LineAddr {
 	Number(usize),
@@ -462,17 +494,30 @@ pub enum LineAddr {
 	PatternRev(String),
 }
 
+/// Word sizes for motions like 'w' and 'B'
+///
+/// `Word::Big` counts any span of non-whitespace characters as a word
+/// `Word::Normal` counts a non-whitespace span of similar characters as a word
+/// a span of alphanumeric characters is a `Word::Normal,` and a span of symbols is a `Word::Normal`
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Word {
 	Big,
 	Normal
 }
+
+/// Text Object bounds
+///
+/// Whether to take the inside of a text object or the entire thing
+/// For instance, 'di)' uses Bound::Inside, so `d` will only delete inside the parenthesis
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum Bound {
 	Inside,
 	Around
 }
 
+/// Motion Direction
+///
+/// Used mainly for Motions, but is also repurposed in some places where direction matters for the logic
 #[derive(Default, Debug, Clone, Copy, Eq, PartialEq)]
 pub enum Direction {
 	#[default]
@@ -480,13 +525,20 @@ pub enum Direction {
 	Backward
 }
 
+/// Target destination for Char search motions
+///
+/// `t` uses Dest::Before
+/// `f` uses Dest::On
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum Dest {
 	On,
 	Before,
-	After
 }
 
+/// Target destination for Word motions
+///
+/// `To::Start` attempts to move to the start of a Word
+/// `To::End` attempts to move to the end of a Word
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum To {
 	Start,

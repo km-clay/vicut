@@ -1,13 +1,20 @@
+//! Logic describing key presses is held here.
+//!
+//! Credit to Rustyline for the design ideas in this module
+//! https://github.com/kkawakam/rustyline
+
 use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 
-// Credit to Rustyline for the design ideas in this module
-// https://github.com/kkawakam/rustyline
+/// A single key event.
+///
+/// Contains the key itself, along with mod keys like Shift and Ctrl
 #[derive(Clone,PartialEq,Eq,Debug)]
 pub struct KeyEvent(pub KeyCode, pub ModKeys);
 
 
 impl KeyEvent {
+	/// Parse a new KeyEvent
 	pub fn new(ch: &str, mut mods: ModKeys) -> Self {
 		use {KeyCode as K, KeyEvent as E, ModKeys as M};
 
@@ -92,6 +99,7 @@ impl KeyEvent {
 	}
 }
 
+/// Key codes describing different keyboard inputs.
 #[derive(Clone,PartialEq,Eq,Debug)]
 pub enum KeyCode {
     UnknownEscSeq,
@@ -119,6 +127,7 @@ pub enum KeyCode {
 }
 
 bitflags::bitflags! {
+	/// Mod keys like Ctrl,Alt, and Shift.
 	#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 	pub struct ModKeys: u8 {
 		/// Control modifier
