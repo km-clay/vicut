@@ -74,12 +74,12 @@ fn backspace_and_delete() {
 #[test]
 fn end_of_line_motion_boundary() {
 	vicut_integration(
-		"foo bar", 
+		"foo bar",
 		&[
 			"-m", "$",
 			"-m", "i<right>",
 			"-c", "b"
-		], 
+		],
 		"bar"
 	);
 }
@@ -87,11 +87,11 @@ fn end_of_line_motion_boundary() {
 #[test]
 fn prefix_insert() {
 	vicut_integration(
-		"    foo bar", 
+		"    foo bar",
 		&[
 			"-m", "$",
 			"-m", "Iinserting some text at the start"
-		], 
+		],
 		"    inserting some text at the startfoo bar"
 	);
 }
@@ -99,10 +99,10 @@ fn prefix_insert() {
 #[test]
 fn insert_unicode() {
 	vicut_integration(
-		"foo", 
+		"foo",
 		&[
 			"-m", "ea→bar",
-		], 
+		],
 		"foo→bar"
 	);
 }
@@ -110,10 +110,10 @@ fn insert_unicode() {
 #[test]
 fn insert_in_empty_line() {
 	vicut_integration(
-		"foo\n\nbiz", 
+		"foo\n\nbiz",
 		&[
 			"-m", "jibar",
-		], 
+		],
 		"foo\nbar\nbiz"
 	);
 }
@@ -121,17 +121,17 @@ fn insert_in_empty_line() {
 #[test]
 fn insert_from_visual_mode() {
 	vicut_integration(
-		"foo biz bar", 
+		"foo biz bar",
 		&[
 			"-m", "wveIinserting some text",
-		], 
+		],
 		"inserting some textfoo biz bar"
 	);
 	vicut_integration(
-		"foo biz bar", 
+		"foo biz bar",
 		&[
 			"-m", "wveAinserting some text",
-		], 
+		],
 		"foo bizinserting some text bar"
 	);
 }

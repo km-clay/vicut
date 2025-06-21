@@ -11,17 +11,17 @@ thread_local! {
 }
 
 /// Attempt to read from the register corresponding to the given character
-pub fn read_register(ch: Option<char>) -> Option<String> {
-	REGISTERS.with_borrow(|regs| regs.get_reg(ch).map(|r| r.buf().clone()))
+pub fn read_register(ch: Option<char>) -> Option<RegisterContent> {
+	REGISTERS.with_borrow(|regs| regs.get_reg(ch).map(|r| r.content().clone()))
 }
 
 /// Attempt to write to the register corresponding to the given character
-pub fn write_register(ch: Option<char>, buf: String, is_whole_line: bool) {
-	REGISTERS.with_borrow_mut(|regs| if let Some(r) = regs.get_reg_mut(ch) { r.write(buf); r.set_is_whole_line(is_whole_line); })
+pub fn write_register(ch: Option<char>, buf: RegisterContent) {
+	REGISTERS.with_borrow_mut(|regs| if let Some(r) = regs.get_reg_mut(ch) { r.write(buf); })
 }
 
 /// Attempt to append text to the register corresponding to the given character
-pub fn append_register(ch: Option<char>, buf: String) {
+pub fn append_register(ch: Option<char>, buf: RegisterContent) {
 	REGISTERS.with_borrow_mut(|regs| if let Some(r) = regs.get_reg_mut(ch) { r.append(buf) })
 }
 
@@ -163,38 +163,88 @@ impl Registers {
 	}
 }
 
+#[derive(Default,Clone,Debug)]
+pub enum RegisterContent {
+	Span(String),
+	Line(String),
+	Block(Vec<String>),
+	#[default]
+	Empty
+}
+
+impl RegisterContent {
+	pub fn clear(&mut self) {
+		match self {
+			Self::Span(s) => s.clear(),
+			Self::Line(s) => s.clear(),
+			Self::Block(v) => v.clear(),
+			Self::Empty => {}
+		}
+	}
+	pub fn len(&self) -> usize {
+		match self {
+			Self::Span(s) => s.len(),
+			Self::Line(s) => s.len(),
+			Self::Block(v) => v.len(),
+			Self::Empty => 0
+		}
+	}
+}
+
 /// A single register.
 ///
 /// The `is_whole_line` field is flipped to `true` when you do something like `dd` to delete an entire line
 /// If content is `put` from the register, behavior changes depending on this field.
 #[derive(Clone,Default,Debug)]
 pub struct Register {
-	content: String,
-	is_whole_line: bool
+	content: RegisterContent,
 }
 impl Register {
 	pub const fn new() -> Self {
 		Self {
-			content: String::new(),
-			is_whole_line: false
+			content: RegisterContent::Span(String::new()),
 		}
 	}
-	pub fn buf(&self) -> &String {
+	pub fn content(&self) -> &RegisterContent {
 		&self.content
 	}
-	pub fn write(&mut self, buf: String) {
+	pub fn write(&mut self, buf: RegisterContent) {
 		self.content = buf
 	}
-	pub fn append(&mut self, buf: String) {
-		self.content.push_str(&buf)
+	pub fn append(&mut self, buf: RegisterContent) {
+		match buf {
+			RegisterContent::Empty => return,
+			RegisterContent::Span(ref s) |
+			RegisterContent::Line(ref s) => {
+				match &mut self.content {
+					RegisterContent::Empty => self.content = buf,
+					RegisterContent::Span(existing) => existing.push_str(&s),
+					RegisterContent::Line(existing) => existing.push_str(&s),
+					RegisterContent::Block(_) => {
+						self.content = buf
+					}
+				}
+			}
+			RegisterContent::Block(v) => {
+				match &mut self.content {
+					RegisterContent::Block(existing) => existing.extend(v),
+					_ => {
+						self.content = RegisterContent::Block(v);
+					}
+				}
+			}
+		}
 	}
 	pub fn clear(&mut self) {
 		self.content.clear()
 	}
-	pub fn is_whole_line(&self) -> bool {
-		self.is_whole_line
+	pub fn is_line(&self) -> bool {
+		matches!(self.content, RegisterContent::Line(_))
 	}
-	pub fn set_is_whole_line(&mut self, yn: bool) {
-		self.is_whole_line = yn;
+	pub fn is_block(&self) -> bool {
+		matches!(self.content, RegisterContent::Block(_))
+	}
+	pub fn is_span(&self) -> bool {
+		matches!(self.content, RegisterContent::Span(_))
 	}
 }

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use bitflags::bitflags;
 
-use crate::{modes::ex::SubFlags, register::REGISTERS};
+use crate::{linebuf::SelectRange, modes::ex::SubFlags, register::{RegisterContent, REGISTERS}};
 
 use super::register::{append_register, read_register, write_register};
 
@@ -42,17 +42,23 @@ impl RegisterName {
 	pub fn count(&self) -> usize {
 		self.count
 	}
-	pub fn is_whole_line(&self) -> bool {
-		REGISTERS.with_borrow(|reg| reg.get_reg(self.name).is_some_and(|r| r.is_whole_line()))
+	pub fn is_line(&self) -> bool {
+		REGISTERS.with_borrow(|reg| reg.get_reg(self.name).is_some_and(|r| r.is_line()))
 	}
-	pub fn write_to_register(&self, buf: String, is_whole_line: bool) {
+	pub fn is_block(&self) -> bool {
+		REGISTERS.with_borrow(|reg| reg.get_reg(self.name).is_some_and(|r| r.is_block()))
+	}
+	pub fn is_span(&self) -> bool {
+		REGISTERS.with_borrow(|reg| reg.get_reg(self.name).is_some_and(|r| r.is_span()))
+	}
+	pub fn write_to_register(&self, buf: RegisterContent) {
 		if self.append {
 			append_register(self.name, buf);
 		} else {
-			write_register(self.name, buf,is_whole_line);
+			write_register(self.name, buf);
 		}
 	}
-	pub fn read_from_register(&self) -> Option<String> {
+	pub fn read_from_register(&self) -> Option<RegisterContent> {
 		read_register(self.name)
 	}
 }
@@ -190,7 +196,7 @@ impl ViCmd {
 				Verb::VisualModeSelectLast |
 				Verb::VisualMode |
 				Verb::VisualModeLine |
-				// Verb::VisualModeBlock | not implemented yet
+				Verb::VisualModeBlock |
 				Verb::ReplaceMode
 			)
 		})
@@ -254,7 +260,7 @@ pub enum Verb {
 	NormalMode,
 	VisualMode,
 	VisualModeLine,
-	VisualModeBlock, // dont even know if im going to implement this, really hard to use without a user interface
+	VisualModeBlock,
 	VisualModeSelectLast,
 	SwapVisualAnchor,
 	JoinLines,
@@ -363,7 +369,7 @@ pub enum Motion {
 	ToBrace(Direction),
 	ToBracket(Direction),
 	ToParen(Direction),
-	Range(usize,usize),
+	Range(SelectRange),
 	RepeatMotion,
 	RepeatMotionRev,
 
@@ -400,7 +406,7 @@ impl Motion {
 			Self::ToParen(_) |
 			Self::ScreenLineDown |
 			Self::ScreenLineUp |
-			Self::Range(_, _)
+			Self::Range(_)
 		)
 	}
 	pub fn is_linewise(&self) -> bool {

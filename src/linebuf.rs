@@ -12,6 +12,7 @@ use regex::Regex;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::register::RegisterContent;
 use crate::{modes::ex::SubFlags, vicmd::{LineAddr, ReadSrc, WriteDest}};
 
 use super::vicmd::{Anchor, Bound, CmdFlags, Dest, Direction, Motion, MotionCmd, RegisterName, TextObj, To, Verb, ViCmd, Word};
@@ -122,6 +123,12 @@ fn is_other_class_or_is_ws(a: &str, b: &str) -> bool {
 	}
 }
 
+#[derive(Clone,PartialEq,Eq,Debug)]
+pub enum SelectRange {
+	OneDim((usize,usize)), // (start,end)
+	TwoDim(Vec<(usize,usize)>), // (start,end) pairs
+}
+
 /// The side of the selection that is anchored in place.
 ///
 /// Start means the anchor is on the left side of the selection,
@@ -139,7 +146,9 @@ pub enum SelectAnchor {
 pub enum SelectMode {
 	Char(SelectAnchor),
 	Line(SelectAnchor),
-	Block(SelectAnchor),
+	// Block select is weird, we can't just swap to the other side of the selection
+	// We have to calculate the anchor position and the column offset
+	Block { anchor: SelectAnchor, anchor_pos: usize }
 }
 
 impl SelectMode {
@@ -147,21 +156,21 @@ impl SelectMode {
 		match self {
 			SelectMode::Char(a) |
 			SelectMode::Line(a) |
-			SelectMode::Block(a) => *a = anchor
+			SelectMode::Block{ anchor: a, .. } => *a = anchor
 		}
 	}
 	pub fn anchor(&self) -> &SelectAnchor {
 		match self {
 			SelectMode::Char(anchor) |
 				SelectMode::Line(anchor) |
-				SelectMode::Block(anchor) => anchor
+				SelectMode::Block{ anchor, .. } => anchor
 		}
 	}
 	pub fn invert_anchor(&mut self) {
 		match self {
 			SelectMode::Char(anchor) |
 				SelectMode::Line(anchor) |
-				SelectMode::Block(anchor) => {
+				SelectMode::Block{ anchor, .. } => {
 					*anchor = match anchor {
 						SelectAnchor::End => SelectAnchor::Start,
 						SelectAnchor::Start => SelectAnchor::End
@@ -187,6 +196,7 @@ pub enum MotionKind {
 	/// A range between a start and end line
 	LineRange(usize,usize),
 
+	BlockRange(Vec<(usize,usize)>), // Windows of lines
 	// Used for linewise operations like 'dj', left is the selected range, right is the cursor's new position on the line
 	InclusiveWithTargetCol((usize,usize),usize),
 	ExclusiveWithTargetCol((usize,usize),usize),
@@ -200,15 +210,24 @@ impl MotionKind {
 	pub fn exclusive(range: Range<usize>) -> Self {
 		Self::Exclusive((range.start,range.end))
 	}
+	pub fn from_select_range(range: SelectRange) -> Self {
+		match range {
+			SelectRange::OneDim((start,end)) => Self::Inclusive((start,end)),
+			SelectRange::TwoDim(lines) => Self::BlockRange(lines.clone())
+		}
+	}
 }
 
 /// Used for undo/redo logic.
-#[derive(Default,Debug)]
+#[derive(Clone,Default,Debug)]
 pub struct Edit {
 	pub pos: usize,
 	pub cursor_pos: usize,
+	pub merge_pos: usize,
 	pub old: String,
+	pub old_diff: String,
 	pub new: String,
+	pub new_diff: String,
 	pub merging: bool,
 }
 
@@ -227,9 +246,12 @@ impl Edit {
 		if start == a.len() && start == b.len() {
 			return Edit {
 				pos: start,
+				merge_pos: 0,
 				cursor_pos: old_cursor_pos,
-				old: String::new(),
-				new: String::new(),
+				old: a.to_string(),
+				old_diff: String::new(),
+				new: b.to_string(),
+				new_diff: String::new(),
 				merging: false,
 			};
 		}
@@ -244,16 +266,41 @@ impl Edit {
 		}
 
 		// Slice off the prefix and suffix for both (safe because start/end are byte offsets)
-		let old = a[start..end_a].to_string();
-		let new = b[start..end_b].to_string();
+		let old_diff = a[start..end_a].to_string();
+		let new_diff = b[start..end_b].to_string();
 
 		Edit {
 			pos: start,
+			merge_pos: 0,
 			cursor_pos: old_cursor_pos,
-			old,
-			new,
+			old: a.to_string(),
+			old_diff,
+			new: b.to_string(),
+			new_diff,
 			merging: false
 		}
+	}
+	pub fn get_raw_diff(&self) -> String {
+		let old_tail = &self.old[self.pos..];
+		let new_tail = &self.new[self.pos..];
+
+		// Find the common suffix length
+		let mut suffix_len = 0;
+		while suffix_len < old_tail.len()
+			&& suffix_len < new_tail.len()
+			&& old_tail.as_bytes()[old_tail.len() - 1 - suffix_len]
+			== new_tail.as_bytes()[new_tail.len() - 1 - suffix_len]
+			{
+				suffix_len += 1;
+			}
+
+		// The raw diff is the inserted/changed portion of `new`
+		self.new[self.pos..self.new.len() - suffix_len].to_string()
+	}
+	pub fn get_len_delta(&self) -> isize {
+		let old_len = self.old_diff.len() as isize;
+		let new_len = self.new_diff.len() as isize;
+		new_len - old_len
 	}
 	pub fn start_merge(&mut self) {
 		self.merging = true
@@ -274,15 +321,21 @@ impl Edit {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 pub struct ClampedUsize {
 	value: usize,
+	min: usize,
 	max: usize,
 	exclusive: bool
 }
 
 impl ClampedUsize {
 	pub fn new(value: usize, max: usize, exclusive: bool) -> Self {
-		let mut c = Self { value: 0, max, exclusive };
+		let mut c = Self { value: 0, min: 0, max, exclusive };
 		c.set(value);
 		c
+	}
+	pub fn with_min(mut self, min: usize) -> Self {
+		self.min = min;
+		self.set(self.value);
+		self
 	}
 	pub fn get(self) -> usize {
 		self.value
@@ -326,6 +379,20 @@ impl ClampedUsize {
 		self.max = max;
 		self.set(self.get()); // Enforces the new maximum
 	}
+	pub fn add_signed(&mut self, value: isize) {
+		if value < 0 {
+			self.sub(value.unsigned_abs());
+		} else {
+			self.add(value as usize);
+		}
+	}
+	pub fn ret_add_signed(&self, value: isize) -> usize {
+		if value < 0 {
+			self.ret_sub(value.unsigned_abs())
+		} else {
+			self.ret_add(value as usize)
+		}
+	}
 	pub fn add(&mut self, value: usize) {
 		let max = self.upper_bound();
 		self.value = (self.value + value).clamp(0,max)
@@ -350,6 +417,100 @@ impl ClampedUsize {
 	/// Returns the result instead of mutating the inner value
 	pub fn ret_sub(&self, value: usize) -> usize {
 		self.value.saturating_sub(value)
+	}
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct ClampedIsize {
+	value: isize,
+	min: isize,
+	max: isize,
+	exclusive: bool
+}
+
+impl ClampedIsize {
+	pub fn new(value: isize, min: isize, max: isize, exclusive: bool) -> Self {
+		let mut c = Self { value: 0, min, max, exclusive };
+		c.set(value);
+		c
+	}
+	/// Create a new `ClampedIsize` from a `ClampedUsize`
+	///
+	/// The `value` of the newly created `ClampedIsize` will be 0
+	/// and `min` and `max` will be replaced by the offset of the `ClampedUsize` value.
+	///
+	/// For example:
+	/// ```rust
+	/// // Min is 2, max is 10, value is 5
+	/// let clamped_usize = ClampedUsize::new(5, 10, false).with_min(2);
+	/// let clamped_isize = ClampedIsize::from_clamped_usize(clamped_usize);
+	/// assert_eq!(clamped_isize.get(), 0); // value becomes 0
+	/// assert_eq!(clamped_isize.min, -3); // 2 - 5 = -3
+	/// assert_eq!(clamped_isize.max, 5); // 10 - 5 = 5
+	///
+	pub fn from_clamped_usize(clamped_usize: ClampedUsize) -> Self {
+		let ClampedUsize { value, min, max, exclusive } = clamped_usize;
+		let mut value = value as isize;
+		let mut min = min as isize;
+		let mut max = max as isize;
+		min -= value;
+		max -= value;
+		value = 0;
+		Self { value, min, max, exclusive }
+	}
+	pub fn set(&mut self, value: isize) {
+		let max = if self.exclusive { self.max - 1 } else { self.max };
+		self.value = value.clamp(self.min,max);
+	}
+	pub fn get(&self) -> isize {
+		self.value
+	}
+	pub fn cap(&self) -> isize {
+		self.max
+	}
+	pub fn upper_bound(&self) -> isize {
+		if self.exclusive {
+			self.max - 1
+		} else {
+			self.max
+		}
+	}
+	pub fn set_max(&mut self, max: isize) {
+		self.max = max;
+		self.set(self.value); // Enforces the new maximum
+	}
+	pub fn set_min(&mut self, min: isize) {
+		self.min = min;
+		self.set(self.value); // Enforces the new minimum
+	}
+	pub fn inc(&mut self) -> bool {
+		let max = self.upper_bound();
+		if self.value == max {
+			return false;
+		}
+		self.add(1);
+		true
+	}
+	pub fn dec(&mut self) -> bool {
+		if self.value == self.min {
+			return false;
+		}
+		self.sub(1);
+		true
+	}
+	pub fn add(&mut self, value: isize) {
+		let max = self.upper_bound();
+		self.value = (self.value + value).clamp(self.min,max)
+	}
+	pub fn sub(&mut self, value: isize) {
+		self.value = (self.value - value).clamp(self.min,self.max)
+	}
+	pub fn ret_add(&self, value: isize) -> isize {
+		let max = self.upper_bound();
+		(self.value + value).clamp(self.min,max)
+	}
+	pub fn ret_sub(&self, value: isize) -> isize {
+		(self.value - value).clamp(self.min,self.max)
 	}
 }
 
@@ -391,14 +552,15 @@ pub struct LineBuf {
 	pub cursor: ClampedUsize, // Used to index grapheme_indices
 
 	pub select_mode: Option<SelectMode>,
-	pub select_range: Option<(usize,usize)>,
+	pub select_range: Option<SelectRange>,
 
-	pub last_selection: Option<(usize,usize)>,
+	pub last_selection: Option<SelectRange>,
 	pub last_pattern_search: Option<Regex>,
 	pub last_substitution: Option<(Regex,String,SubFlags)>,
 	pub last_global: Option<Verb>,
 
 	pub insert_mode_start_pos: Option<usize>,
+	pub inserting_from_visual: bool,
 	pub saved_col: Option<usize>,
 
 	pub undo_stack: Vec<Edit>,
@@ -656,23 +818,100 @@ impl LineBuf {
 		self.buffer = buffer;
 		self.update_graphemes();
 	}
-	pub fn select_range(&self) -> Option<(usize,usize)> {
-		self.select_range
+	pub fn select_range(&self) -> Option<&SelectRange> {
+		self.select_range.as_ref()
 	}
 	pub fn selected_lines(&mut self) -> Option<(usize,usize)> {
-		let (start,end) = self.select_range()?;
-		let start_ln = self.index_line_number(start) + 1;
-		let end_ln = self.index_line_number(end) + 1;
-		Some((start_ln,end_ln))
+		let range = self.select_range()?;
+		match range {
+			SelectRange::OneDim((start,end)) => {
+				let start_ln = self.index_line_number(*start) + 1;
+				let end_ln = self.index_line_number(*end) + 1;
+				Some((start_ln,end_ln))
+			},
+			SelectRange::TwoDim(lines) => {
+				let start_ln = self.index_line_number(lines.first()?.0) + 1;
+				let end_ln = self.index_line_number(lines.last()?.1) + 1;
+				Some((start_ln,end_ln))
+			}
+		}
+	}
+	pub fn get_block_select(&mut self) -> SelectMode {
+		let anchor = SelectAnchor::Start;
+		let anchor_pos = self.cursor.get();
+		SelectMode::Block {
+			anchor,
+			anchor_pos,
+		}
+	}
+	pub fn line_col_offset(&mut self, pos: usize) -> (isize,isize) {
+		let cursor_col = self.cursor_col();
+		let cursor_line = self.cursor_line_number();
+		let pos_col = self.index_col(pos);
+		let pos_line = self.index_line_number(pos);
+
+		let col_offset = cursor_col as isize - pos_col as isize;
+		let line_offset = pos_line as isize - cursor_line as isize;
+		(line_offset, col_offset)
+	}
+	pub fn get_block_select_windows(&mut self, mode: &SelectMode) -> Vec<(usize,usize)> {
+		let SelectMode::Block { anchor, anchor_pos } = mode else { unreachable!() };
+		let mut anchor_pos = *anchor_pos;
+		let mut cursor_pos = self.cursor.get();
+		let cursor_col = self.index_col(cursor_pos);
+		let anchor_col = self.index_col(anchor_pos);
+
+		// horizontal end of the selection must be incremented
+		if cursor_col >= anchor_col {
+			cursor_pos += 1;
+		} else {
+			anchor_pos += 1;
+		}
+		let cursor_col = self.index_col(cursor_pos);
+		let anchor_col = self.index_col(anchor_pos);
+
+		let (line_offset, col_offset) = {
+			let cursor_line = self.cursor_line_number();
+			let anchor_line = self.index_line_number(anchor_pos);
+
+			let col_offset = cursor_col as isize - anchor_col as isize;
+			let line_offset = anchor_line as isize - cursor_line as isize;
+			(line_offset, col_offset)
+		};
+
+
+
+		let anchor_col = self.index_col(anchor_pos);
+		let cursor_line = self.cursor_line_number();
+		let (start,end) = ordered(cursor_line, cursor_line.saturating_add_signed(line_offset));
+
+		let line_range = start..=end;
+
+		let mut windows = vec![];
+
+		for line in line_range {
+			let Some((start,end)) = self.line_bounds(line) else { continue };
+			let exclusive = end != self.cursor.max;
+			let mut clamped_start = ClampedUsize::new(start, end, exclusive).with_min(start);
+			let pos1 = clamped_start.ret_add(anchor_col);
+			let pos2 = clamped_start.ret_add(cursor_col);
+
+			let (start,end) = ordered(pos1, pos2);
+
+			windows.push((start,end));
+		}
+
+		windows
 	}
 	pub fn start_selecting(&mut self, mode: SelectMode) {
+
 		self.select_mode = Some(mode);
-		let (range_start,range_end) = match mode {
-			SelectMode::Char(_) => (self.cursor.get(),self.cursor.ret_add(1)),
-			SelectMode::Line(_) => self.this_line(),
-			SelectMode::Block(_) => todo!()
+		let range = match mode {
+			SelectMode::Char(_) => SelectRange::OneDim((self.cursor.get(),self.cursor.ret_add(1))),
+			SelectMode::Line(_) => SelectRange::OneDim(self.this_line()),
+			SelectMode::Block {..} => SelectRange::TwoDim(self.get_block_select_windows(&mode))
 		};
-		self.select_range = Some((range_start,range_end));
+		self.select_range = Some(range);
 	}
 	pub fn stop_selecting(&mut self) {
 		self.select_mode = None;
@@ -683,7 +922,25 @@ impl LineBuf {
 	pub fn is_selecting(&self) -> bool {
 		self.select_mode.is_some() && self.select_range.is_some()
 	}
-	pub fn total_lines(&mut self) -> usize {
+	pub fn selected_content(&mut self) -> Option<String> {
+		let range = self.select_range()?.clone();
+		match range {
+			SelectRange::OneDim((start,end)) => {
+				let slice = self.slice_inclusive(start..=end + 1)?;
+				Some(slice.to_string())
+			},
+			SelectRange::TwoDim(lines) => {
+				let mut content = vec![];
+				for (start,end) in lines {
+					if let Some(slice) = self.slice(start..end) {
+						content.push(slice.to_string());
+					}
+				}
+				Some(content.join("\n"))
+			}
+		}
+	}
+	pub fn total_lines(&self) -> usize {
 		self.buffer
 			.chars()
 			.filter(|ch| *ch == '\n')
@@ -697,7 +954,7 @@ impl LineBuf {
 					.count()
 			}).unwrap_or(0)
 	}
-	pub fn byte_pos_line_numer(&mut self, pos: usize) -> usize {
+	pub fn byte_pos_line_number(&self, pos: usize) -> usize {
 		self.buffer.get(..pos)
 			.map(|slice| {
 				slice.chars()
@@ -705,7 +962,7 @@ impl LineBuf {
 					.count()
 			}).unwrap_or(0)
 	}
-	pub fn index_line_number(&mut self, pos: usize) -> usize {
+	pub fn index_line_number(&self, pos: usize) -> usize {
 		self.grapheme_indices().get(..pos)
 			.map(|slice| {
 				slice
@@ -835,7 +1092,7 @@ impl LineBuf {
 
 		Some((start,end))
 	}
-	pub fn line_bounds(&mut self, n: usize) -> Option<(usize,usize)> {
+	pub fn line_bounds(&self, n: usize) -> Option<(usize,usize)> {
 		if n > self.total_lines() {
 			return None
 		}
@@ -846,7 +1103,7 @@ impl LineBuf {
 		// Fine the start of the line
 		for _ in 0..n {
 			while let Some(idx) = idx_iter.next() {
-				let gr = self.grapheme_at(idx).unwrap();
+				let gr = self.read_grapheme_at(idx).unwrap();
 				if gr == "\n" {
 					start = (idx + 1).min(self.cursor.max);
 					break
@@ -859,7 +1116,7 @@ impl LineBuf {
 		// Find the end of the line
 		while let Some(idx) = idx_iter.next() {
 			end = (end + 1).min(self.cursor.max);
-			let gr = self.grapheme_at(idx).unwrap();
+			let gr = self.read_grapheme_at(idx).unwrap();
 			if gr == "\n" {
 				found_newline = true;
 				break
@@ -893,8 +1150,12 @@ impl LineBuf {
 
 
 
-			edit.new.push_str(&diff.new);
-			edit.old.push_str(&diff.old);
+			let mut merge_pos = edit.merge_pos;
+			let diff_len = diff.new_diff.len();
+			edit.new = diff.new;
+			edit.new_diff.insert_str(merge_pos, &diff.new_diff);
+			merge_pos += diff_len;
+			edit.merge_pos = merge_pos;
 
 			self.undo_stack.push(edit);
 		} else {
@@ -1863,6 +2124,30 @@ impl LineBuf {
 		let cursor_pos = self.cursor.get();
 		cursor_pos - start
 	}
+	pub fn index_col(&self, pos: usize) -> usize {
+		let pos_line = self.index_line_number(pos);
+		let (start, _) = self.line_bounds(pos_line).expect("Indexing a line that does not exist");
+		// We can be reasonably sure that start is less than pos
+		pos - start
+	}
+	pub fn insert_register_content(&mut self, insert_idx: usize, content: RegisterContent, anchor: Anchor) {
+		let byte_pos = self.index_byte_pos(insert_idx);
+		match content {
+			RegisterContent::Span(text) => {
+				self.buffer.insert_str(byte_pos, &text);
+				self.update_graphemes();
+			}
+			RegisterContent::Line(mut line) => {
+				if self.grapheme_before(insert_idx).is_some_and(|gr| gr != "\n") {
+					line = format!("\n{}", line);
+				}
+				self.buffer.insert_str(byte_pos, &line);
+				self.update_graphemes();
+			}
+			RegisterContent::Block(items) => todo!(),
+			RegisterContent::Empty => {}
+		}
+	}
 	pub fn insert_str_at(&mut self, pos: usize, new: &str) {
 		let idx = self.index_byte_pos(pos);
 		self.buffer.insert_str(idx, new);
@@ -1928,7 +2213,7 @@ impl LineBuf {
 						LineAddr::Pattern(_) => {
 							for mat in &matches {
 								if mat.start() > cursor_byte_pos {
-									let match_line_no = self.byte_pos_line_numer(mat.start());
+									let match_line_no = self.byte_pos_line_number(mat.start());
 									return Some(match_line_no)
 								}
 							}
@@ -1937,7 +2222,7 @@ impl LineBuf {
 							let matches = matches.iter().rev();
 							for mat in matches {
 								if mat.start() < cursor_byte_pos {
-									let match_line_no = self.byte_pos_line_numer(mat.start());
+									let match_line_no = self.byte_pos_line_number(mat.start());
 									return Some(match_line_no)
 								}
 							}
@@ -1945,14 +2230,14 @@ impl LineBuf {
 						_ => unreachable!()
 					}
 					let mat = wrap_match?;
-					let match_line_no = self.byte_pos_line_numer(mat.start());
+					let match_line_no = self.byte_pos_line_number(mat.start());
 					Some(match_line_no)
 				} else {
 					match addr {
 						LineAddr::Pattern(_) => {
 							let haystack = self.slice_from_cursor()?;
 							let pos = haystack.as_bytes().windows(pat.len()).position(|win| win == pat.as_bytes())?;
-							let line_no = self.byte_pos_line_numer(pos);
+							let line_no = self.byte_pos_line_number(pos);
 							Some(line_no)
 						}
 						LineAddr::PatternRev(_) => {
@@ -1960,13 +2245,44 @@ impl LineBuf {
 							let haystack_rev = haystack.bytes().rev().collect::<Vec<_>>();
 							let pat_rev = pat.bytes().rev().collect::<Vec<_>>();
 							let pos = haystack_rev.windows(pat.len()).position(|win| win == pat_rev)?;
-							let line_no = self.byte_pos_line_numer(pos);
+							let line_no = self.byte_pos_line_number(pos);
 							Some(line_no)
 						}
 						_ => unreachable!()
 					}
 				}
 			}
+		}
+	}
+	pub fn should_handle_block_insert(&self) -> bool {
+		self.inserting_from_visual &&
+		self.last_selection.as_ref().is_some_and(|sel| matches!(sel, SelectRange::TwoDim(_)))
+	}
+	pub fn handle_block_insert(&mut self) {
+		/*
+		 * The last selection was a visual block, so we need to insert the text
+		 * at the start of each window in the selection.
+		 *
+		 * We can be clever here and use the last edit in the undo stack to figure out what to insert.
+		 */
+		let Some(last_edit) = self.undo_stack.last().cloned() else { return };
+		let Some(SelectRange::TwoDim(sel)) = self.last_selection.clone() else { return };
+		let a = last_edit.old[last_edit.pos..].lines().next().unwrap_or_default().to_string();
+		let b = last_edit.new[last_edit.pos..].lines().next().unwrap_or_default().to_string();
+		let first_line_edit = Edit::diff(&a, &b, 0);
+		let last_diff = last_edit.new_diff[..last_edit.merge_pos].to_string();
+		let mut len_delta = first_line_edit.get_len_delta();
+		let len_delta_const = len_delta;
+		let sel = sel.iter().skip(1); // Skip the first line, we already inserted it
+
+		for window in sel {
+			let (start,end) = window; // Only need the start
+			if start == end {
+				continue // No need to insert at an empty window
+			}
+			let start = start.saturating_add_signed(len_delta);
+			self.insert_str_at(start, &last_diff);
+			len_delta += len_delta_const;
 		}
 	}
 	pub fn eval_motion(&mut self, verb: Option<&Verb>, motion: MotionCmd) -> MotionKind {
@@ -2453,20 +2769,27 @@ impl LineBuf {
 				let target_col = count.saturating_sub(1);
 				MotionKind::On(start.ret_add(target_col))
 			}
-			MotionCmd(count,Motion::Range(start, end)) => {
-				let mut final_end = end;
-				if self.cursor.exclusive {
-					final_end += 1;
-				}
-				let delta = end - start;
-				let count = count.saturating_sub(1); // Becomes number of times to multiply the range
+			MotionCmd(count,Motion::Range(range)) => {
+				match range {
+					SelectRange::OneDim((start,end)) => {
+						let mut final_end = end;
+						if self.cursor.exclusive {
+							final_end += 1;
+						}
+						let delta = end - start;
+						let count = count.saturating_sub(1); // Becomes number of times to multiply the range
 
-				for _ in 0..count {
-					final_end += delta;
-				}
+						for _ in 0..count {
+							final_end += delta;
+						}
 
-				final_end = final_end.min(self.cursor.max);
-				MotionKind::Exclusive((start,final_end))
+						final_end = final_end.min(self.cursor.max);
+						MotionKind::Exclusive((start,final_end))
+					}
+					SelectRange::TwoDim(windows) => {
+						MotionKind::BlockRange(windows)
+					}
+				}
 			}
 			MotionCmd(_, Motion::Line(addr)) => {
 				let Some(line_no) = self.eval_line_addr(addr) else {
@@ -2496,62 +2819,70 @@ impl LineBuf {
 	}
 	pub fn update_select_range(&mut self) {
 		if let Some(mut mode) = self.select_mode {
-			let Some((mut start,mut end)) = self.select_range else {
+			let Some(range) = self.select_range.clone() else {
 				return
 			};
-			// If we are in select mode, we need to update the selection range
-			match mode {
-				SelectMode::Char(anchor) => {
-					// Just use literal cursor position
-					match anchor {
-						SelectAnchor::End => {
-							start = self.cursor.get();
-						}
-						SelectAnchor::Start => {
-							end = self.cursor.get();
-						}
-					}
-					if start >= end {
-						mode.invert_anchor();
-						std::mem::swap(&mut start, &mut end);
-
-						self.select_mode = Some(mode);
-					}
-					self.select_range = Some((start,end));
-				}
-				SelectMode::Line(anchor) => {
-					let old_end = end;
-					// If we are in line select mode, we need to update based on the cursor's line
-					match anchor {
-						SelectAnchor::End => {
-							start = self.start_of_line();
-						}
-						SelectAnchor::Start => {
-							end = self.end_of_line();
-						}
-					}
-					if start >= end {
-						mode.invert_anchor();
-						std::mem::swap(&mut start, &mut end);
-						end = old_end; // Hack powers activate
-						               // I have no idea why this works
-													 // And I'm not going to question it
-													 // or alter this code ever again
-						match mode.anchor() {
-							SelectAnchor::End => {
-								start = self.start_of_line();
+			match range {
+				SelectRange::OneDim((mut start,mut end)) => {
+					match mode {
+						SelectMode::Char(anchor) => {
+							// Just use literal cursor position
+							match anchor {
+								SelectAnchor::End => {
+									start = self.cursor.get();
+								}
+								SelectAnchor::Start => {
+									end = self.cursor.get();
+								}
 							}
-							SelectAnchor::Start => {
-								end = self.end_of_line();
-							}
-						}
+							if start >= end {
+								mode.invert_anchor();
+								std::mem::swap(&mut start, &mut end);
 
-						self.select_mode = Some(mode);
+								self.select_mode = Some(mode);
+							}
+							self.select_range = Some(SelectRange::OneDim((start,end)));
+						}
+						SelectMode::Line(anchor) => {
+							let old_end = end;
+							// If we are in line select mode, we need to update based on the cursor's line
+							match anchor {
+								SelectAnchor::End => {
+									start = self.start_of_line();
+								}
+								SelectAnchor::Start => {
+									end = self.end_of_line();
+								}
+							}
+							if start >= end {
+								mode.invert_anchor();
+								std::mem::swap(&mut start, &mut end);
+								end = old_end; // Hack powers activate
+															 // I have no idea why this works
+															 // And I'm not going to question it
+															 // or alter this code ever again
+								match mode.anchor() {
+									SelectAnchor::End => {
+										start = self.start_of_line();
+									}
+									SelectAnchor::Start => {
+										end = self.end_of_line();
+									}
+								}
+
+								self.select_mode = Some(mode);
+							}
+							self.select_range = Some(SelectRange::OneDim((start,end)));
+						}
+						_ => unreachable!()
 					}
-					self.select_range = Some((start,end));
 				}
-				SelectMode::Block(anchor) => todo!(),
+				SelectRange::TwoDim(mut windows) => {
+					windows = self.get_block_select_windows(&mode);
+					self.select_range = Some(SelectRange::TwoDim(windows));
+				}
 			}
+			// If we are in select mode, we need to update the selection range
 		}
 	}
 	pub fn move_cursor(&mut self, motion: MotionKind) {
@@ -2570,6 +2901,10 @@ impl LineBuf {
 					}
 					std::cmp::Ordering::Equal => { /* Do nothing */ }
 				}
+			}
+			MotionKind::BlockRange(windows) => {
+				let Some(first) = windows.first() else { return };
+				self.cursor.set(first.0);
 			}
 			MotionKind::LineRange(n,_) |
 			MotionKind::Line(n) => {
@@ -2598,7 +2933,7 @@ impl LineBuf {
 							mode.set_anchor(SelectAnchor::Start);
 						}
 					}
-					self.select_range = Some((start,end));
+					self.select_range = Some(SelectRange::OneDim((start,end)));
 				}
 			}
 			MotionKind::Exclusive((start,end)) => {
@@ -2618,7 +2953,7 @@ impl LineBuf {
 							mode.set_anchor(SelectAnchor::Start);
 						}
 					}
-					self.select_range = Some((start,end));
+					self.select_range = Some(SelectRange::OneDim((start,end)));
 				}
 			}
 			MotionKind::Lines(_) => {
@@ -2633,6 +2968,13 @@ impl LineBuf {
 	}
 	pub fn range_from_motion(&mut self, motion: &MotionKind) -> Option<(usize,usize)> {
 		let range = match motion {
+			MotionKind::BlockRange(_) => {
+				/*
+				 * This one requires special handling
+				 * So we shouldn't be here
+				 */
+				return None
+			}
 			MotionKind::On(pos) => ordered(self.cursor.get(), *pos),
 			MotionKind::Onto(pos) => {
 				// For motions which include the character at the cursor during operations
@@ -2664,45 +3006,123 @@ impl LineBuf {
 				ordered(self.cursor.get(), pos)
 			}
 			MotionKind::InclusiveWithTargetCol((start,end),_) |
-				MotionKind::Exclusive((start,end)) => ordered(*start, *end),
-				MotionKind::ExclusiveWithTargetCol((start,end),_) |
-					MotionKind::Inclusive((start,end)) => {
-						let (start, mut end) = ordered(*start, *end);
-						end = ClampedUsize::new(end,self.cursor.max,false).ret_add(1);
-						(start,end)
-					}
+			MotionKind::Exclusive((start,end)) => ordered(*start, *end),
+			MotionKind::ExclusiveWithTargetCol((start,end),_) |
+			MotionKind::Inclusive((start,end)) => {
+				let (start, mut end) = ordered(*start, *end);
+				end = ClampedUsize::new(end,self.cursor.max,false).ret_add(1);
+				(start,end)
+			}
 			MotionKind::Lines(_) |
 			MotionKind::Null => return None
 		};
 		Some(range)
 	}
+	pub fn get_register_content(&mut self, verb: &Verb, motion: &MotionKind) -> RegisterContent {
+		let should_drain = verb == &Verb::Delete || verb == &Verb::Change;
+		match motion {
+			MotionKind::BlockRange(windows) => {
+				let content = if should_drain {
+					let content = windows.iter()
+						.rev() // Reverse the order so that the spans stay valid
+						.map(|(start,end)| {
+							self.drain(*start,*end)
+						})
+						.collect::<Vec<_>>();
+					self.update_graphemes();
+					content
+				} else {
+					windows.iter()
+						.map(|(start,end)| {
+							self.slice(*start..*end)
+								.map(|s| s.to_string())
+								.unwrap_or_default()
+						})
+						.collect::<Vec<_>>()
+				};
+				RegisterContent::Block(content)
+			}
+			MotionKind::Line(line_no) => {
+				let Some((start,end)) = self.line_bounds(*line_no) else {
+					return RegisterContent::Empty
+				};
+				let line_content = if should_drain {
+					let content = self.drain(start,end);
+					self.update_graphemes();
+					content
+				} else {
+					self.slice(start..end)
+						.map(|s| s.to_string())
+						.unwrap_or_default()
+				};
+				RegisterContent::Line(line_content)
+			}
+			MotionKind::LineRange(start,end) => {
+				let Some((start,_)) = self.line_bounds(*start) else {
+					return RegisterContent::Empty
+				};
+				let Some((_,end)) = self.line_bounds(*end) else {
+					return RegisterContent::Empty
+				};
+				let line_content = if should_drain {
+					let content = self.drain(start,end);
+					self.update_graphemes();
+					content
+				} else {
+					self.slice(start..end)
+						.map(|s| s.to_string())
+						.unwrap_or_default()
+				};
+				RegisterContent::Line(line_content)
+			}
+			_ => {
+				let Some((start,end)) = self.range_from_motion(motion) else {
+					return RegisterContent::Empty
+				};
+				if should_drain {
+					// If we are deleting or changing, we need to drain the content
+					// and update the grapheme indices
+					let drained = self.drain(start,end);
+					self.update_graphemes();
+					RegisterContent::Span(drained)
+				} else {
+					// If we are yanking, we just need to get the content
+					let content = self.slice(start..end)
+						.map(|s| s.to_string())
+						.unwrap_or_default();
+					RegisterContent::Span(content)
+				}
+			}
+		}
+	}
 	#[allow(clippy::unnecessary_to_owned)]
-	pub fn exec_verb(&mut self, verb: Verb, motion: MotionKind, register: RegisterName, is_whole_line: bool) -> Result<(),String> {
+	pub fn exec_verb(&mut self, verb: Verb, motion: MotionKind, register: RegisterName) -> Result<(),String> {
 		match verb {
 			Verb::Delete |
 			Verb::Yank |
 			Verb::Change => {
-				let Some((start,end)) = self.range_from_motion(&motion) else {
-					return Ok(())
-				};
-				let register_text = if verb == Verb::Yank {
-					self.slice(start..end)
-						.map(|c| c.to_string())
-						.unwrap_or_default()
+				let content = self.get_register_content(&verb, &motion);
+				register.write_to_register(content);
+				if let Some(SelectRange::TwoDim(sel)) = self.select_range.as_ref() {
+					// If we are in visual block, the cursor is set to the start of the first window
+					let new_pos = sel.first().map_or(0, |(start,_)| *start);
+					self.cursor.set(new_pos);
 				} else {
-					let drained = self.drain(start, end);
-					self.update_graphemes();
-					drained
-				};
-				register.write_to_register(register_text, is_whole_line);
-				match motion {
-					MotionKind::ExclusiveWithTargetCol((_,_),pos) |
-						MotionKind::InclusiveWithTargetCol((_,_),pos) => {
-							let (start,end) = self.this_line();
+					match motion {
+						MotionKind::ExclusiveWithTargetCol((_,_),pos) |
+							MotionKind::InclusiveWithTargetCol((_,_),pos) => {
+								let (start,end) = self.this_line();
+								self.cursor.set(start);
+								self.cursor.add(end.min(pos));
+							}
+						_ => {
+							let Some((start,_)) = self.range_from_motion(&motion) else {
+								self.move_cursor(motion);
+								return Ok(())
+							};
 							self.cursor.set(start);
-							self.cursor.add(end.min(pos));
 						}
-					_ => self.cursor.set(start),
+					}
 				}
 			}
 			Verb::Rot13 => {
@@ -2843,7 +3263,7 @@ impl LineBuf {
 						_ => unreachable!()
 					};
 					let Some(edit) = edit_provider.pop() else { return Ok(()) };
-					let Edit { pos, cursor_pos, old, new, merging: _ } = edit;
+					let Edit { pos, cursor_pos, old, old_diff, new, new_diff, merging: _, .. } = edit;
 
 					self.buffer.replace_range(pos..pos + new.len(), &old);
 					let new_cursor_pos = self.cursor.get();
@@ -2852,7 +3272,16 @@ impl LineBuf {
 					if in_insert_mode {
 						self.cursor.set(cursor_pos)
 					}
-					let new_edit = Edit { pos, cursor_pos: new_cursor_pos, old: new, new: old, merging: false };
+					let new_edit = Edit {
+						pos,
+						merge_pos: 0,
+						cursor_pos: new_cursor_pos,
+						old: new,
+						new: old,
+						old_diff: new_diff,
+						new_diff: old_diff,
+						merging: false
+					};
 					edit_receiver.push(new_edit);
 					self.update_graphemes();
 				}
@@ -2867,12 +3296,7 @@ impl LineBuf {
 								Anchor::After => end,
 								Anchor::Before => start
 							};
-							if insert_idx == self.cursor.max {
-								self.push('\n');
-								self.push_str(content.trim_end_matches('\n'));
-							} else {
-								self.insert_str_at(insert_idx, &content);
-							}
+							self.insert_register_content(insert_idx, content, anchor);
 							self.cursor.set(insert_idx);
 							let first_non_ws = self.eval_motion(None, MotionCmd(1,Motion::FirstGraphicalOnScreenLine));
 							self.move_cursor(first_non_ws);
@@ -2881,28 +3305,23 @@ impl LineBuf {
 						let lines = (s..=e).rev();
 						for line in lines {
 							let Some((start,end)) = self.line_bounds(line) else { return Ok(()) };
-							let insert_idx = match anchor {
+							let insert_idx = match &anchor {
 								Anchor::After => end,
 								Anchor::Before => start
 							};
-							if insert_idx == self.cursor.max {
-								self.push('\n');
-								self.push_str(content.trim_end_matches('\n'));
-							} else {
-								self.insert_str_at(insert_idx, &content);
-							}
+							self.insert_register_content(insert_idx, content.clone(), anchor.clone());
 							self.cursor.set(insert_idx);
 							let first_non_ws = self.eval_motion(None, MotionCmd(1,Motion::FirstGraphicalOnScreenLine));
 							self.move_cursor(first_non_ws);
 						}
 					}
 					_ => {
-						if register.is_whole_line() {
+						if register.is_line() {
 							let insert_idx = match anchor {
 								Anchor::After => self.end_of_line(),
 								Anchor::Before => self.start_of_line()
 							};
-							self.insert_str_at(insert_idx, &content);
+							self.insert_register_content(insert_idx, content, anchor);
 							let down_line = self.eval_motion(None, MotionCmd(1,Motion::LineDownCharwise));
 							self.move_cursor(down_line);
 							let first_non_ws = self.eval_motion(None, MotionCmd(1,Motion::FirstGraphicalOnScreenLine));
@@ -2912,31 +3331,37 @@ impl LineBuf {
 								Anchor::After => self.cursor.ret_add(1),
 								Anchor::Before => self.cursor.get()
 							};
-							self.insert_str_at(insert_idx, &content);
-							self.cursor.add(content.len().saturating_sub(1));
+							let len = content.len();
+							self.insert_register_content(insert_idx, content, anchor);
+							if register.is_block() {
+								self.cursor.set(insert_idx);
+							} else {
+								self.cursor.add(len.saturating_sub(1));
+							}
 						}
 					}
 				}
 			}
 			Verb::SwapVisualAnchor => {
-				if let Some((start,end)) = self.select_range() && let Some(mut mode) = self.select_mode {
+				if let Some(range) = self.select_range.clone() && let Some(mode) = self.select_mode.as_mut() {
 					match mode {
 						SelectMode::Char(anchor) => {
-							mode.invert_anchor();
+							let SelectRange::OneDim((start,end)) = range else { unreachable!() };
 							let new_cursor_pos = match anchor {
 								SelectAnchor::End => start,
 								SelectAnchor::Start => end,
 							};
+							mode.invert_anchor();
 							self.cursor.set(new_cursor_pos);
-							self.select_mode = Some(mode)
 						}
 						SelectMode::Line(anchor) => {
-							mode.invert_anchor();
-							let cursor_col = self.cursor_col();
+							let SelectRange::OneDim((start,end)) = range else { unreachable!() };
 							let anchor_pos = match anchor {
 								SelectAnchor::End => end,
 								SelectAnchor::Start => start,
 							};
+							mode.invert_anchor();
+							let cursor_col = self.cursor_col();
 							let new_cursor_pos = {
 								let line_no = self.index_line_number(anchor_pos);
 								let (start,end) = self.line_bounds(line_no).unwrap_or((0,self.cursor.max));
@@ -2944,9 +3369,14 @@ impl LineBuf {
 								(start + cursor_col).min(line_len)
 							};
 							self.cursor.set(new_cursor_pos);
-							self.select_mode = Some(mode)
 						}
-						SelectMode::Block(anchor) => todo!(),
+						SelectMode::Block { anchor: _, anchor_pos } => {
+							let mut cursor_pos = self.cursor.get();
+							std::mem::swap(&mut cursor_pos, anchor_pos);
+							self.cursor.set(cursor_pos);
+
+							mode.invert_anchor();
+						}
 					}
 				}
 			}
@@ -3184,7 +3614,7 @@ impl LineBuf {
 			}
 			Verb::RepeatGlobal => {
 				if let Some(global) = self.last_global.clone() {
-					self.exec_verb(global, motion, register,/*is_whole_line:*/true)?
+					self.exec_verb(global, motion, register)?
 				}
 			}
 			Verb::RepeatSubstitute => {
@@ -3297,9 +3727,6 @@ impl LineBuf {
 		let is_char_insert = cmd.verb.as_ref().is_some_and(|v| v.1.is_char_insert());
 		let is_line_motion = cmd.is_line_motion();
 		let is_undo_op = cmd.is_undo_op();
-		let is_whole_line = cmd.motion.as_ref().is_some_and(|m| {
-			matches!(m.1, Motion::WholeLine | Motion::WholeLineExclusive | Motion::Line(_) | Motion::LineRange(_,_))
-		}) || self.select_mode.is_some_and(|m| matches!(m, SelectMode::Line(_)));
 		let edit_is_merging = self.undo_stack.last().is_some_and(|edit| edit.merging);
 
 		// Merge character inserts into one edit
@@ -3328,10 +3755,11 @@ impl LineBuf {
 				.clone()
 				.map(|m| self.eval_motion(verb_ref.as_ref(), m))
 				.unwrap_or(MotionKind::Null);
-			let mode = match flags {
+			let flag_intersection = flags.intersection(CmdFlags::VISUAL | CmdFlags::VISUAL_LINE | CmdFlags::VISUAL_BLOCK);
+			let mode = match flag_intersection {
 				CmdFlags::VISUAL => SelectMode::Char(SelectAnchor::Start),
 				CmdFlags::VISUAL_LINE => SelectMode::Line(SelectAnchor::Start),
-				CmdFlags::VISUAL_BLOCK => SelectMode::Block(SelectAnchor::Start),
+				CmdFlags::VISUAL_BLOCK => self.get_block_select(),
 				_ => unreachable!()
 			};
 			// Start a selection
@@ -3341,7 +3769,8 @@ impl LineBuf {
 
 			// Use the selection range created by the motion
 			self.select_range
-				.map(MotionKind::Inclusive)
+				.clone()
+				.map(MotionKind::from_select_range)
 				.unwrap_or(MotionKind::Null)
 		} else {
 			motion
@@ -3349,13 +3778,14 @@ impl LineBuf {
 				.map(|m| self.eval_motion(verb_ref.as_ref(), m))
 				.unwrap_or({
 					self.select_range
-						.map(MotionKind::Exclusive)
+						.clone()
+						.map(MotionKind::from_select_range)
 						.unwrap_or(MotionKind::Null)
 				})
 		};
 
 		if let Some(verb) = verb.clone() {
-			self.exec_verb(verb.1, motion_eval, register, is_whole_line)?;
+			self.exec_verb(verb.1, motion_eval, register)?;
 		} else {
 			self.apply_motion(motion_eval);
 		}
@@ -3411,6 +3841,10 @@ pub fn rot13(input: &str) -> String {
 		}).collect()
 }
 
+/// Ensure that the start is always less than or equal to the end
+///
+/// This is useful for creating ranges where the start and end positions
+/// might be in any order, such as when dealing with cursor movements
 pub fn ordered(start: usize, end: usize) -> (usize,usize) {
 	if start > end {
 		(end,start)

@@ -4,7 +4,7 @@
 use log::trace;
 
 use crate::keys::{KeyCode, KeyEvent, ModKeys};
-use crate::linebuf::{ordered, ClampedUsize, MotionKind};
+use crate::linebuf::{ordered, ClampedUsize, MotionKind, SelectRange};
 use crate::modes::ex::ViEx;
 use crate::modes::search::ViSearch;
 use crate::reader::{KeyReader, RawReader};
@@ -85,22 +85,10 @@ impl ViCut {
 
 
 
-		if let Some((start,mut end)) = self.editor.select_range() {
+		if self.editor.select_range().is_some() {
 			// We are in visual mode if we've made it here
-			// So we are going to use the editor's selected range
-			if matches!(self.editor.select_mode,Some(SelectMode::Char(_))) {
-				end = (end + 1).min(self.editor.grapheme_indices().len()); // Include the cursor's character
-			}
-			let slice = self.editor
-				.slice(start..end)
-				.map(str::to_string)
-				.ok_or(format!("Failed to slice buffer, index was {end} but length was {}",self.editor.grapheme_indices().len()));
-			if let Ok(slice) = slice.as_ref() {
-				trace!("Cutting with visual mode range, got: '{slice}'");
-			} else {
-				trace!("Failed to slice buffer from visual mode range");
-			}
-			slice
+			// So we are going to use the editor's selected content
+			Ok(self.editor.selected_content().unwrap())
 		} else {
 			if self.editor.buffer.is_empty() {
 				return Ok(String::new())
@@ -144,168 +132,198 @@ impl ViCut {
 		}
 	}
 
-	pub fn exec_cmd(&mut self, mut cmd: ViCmd) -> Result<(),String> {
+	fn handle_mode_transition(&mut self, cmd: ViCmd) -> Result<(),String> {
 		let mut select_mode = None;
 		let mut is_insert_mode = false;
-		if cmd.is_mode_transition() {
-			let count = cmd.verb_count();
-			let mut mode: Box<dyn ViMode> = match cmd.verb().unwrap().1 {
-				Verb::Change |
-				Verb::InsertModeLineBreak(_) |
-				Verb::InsertMode => {
-					is_insert_mode = true;
-					Box::new(ViInsert::new().with_count(count as u16))
-				}
+		let count = cmd.verb_count();
+		if self.mode.report_mode() == ModeReport::Insert && self.editor.should_handle_block_insert() {
+			self.editor.handle_block_insert();
+		}
+		let mut inserting_from_visual = false;
+		let mut mode: Box<dyn ViMode> = match cmd.verb().unwrap().1 {
+			Verb::Change |
+			Verb::InsertModeLineBreak(_) |
+			Verb::InsertMode => {
+				is_insert_mode = true;
+				inserting_from_visual = self.mode.report_mode() == ModeReport::Visual;
 
-				Verb::NormalMode => {
-					Box::new(ViNormal::new())
-				}
-
-				Verb::ReplaceMode => Box::new(ViReplace::new()),
-
-				Verb::VisualModeSelectLast => {
-					if self.mode.report_mode() != ModeReport::Visual {
-						self.editor.start_selecting(SelectMode::Char(SelectAnchor::Start));
-					}
-					let mut mode: Box<dyn ViMode> = Box::new(ViVisual::new());
-					std::mem::swap(&mut mode, &mut self.mode);
-					self.editor.set_cursor_clamp(self.mode.clamp_cursor());
-
-					return self.editor.exec_cmd(cmd)
-				}
-				Verb::VisualMode => {
-					select_mode = Some(SelectMode::Char(SelectAnchor::Start));
-					Box::new(ViVisual::new())
-				}
-				Verb::VisualModeLine => {
-					select_mode = Some(SelectMode::Line(SelectAnchor::Start));
-					Box::new(ViVisual::new())
-				}
-				Verb::VisualModeBlock => {
-					select_mode = Some(SelectMode::Block(SelectAnchor::Start));
-					Box::new(ViVisual::new())
-				}
-
-				// For these two we will return early instead of doing all the other stuff.
-				// This is to preserve the line buffer's state while we are entering a pattern in search mode
-				// If we continue from here, visual mode selections will be lost for instance.
-				Verb::ExMode => {
-					let mut mode: Box<dyn ViMode> = Box::new(ViEx::new(self.editor.selected_lines()));
-					std::mem::swap(&mut mode, &mut self.mode);
-
-					return Ok(())
-				}
-				Verb::SearchMode(count,dir) => {
-					let mut mode: Box<dyn ViMode> = Box::new(ViSearch::new(count,dir));
-					std::mem::swap(&mut mode, &mut self.mode);
-
-					return Ok(())
-				}
-
-				_ => unreachable!()
-			};
-
-			std::mem::swap(&mut mode, &mut self.mode);
-
-			if mode.is_repeatable() {
-				self.repeat_action = mode.as_replay();
+				Box::new(ViInsert::new().with_count(count as u16))
 			}
 
-			self.editor.set_cursor_clamp(self.mode.clamp_cursor());
-			self.editor.exec_cmd(cmd)?;
+			Verb::NormalMode => {
+				Box::new(ViNormal::new())
+			}
 
-			if let Some(select_mode) = select_mode {
-				self.editor.start_selecting(select_mode);
-			} else {
-				self.editor.stop_selecting();
+			Verb::ReplaceMode => {
+				Box::new(ViReplace::new())
 			}
-			if is_insert_mode {
-				self.editor.mark_insert_mode_start_pos();
-			} else {
-				self.editor.clear_insert_mode_start_pos();
+
+			Verb::VisualModeSelectLast => {
+				if self.mode.report_mode() != ModeReport::Visual {
+					self.editor.start_selecting(SelectMode::Char(SelectAnchor::Start));
+				}
+				self.editor.inserting_from_visual = false;
+				let mut mode: Box<dyn ViMode> = Box::new(ViVisual::new());
+				std::mem::swap(&mut mode, &mut self.mode);
+				self.editor.set_cursor_clamp(self.mode.clamp_cursor());
+
+				return self.editor.exec_cmd(cmd)
 			}
-			return Ok(())
-		} else if cmd.is_cmd_repeat() {
-			let Some(replay) = self.repeat_action.clone() else {
+			Verb::VisualMode => {
+				select_mode = Some(SelectMode::Char(SelectAnchor::Start));
+				Box::new(ViVisual::new())
+			}
+			Verb::VisualModeLine => {
+				select_mode = Some(SelectMode::Line(SelectAnchor::Start));
+				Box::new(ViVisual::new())
+			}
+			Verb::VisualModeBlock => {
+				select_mode = Some(self.editor.get_block_select());
+				Box::new(ViVisual::new())
+			}
+
+			// For these two we will return early instead of doing all the other stuff.
+			// This is to preserve the line buffer's state while we are entering a pattern in search mode
+			// If we continue from here, visual mode selections will be lost for instance.
+			Verb::ExMode => {
+				let mut mode: Box<dyn ViMode> = Box::new(ViEx::new(self.editor.selected_lines()));
+				self.editor.inserting_from_visual = false;
+				std::mem::swap(&mut mode, &mut self.mode);
+
 				return Ok(())
-			};
-			let ViCmd { verb, .. } = cmd;
-			let VerbCmd(count,_) = verb.unwrap();
-			match replay {
-				CmdReplay::ModeReplay { cmds, mut repeat } => {
-					if count > 1 {
-						repeat = count as u16;
-					}
-					for _ in 0..repeat {
-						let cmds = cmds.clone();
-						for cmd in cmds {
-							self.editor.exec_cmd(cmd)?
-						}
-					}
-				}
-				CmdReplay::Single(mut cmd) => {
-					if count > 1 {
-						// Override the counts with the one passed to the '.' command
-						if cmd.verb.is_some() {
-							if let Some(v_mut) = cmd.verb.as_mut() {
-								v_mut.0 = count
-							}
-							if let Some(m_mut) = cmd.motion.as_mut() {
-								m_mut.0 = 1
-							}
-						} else {
-							return Ok(()) // it has to have a verb to be repeatable, something weird happened
-						}
-					}
-					self.editor.exec_cmd(cmd)?;
-				}
-				_ => unreachable!("motions should be handled in the other branch")
 			}
+			Verb::SearchMode(count,dir) => {
+				let mut mode: Box<dyn ViMode> = Box::new(ViSearch::new(count,dir));
+				self.editor.inserting_from_visual = false;
+				std::mem::swap(&mut mode, &mut self.mode);
+
+				return Ok(())
+			}
+
+			_ => unreachable!()
+		};
+
+		self.editor.inserting_from_visual = inserting_from_visual;
+
+		std::mem::swap(&mut mode, &mut self.mode);
+
+		if mode.is_repeatable() {
+			self.repeat_action = mode.as_replay();
+		}
+
+		self.editor.set_cursor_clamp(self.mode.clamp_cursor());
+		self.editor.exec_cmd(cmd)?;
+
+		if let Some(select_mode) = select_mode {
+			self.editor.start_selecting(select_mode);
+		} else {
+			self.editor.stop_selecting();
+		}
+		if is_insert_mode {
+			self.editor.mark_insert_mode_start_pos();
+		} else {
+			self.editor.clear_insert_mode_start_pos();
+		}
+		Ok(())
+	}
+
+	fn handle_cmd_repeat(&mut self, cmd: ViCmd) -> Result<(),String> {
+		let Some(replay) = self.repeat_action.clone() else {
 			return Ok(())
-		} else if cmd.is_motion_repeat() {
-			match cmd.motion.as_ref().unwrap() {
-				MotionCmd(count,Motion::RepeatMotion) => {
-					let Some(motion) = self.repeat_motion.clone() else {
-						return Ok(())
-					};
-					let repeat_cmd = ViCmd {
-						register: RegisterName::default(),
-						verb: cmd.verb().cloned(),
-						motion: Some(motion),
-						raw_seq: format!("{count};"),
-						flags: CmdFlags::empty()
-					};
-					return self.editor.exec_cmd(repeat_cmd);
+		};
+		let ViCmd { verb, .. } = cmd;
+		let VerbCmd(count,_) = verb.unwrap();
+		match replay {
+			CmdReplay::ModeReplay { cmds, mut repeat } => {
+				if count > 1 {
+					repeat = count as u16;
 				}
-				MotionCmd(count,Motion::RepeatMotionRev) => {
-					let Some(motion) = self.repeat_motion.clone() else {
-						return Ok(())
-					};
-					let mut new_motion = motion.invert_char_motion();
-					new_motion.0 = *count;
-					let repeat_cmd = ViCmd {
-						register: RegisterName::default(),
-						verb: cmd.verb().cloned(),
-						motion: Some(new_motion),
-						raw_seq: format!("{count},"),
-						flags: CmdFlags::empty()
-					};
-					return self.editor.exec_cmd(repeat_cmd);
+				for _ in 0..repeat {
+					let cmds = cmds.clone();
+					for cmd in cmds {
+						self.editor.exec_cmd(cmd)?
+					}
 				}
-				_ => unreachable!()
 			}
+			CmdReplay::Single(mut cmd) => {
+				if count > 1 {
+					// Override the counts with the one passed to the '.' command
+					if cmd.verb.is_some() {
+						if let Some(v_mut) = cmd.verb.as_mut() {
+							v_mut.0 = count
+						}
+						if let Some(m_mut) = cmd.motion.as_mut() {
+							m_mut.0 = 1
+						}
+					} else {
+						return Ok(()) // it has to have a verb to be repeatable, something weird happened
+					}
+				}
+				self.editor.exec_cmd(cmd)?;
+			}
+			_ => unreachable!("motions should be handled in the other branch")
+		}
+		Ok(())
+	}
+
+	fn handle_motion_repeat(&mut self, cmd: ViCmd) -> Result<(),String> {
+		match cmd.motion.as_ref().unwrap() {
+			MotionCmd(count,Motion::RepeatMotion) => {
+				let Some(motion) = self.repeat_motion.clone() else {
+					return Ok(())
+				};
+				let repeat_cmd = ViCmd {
+					register: RegisterName::default(),
+					verb: cmd.verb().cloned(),
+					motion: Some(motion),
+					raw_seq: format!("{count};"),
+					flags: CmdFlags::empty()
+				};
+				self.editor.exec_cmd(repeat_cmd)
+			}
+			MotionCmd(count,Motion::RepeatMotionRev) => {
+				let Some(motion) = self.repeat_motion.clone() else {
+					return Ok(())
+				};
+				let mut new_motion = motion.invert_char_motion();
+				new_motion.0 = *count;
+				let repeat_cmd = ViCmd {
+					register: RegisterName::default(),
+					verb: cmd.verb().cloned(),
+					motion: Some(new_motion),
+					raw_seq: format!("{count},"),
+					flags: CmdFlags::empty()
+				};
+				self.editor.exec_cmd(repeat_cmd)
+			}
+			_ => unreachable!()
+		}
+	}
+
+	pub fn exec_cmd(&mut self, mut cmd: ViCmd) -> Result<(),String> {
+		if cmd.is_mode_transition() {
+			return self.handle_mode_transition(cmd)
+
+		} else if cmd.is_cmd_repeat() {
+			return self.handle_cmd_repeat(cmd)
+
+		} else if cmd.is_motion_repeat() {
+			return self.handle_motion_repeat(cmd)
+
 		} else if cmd.is_ex_global() {
 			return self.exec_ex_global(cmd)
+
 		} else if cmd.is_ex_normal() {
 			return self.exec_ex_normal(cmd)
+
 		}
 
 		if cmd.is_repeatable() {
 			if self.mode.report_mode() == ModeReport::Visual {
 				// The motion is assigned in the line buffer execution, so we also have to assign it here
 				// in order to be able to repeat it
-				let range = self.editor.select_range().unwrap();
-				cmd.motion = Some(MotionCmd(1,Motion::Range(range.0, range.1)))
+				let range = self.editor.select_range().unwrap().clone();
+				cmd.motion = Some(MotionCmd(1,Motion::Range(range)))
 			}
 			self.repeat_action = Some(CmdReplay::Single(cmd.clone()));
 		}
