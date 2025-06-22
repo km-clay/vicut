@@ -41,7 +41,7 @@ So I decided to repurpose [my shell](https://github.com/km-clay/fern)'s line edi
 * `-r`/`--repeat <N> <R>` repeats `N` previous commands `R` times. Repeats can be logically nested.
 * `-n`/`--next` concludes the current 'field group' and starts a new one. Each field group is printed as a separate record in the output, or as a separate JSON object if using `--json`
 * `-g`/`--global <PATTERN> <COMMANDS>` allows for conditional execution of command flags. Any command flags following `-g` will only execute on lines that match the pattern given after `-g`. Fallback commands can be given using the `--else` flag. You can return from the `-g` scope with the `--exit` flag, which will allow you to continue writing unconditional commands. For the purpose of repetition with `-r`, the entire `-g` block counts as a single command to be repeated.
-* `-v`/`--not-global <PATTERN> <COMMANDS>` same behavior as `-g`, except it executes the contained command flags on lines that *don't* match the given input.
+* `-v`/`--not-global <PATTERN> <COMMANDS>` same behavior as `-g`, except it executes the contained command flags on lines that *don't* match the given pattern.
 
 Command flags can be given any number of times, and the commands are executed in order of appearance.
 
