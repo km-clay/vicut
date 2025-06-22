@@ -1,0 +1,76 @@
+WHITESPACE = _{ " " | "\t" | NEWLINE }
+COMMENT = _{ !"\\" ~ "#" ~ (!NEWLINE ~ ANY)+ ~ NEWLINE? }
+
+backup_ext = { "backup_ext" ~ "=" ~ atomic_string }
+template = { "template" ~ "=" ~ atomic_string }
+delimiter = { "delimiter" ~ "=" ~ atomic_string }
+file = { "file" ~ "=" ~ "\"" ~ inner ~ "\"" }
+files = { "files" ~ "=" ~ "[" ~ (("\"" ~ inner ~ "\"" ~ ",")* ~ ("\"" ~ inner ~ "\"")?)? ~ "]" }
+pipe_in = { "pipe_in" ~ "=" ~ atomic_string }
+pipe_out = { "pipe_out" ~ "=" ~ atomic_string }
+write = { "write" ~ "=" ~ "\"" ~ inner ~ "\"" }
+max_jobs = { "max_jobs" ~ "=" ~ "\"" ~ count ~ "\"" }
+trace = { "trace" }
+json = { "json" }
+linewise = { "linewise" }
+serial = { "serial" }
+trim_fields = { "trim_fields" }
+keep_mode = { "keep_mode" }
+backup = { "backup" }
+edit_inplace = { "edit_inplace" }
+
+opt = {
+	json |
+    pipe_in |
+    pipe_out |
+	linewise |
+	serial |
+	trim_fields |
+	keep_mode |
+    backup_ext |
+	backup |
+	template |
+	delimiter |
+	max_jobs |
+	trace |
+	file |
+    edit_inplace |
+    write |
+	files
+}
+opts_block = { "{" ~ ((opt ~ ",")* ~ opt?)? ~ "}" }
+prelude = { "opts" ~ opts_block }
+
+global = _{ "global" | "g" }
+not_global = _{ "v" | "not_global" | "!global" }
+move = _{ "move" | "m" }
+cut = _{ "cut" | "c" }
+next = { "next" | "n" }
+repeat = _{ "repeat" | "r" }
+count = { ASCII_DIGIT+ }
+
+repeat_cmd = { repeat ~ count ~ block }
+global_cmd = { global ~ pattern ~ block ~ ("else" ~ block)? }
+move_cmd = { move ~ vim_cmd }
+cut_cmd = { cut ~ name_def? ~ vim_cmd }
+not_global_cmd = { not_global ~ pattern ~ block ~ ("else" ~ block)? }
+
+inner = ${ ((!"\\\"" ~ "\\" ~ "\"") | (!"\"" ~ ANY))* }
+atomic_string = @{ "\"" ~ inner ~ "\"" }
+vim_cmd = { "\"" ~ inner ~ "\"" }
+pattern = { "\"" ~ inner ~ "\"" }
+name_def = { "name" ~ "=" ~ "\"" ~ inner ~ "\"" }
+
+
+cmd = {
+  not_global_cmd |
+  global_cmd |
+  repeat_cmd |
+  move_cmd |
+  cut_cmd |
+  next
+}
+
+block = { "{" ~ cmd+ ~ "}" }
+
+vic = { WHITESPACE* ~ prelude? ~ cmd+ ~ WHITESPACE* }

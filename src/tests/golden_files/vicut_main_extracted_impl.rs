@@ -1,4 +1,4 @@
-impl Argv {
+impl Opts {
 	/// Parse the user's arguments
 	pub fn parse() -> Result<Self,String> {
 		let mut new = Self::default();

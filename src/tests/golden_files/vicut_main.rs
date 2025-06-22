@@ -56,7 +56,7 @@ enum Cmd {
 
 /// The arguments passed to the program by the user
 #[derive(Default,Clone,Debug)]
-struct Argv {
+struct Opts {
 	delimiter: Option<String>,
 	template: Option<String>,
 	max_jobs: Option<u32>,
@@ -75,7 +75,7 @@ struct Argv {
 	files: Vec<PathBuf>
 }
 
-impl Argv {
+impl Opts {
 	/// Parse the user's arguments
 	pub fn parse() -> Result<Self,String> {
 		let mut new = Self::default();
@@ -473,7 +473,7 @@ fn init_logger(trace: bool) {
 /// Format the stuff we extracted according to user specification
 ///
 /// `lines` is a two-dimensional vector of tuples, each representing a key/value pair for extract fields.
-fn format_output(args: &Argv, lines: Vec<Vec<(String,String)>>) -> String {
+fn format_output(args: &Opts, lines: Vec<Vec<(String,String)>>) -> String {
 	if args.json {
 		Ok(format_output_json(lines))
 	} else if let Some(template) = args.template.as_deref() {
@@ -621,7 +621,7 @@ fn format_output_template(template: &str, lines: Vec<Vec<(String,String)>>) -> R
 ///
 /// Here we are going to initialize a new instance of `ViCut` to manage state for editing this input
 /// Next we loop over `args.cmds` and execute each one in sequence.
-fn execute(args: &Argv, input: String) -> Result<Vec<Vec<(String,String)>>,String> {
+fn execute(args: &Opts, input: String) -> Result<Vec<Vec<(String,String)>>,String> {
 	let mut fields: Vec<(String,String)> = vec![];
 	let mut fmt_lines: Vec<Vec<(String,String)>> = vec![];
 
@@ -708,7 +708,7 @@ fn get_lines(value: &str) -> Vec<String> {
 /// Execute a single `Cmd`
 fn exec_cmd(
 	cmd: &Cmd,
-	args: &Argv,
+	args: &Opts,
 	vicut: &mut ViCut,
 	field_num: &mut usize,
 	spent_cmds: &mut Vec<&Cmd>,
@@ -850,7 +850,7 @@ fn exec_cmd(
 /// 1. Create a `work` vector containing a tuple of the file's path, and it's contents.
 /// 2. Call `execute()` on each file's contents
 /// 3. Decide how to handle output depending on whether args.edit_inplace is set.
-fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Argv) {
+fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Opts) {
 	let work: Vec<(PathBuf, String)> = args.files.par_iter()
 		.fold(Vec::new, |mut acc,file| {
 			let contents = fs::read_to_string(file).unwrap_or_else(|e| {
@@ -929,7 +929,7 @@ fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Argv) {
 ///
 /// Errors during reading, transformation, or writing will abort the program with a diagnostic.
 /// Backup files are created if `--backup-files` is enabled.
-fn execute_multi_thread_files_linewise(mut stdout: io::StdoutLock, args: &Argv) {
+fn execute_multi_thread_files_linewise(mut stdout: io::StdoutLock, args: &Opts) {
 
 	let work: Vec<(PathBuf, usize, String)> = args.files.par_iter()
 		.fold(Vec::new, |mut acc,file| {
@@ -1009,7 +1009,7 @@ fn execute_multi_thread_files_linewise(mut stdout: io::StdoutLock, args: &Argv) 
 ///
 /// This function is used for `--linewise` execution on stdin.
 /// Reads the complete input from stdin and then splits it into its lines for execution.
-fn execute_linewise(mut stream: Box<dyn BufRead>, args: &Argv) -> String {
+fn execute_linewise(mut stream: Box<dyn BufRead>, args: &Opts) -> String {
 	let mut input = String::new();
 	stream.read_to_string(&mut input).unwrap_or_else(|e| {
 		eprintln!("vicut: failed to read input: {e}");
@@ -1042,7 +1042,7 @@ fn execute_linewise(mut stream: Box<dyn BufRead>, args: &Argv) -> String {
 /// The pathway for when the `--linewise` flag is set
 ///
 /// Each route in this function operates on individual lines from the input
-fn exec_linewise(args: &Argv) {
+fn exec_linewise(args: &Opts) {
 	if args.single_thread {
 		let mut stdout = io::stdout().lock();
 
@@ -1153,7 +1153,7 @@ fn exec_linewise(args: &Argv) {
 /// Execution pathway for handling filenames given as arguments
 ///
 /// Operates on the content of the files, and either prints to stdout, or edits the files in-place
-fn exec_files(args: &Argv) {
+fn exec_files(args: &Opts) {
 	if args.single_thread {
 		let mut stdout = io::stdout().lock();
 		for path in &args.files {
@@ -1215,7 +1215,7 @@ fn exec_files(args: &Argv) {
 /// Default execution pathway. Operates on `stdin`.
 ///
 /// Simplest of the three routes.
-fn exec_stdin(args: &Argv) {
+fn exec_stdin(args: &Opts) {
 	let mut stdout = io::stdout().lock();
 	let mut lines = vec![];
 	let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
@@ -1283,7 +1283,7 @@ fn main() {
 
 	print_help_or_version();
 
-	let args = match Argv::parse() {
+	let args = match Opts::parse() {
 		Ok(args) => args,
 		Err(e) => {
 			eprintln!("vicut: {e}");
@@ -1321,7 +1321,7 @@ fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 	if args.iter().any(|arg| *arg == "--help" || *arg == "-h") {
 		return Ok(get_help())
 	}
-	let args = match Argv::parse_raw(args) {
+	let args = match Opts::parse_raw(args) {
 		Ok(args) => args,
 		Err(e) => {
 			return Err(format!("vicut: {e}"));
@@ -1391,7 +1391,7 @@ fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 	}
 }
 #[cfg(any(test,debug_assertions))]
-impl Argv {
+impl Opts {
 	pub fn parse_raw(args: &[&str]) -> Result<Self,String> {
 		let mut new = Self::default();
 		let mut args = args.iter();

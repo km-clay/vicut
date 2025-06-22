@@ -4,7 +4,7 @@ use std::iter::{Peekable, Skip};
 use std::fmt::Write;
 
 use crate::{execute, format_output, get_lines};
-use crate::{linebuf::LineBuf, modes::{normal::ViNormal, ViMode}, Argv, Cmd};
+use crate::{linebuf::LineBuf, modes::{normal::ViNormal, ViMode}, Opts, Cmd};
 use pretty_assertions::assert_eq;
 
 pub const LOREM_IPSUM: &str = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum. Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, turpis et commodo pharetra.";
@@ -58,7 +58,7 @@ pub fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 	if args.iter().any(|arg| *arg == "--help" || *arg == "-h") {
 		return Ok(get_help())
 	}
-	let args = match Argv::parse_raw(args) {
+	let args = match Opts::parse_raw(args) {
 		Ok(args) => args,
 		Err(e) => {
 			return Err(format!("vicut: {e}"));
@@ -71,7 +71,7 @@ pub fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 
 	use std::io::{self, BufRead, Cursor};
 
-use crate::{execute, execute_linewise, format_output, get_help, get_lines, Argv};
+use crate::{execute, execute_linewise, format_output, get_help, get_lines, Opts};
 	if args.linewise {
 		if args.single_thread {
 			// We need to initialize stream in each branch, since Box<dyn BufReader> does not implement send/sync
@@ -130,7 +130,7 @@ use crate::{execute, execute_linewise, format_output, get_help, get_lines, Argv}
 	}
 }
 #[cfg(any(test,debug_assertions))]
-impl Argv {
+impl Opts {
 	pub fn parse_raw(args: &[&str]) -> Result<Self,String> {
 		let mut new = Self::default();
 		let mut full_args = vec!["vicut"];

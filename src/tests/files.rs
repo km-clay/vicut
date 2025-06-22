@@ -3,9 +3,9 @@ use pretty_assertions::assert_eq;
 use super::vicut_integration;
 
 const VICUT_MAIN: &str = include_str!("golden_files/vicut_main.rs");
-/// `vicut -m ":%s/Argv/Arguments/g"`
+/// `vicut -m ":%s/Opts/Arguments/g"`
 const MAIN_ARGV_REPLACED: &str = include_str!("golden_files/vicut_main_argv_replaced.rs");
-/// `vicut -m "/impl Argv" -c "V$%"`
+/// `vicut -m "/impl Opts" -c "V$%"`
 const MAIN_EXTRACTED_IMPL: &str = include_str!("golden_files/vicut_main_extracted_impl.rs");
 /// `vicut -g "//\s[^/].*" -m "f/" -c "$" -n vicut_main.rs`
 const MAIN_ALL_COMMENTS: &str = include_str!("golden_files/vicut_main_all_comments.rs");
@@ -14,7 +14,7 @@ const MAIN_ALL_COMMENTS: &str = include_str!("golden_files/vicut_main_all_commen
 fn file_replace_argv() {
 	vicut_integration(
 		VICUT_MAIN,
-		&["-m", ":%s/Argv/Arguments/g"],
+		&["-m", ":%s/Opts/Arguments/g"],
 		MAIN_ARGV_REPLACED.trim_end()
 	);
 }
@@ -23,7 +23,7 @@ fn file_replace_argv() {
 fn file_extract_impl() {
 	vicut_integration(
 		VICUT_MAIN,
-		&["-m", "/impl Argv", "-c", "V$%"],
+		&["-m", "/impl Opts", "-c", "V$%"],
 		MAIN_EXTRACTED_IMPL.trim_end(),
 	);
 }

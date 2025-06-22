@@ -33,6 +33,7 @@ pub mod linebuf;
 pub mod keys;
 pub mod register;
 pub mod reader;
+pub mod vic;
 #[cfg(test)]
 pub mod tests;
 
@@ -56,7 +57,7 @@ enum Cmd {
 
 /// The arguments passed to the program by the user
 #[derive(Default,Clone,Debug)]
-struct Argv {
+struct Opts {
 	delimiter: Option<String>,
 	template: Option<String>,
 	max_jobs: Option<u32>,
@@ -71,11 +72,15 @@ struct Argv {
 	backup_files: bool,
 	single_thread: bool,
 
+	pipe_in: Option<String>,
+	pipe_out: Option<String>,
+	out_file: Option<PathBuf>,
+
 	cmds: Vec<Cmd>,
 	files: Vec<PathBuf>
 }
 
-impl Argv {
+impl Opts {
 	/// Parse the user's arguments
 	pub fn parse() -> Result<Self,String> {
 		let mut new = Self::default();
@@ -314,6 +319,29 @@ impl Argv {
 			polarity
 		}
 	}
+	pub fn from_script(script: PathBuf) -> Result<Self,String> {
+		let script_content = fs::read_to_string(&script)
+			.map_err(|_| format!("vicut: failed to read script file '{}'",script.display()))?;
+		vic::parse_vic(&script_content)
+			.map_err(|e| format!("vicut: failed to parse script file '{}': {e}",script.display()))
+	}
+	pub fn from_raw(script: &str) -> Result<Self,String> {
+		vic::parse_vic(script)
+			.map_err(|e| format!("vicut: failed to parse script: {e}"))
+	}
+	fn validate_filename(filename: &str) -> Result<(),String> {
+		let path = PathBuf::from(filename.trim().to_string());
+		if !path.exists() {
+			return Err(format!("vicut: file not found '{}'",path.display()));
+		}
+		if !path.is_file() {
+			return Err(format!("vicut: '{}' is not a file",path.display()));
+		}
+		if fs::File::open(&path).is_err() {
+			return Err(format!("vicut: failed to read file '{}'",path.display()));
+		}
+		Ok(())
+	}
 	/// Handle a filename passed as an argument.
 	///
 	/// Checks to make sure the following invariants are met:
@@ -323,19 +351,11 @@ impl Argv {
 	///
 	/// We check all three separately instead of just the last one, so that we can give better error messages
 	fn handle_filename(&mut self, filename: String) {
+		if let Err(e) = Self::validate_filename(&filename) {
+			eprintln!("{e}");
+			std::process::exit(1);
+		}
 		let path = PathBuf::from(filename.trim().to_string());
-		if !path.exists() {
-			eprintln!("vicut: file not found '{}'",path.display());
-			std::process::exit(1);
-		}
-		if !path.is_file() {
-			eprintln!("vicut: '{}' is not a file",path.display());
-			std::process::exit(1);
-		}
-		if fs::File::open(&path).is_err() {
-			eprintln!("vicut: failed to read file '{}'",path.display());
-			std::process::exit(1);
-		}
 		if !self.files.contains(&path) {
 			self.files.push(path)
 		}
@@ -473,7 +493,7 @@ fn init_logger(trace: bool) {
 /// Format the stuff we extracted according to user specification
 ///
 /// `lines` is a two-dimensional vector of tuples, each representing a key/value pair for extract fields.
-fn format_output(args: &Argv, lines: Vec<Vec<(String,String)>>) -> String {
+fn format_output(args: &Opts, lines: Vec<Vec<(String,String)>>) -> String {
 	if args.json {
 		Ok(format_output_json(lines))
 	} else if let Some(template) = args.template.as_deref() {
@@ -621,7 +641,7 @@ fn format_output_template(template: &str, lines: Vec<Vec<(String,String)>>) -> R
 ///
 /// Here we are going to initialize a new instance of `ViCut` to manage state for editing this input
 /// Next we loop over `args.cmds` and execute each one in sequence.
-fn execute(args: &Argv, input: String) -> Result<Vec<Vec<(String,String)>>,String> {
+fn execute(args: &Opts, input: String) -> Result<Vec<Vec<(String,String)>>,String> {
 	let mut fields: Vec<(String,String)> = vec![];
 	let mut fmt_lines: Vec<Vec<(String,String)>> = vec![];
 
@@ -708,7 +728,7 @@ fn get_lines(value: &str) -> Vec<String> {
 /// Execute a single `Cmd`
 fn exec_cmd(
 	cmd: &Cmd,
-	args: &Argv,
+	args: &Opts,
 	vicut: &mut ViCut,
 	field_num: &mut usize,
 	spent_cmds: &mut Vec<&Cmd>,
@@ -850,7 +870,7 @@ fn exec_cmd(
 /// 1. Create a `work` vector containing a tuple of the file's path, and it's contents.
 /// 2. Call `execute()` on each file's contents
 /// 3. Decide how to handle output depending on whether args.edit_inplace is set.
-fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Argv) {
+fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Opts) {
 	let work: Vec<(PathBuf, String)> = args.files.par_iter()
 		.fold(Vec::new, |mut acc,file| {
 			let contents = fs::read_to_string(file).unwrap_or_else(|e| {
@@ -929,7 +949,7 @@ fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Argv) {
 ///
 /// Errors during reading, transformation, or writing will abort the program with a diagnostic.
 /// Backup files are created if `--backup-files` is enabled.
-fn execute_multi_thread_files_linewise(mut stdout: io::StdoutLock, args: &Argv) {
+fn execute_multi_thread_files_linewise(mut stdout: io::StdoutLock, args: &Opts) {
 
 	let work: Vec<(PathBuf, usize, String)> = args.files.par_iter()
 		.fold(Vec::new, |mut acc,file| {
@@ -1009,7 +1029,7 @@ fn execute_multi_thread_files_linewise(mut stdout: io::StdoutLock, args: &Argv) 
 ///
 /// This function is used for `--linewise` execution on stdin.
 /// Reads the complete input from stdin and then splits it into its lines for execution.
-fn execute_linewise(mut stream: Box<dyn BufRead>, args: &Argv) -> String {
+fn execute_linewise(mut stream: Box<dyn BufRead>, args: &Opts) -> String {
 	let mut input = String::new();
 	stream.read_to_string(&mut input).unwrap_or_else(|e| {
 		eprintln!("vicut: failed to read input: {e}");
@@ -1042,7 +1062,7 @@ fn execute_linewise(mut stream: Box<dyn BufRead>, args: &Argv) -> String {
 /// The pathway for when the `--linewise` flag is set
 ///
 /// Each route in this function operates on individual lines from the input
-fn exec_linewise(args: &Argv) {
+fn exec_linewise(args: &Opts) {
 	if args.single_thread {
 		let mut stdout = io::stdout().lock();
 
@@ -1153,7 +1173,7 @@ fn exec_linewise(args: &Argv) {
 /// Execution pathway for handling filenames given as arguments
 ///
 /// Operates on the content of the files, and either prints to stdout, or edits the files in-place
-fn exec_files(args: &Argv) {
+fn exec_files(args: &Opts) {
 	if args.single_thread {
 		let mut stdout = io::stdout().lock();
 		for path in &args.files {
@@ -1215,7 +1235,7 @@ fn exec_files(args: &Argv) {
 /// Default execution pathway. Operates on `stdin`.
 ///
 /// Simplest of the three routes.
-fn exec_stdin(args: &Argv) {
+fn exec_stdin(args: &Opts) {
 	let mut stdout = io::stdout().lock();
 	let mut lines = vec![];
 	let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
@@ -1283,21 +1303,83 @@ fn main() {
 
 	print_help_or_version();
 
-	let args = match Argv::parse() {
-		Ok(args) => args,
-		Err(e) => {
-			eprintln!("vicut: {e}");
-			return;
+	if std::env::args().count() == 2 {
+		// We're probably running in a standalone vic script
+		// and the kernel just passed us the script path
+
+		let script_path = std::env::args().nth(1).unwrap();
+		if let Err(e) = Opts::validate_filename(&script_path) {
+			eprintln!("{e}");
+			std::process::exit(1);
+		}
+		let script_path = PathBuf::from(script_path);
+		let opts = Opts::from_script(script_path).unwrap_or_else(|e| {
+			eprintln!("{e}");
+			std::process::exit(1)
+		});
+
+
+		init_logger(opts.trace);
+
+		if opts.linewise {
+			exec_linewise(&opts);
+		} else if !opts.files.is_empty() {
+			exec_files(&opts);
+		} else {
+			exec_stdin(&opts);
+		}
+		return
+	}
+
+	let mut args = std::env::args();
+	args.find(|arg| arg == "--script"); // let's find the --script flag
+	let script = args.next(); // If we found it, the next arg is the script name
+
+	let opts = if let Some(script) = script {
+		let script = PathBuf::from(script);
+		Opts::from_script(script).unwrap_or_else(|e| {
+			eprintln!("{e}");
+			std::process::exit(1)
+		})
+	} else {
+		// Let's see if we got a literal in-line script instead then
+		let mut flags = std::env::args().take_while(|arg| arg != "--");
+		let use_inline = flags.all(|arg| !arg.starts_with('-'));
+
+		if use_inline {
+			// We know that there's at least one argument, so we can safely unwrap
+			let mut args = std::env::args().skip(1);
+			let inline_script = args.next().unwrap();
+			let mut opts = Opts::from_raw(&inline_script).unwrap_or_else(|e| {
+				eprintln!("{e}");
+				std::process::exit(1)
+			});
+			// Now let's grab the file names
+			for arg in args {
+				if let Err(e) = Opts::validate_filename(&arg) {
+					eprintln!("vicut: {e}");
+					std::process::exit(1);
+				}
+				opts.files.push(PathBuf::from(arg));
+			}
+			opts
+		} else {
+			// We're using command line arguments
+			// boo
+			Opts::parse().unwrap_or_else(|e| {
+				eprintln!("vicut: {e}");
+				std::process::exit(1)
+			})
 		}
 	};
 
-	init_logger(args.trace);
+	init_logger(opts.trace);
 
-	if args.linewise {
-		exec_linewise(&args);
-	} else if !args.files.is_empty() {
-		exec_files(&args);
+	if opts.linewise {
+		exec_linewise(&opts);
+	} else if !opts.files.is_empty() {
+		exec_files(&opts);
 	} else {
-		exec_stdin(&args);
+		exec_stdin(&opts);
 	}
 }
