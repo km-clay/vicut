@@ -16,7 +16,7 @@ jobs:
 
       - name: Setup toolchain
         run: |
-          rustup override set nightly
+          rustup override set default
           rustup target add x86_64-unknown-linux-musl
 
       - name: Run tests
