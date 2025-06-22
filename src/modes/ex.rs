@@ -102,11 +102,15 @@ impl ViMode for ViEx {
 }
 
 fn get_path(path: &str) -> PathBuf {
-	if let Some(stripped) = path.strip_prefix("~/") && let Some(home) = std::env::var_os("HOME") {
+	if let Some(stripped) = path.strip_prefix("~/")  {
+		if let Some(home) = std::env::var_os("HOME") {
 			return PathBuf::from(home).join(stripped)
+		}
 	}
-	if path == "~" && let Some(home) = std::env::var_os("HOME") {
-		return PathBuf::from(home)
+	if path == "~" {
+		if let Some(home) = std::env::var_os("HOME") {
+			return PathBuf::from(home)
+		}
 	}
 	PathBuf::from(path)
 }
@@ -125,7 +129,18 @@ fn parse_ex_cmd(raw: &str, select_range: Option<(usize,usize)>) -> Result<Option
 	};
 	let verb = {
 		if chars.peek() == Some(&'g') {
-			chars.next();
+			let mut cmd_name = String::new();
+			while let Some(ch) = chars.peek() {
+				if ch.is_alphanumeric() {
+					cmd_name.push(*ch);
+					chars.next();
+				} else {
+					break
+				}
+			}
+			if !"global".starts_with(&cmd_name) {
+				return Err(None)
+			}
 			let Some(result) = parse_global(&mut chars,motion.as_ref().map(|mcmd| &mcmd.1))? else { return Ok(None) };
 			motion = Some(MotionCmd(1,result.0));
 			Some(VerbCmd(1,result.1))
@@ -214,32 +229,56 @@ fn parse_one_addr(chars: &mut Peekable<Chars<'_>>) -> Result<Option<LineAddr>,Op
 	}
 }
 
-fn parse_ex_command(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,Option<String>> {
-	let mut normal_check = chars.clone();
+/// Unescape shell command arguments
+fn unescape_shell_cmd(cmd: &str) -> String {
+	// The pest grammar uses double quotes for vicut commands
+	// So shell commands need to escape double quotes
+	// We will be removing a single layer of escaping from double quotes
+	let mut result = String::new();
+	let mut chars = cmd.chars().peekable();
+	while let Some(ch) = chars.next() {
+		if ch == '\\' {
+			if let Some(&'"') = chars.peek() {
+				chars.next();
+				result.push('"');
+			} else {
+				result.push(ch);
+			}
+		} else {
+			result.push(ch);
+		}
+	}
+	result
+}
 
-	// Production ready :D
-	if normal_check.next() == Some('n')
-	&& normal_check.next() == Some('o')
-	&& normal_check.next() == Some('r')
-	&& normal_check.next() == Some('m')
-	&& normal_check.next() == Some('a')
-	&& normal_check.next() == Some('l')
-	&& normal_check.next() == Some('!') {
-		*chars = normal_check;
-		return parse_normal(chars)
+fn parse_ex_command(chars: &mut Peekable<Chars<'_>>) -> Result<Option<Verb>,Option<String>> {
+	let mut cmd_name = String::new();
+
+	while let Some(ch) = chars.peek() {
+		if ch == &'!' {
+			cmd_name.push(*ch);
+			chars.next();
+			break
+		} else if !ch.is_alphanumeric() {
+			break
+		}
+		cmd_name.push(*ch);
+		chars.next();
 	}
 
-	let Some(first) = chars.next() else {
-		return Ok(None)
-	};
-
-	match first {
-		'd' => Ok(Some(Verb::Delete)),
-		'y' => Ok(Some(Verb::Yank)),
-		'p' => Ok(Some(Verb::Put(Anchor::After))),
-		'r' => parse_read(chars),
-		'w' => parse_write(chars),
-		's' => parse_substitute(chars),
+	match cmd_name.as_str() {
+		"!" => {
+			let cmd = chars.collect::<String>();
+			let cmd = unescape_shell_cmd(&cmd);
+			Ok(Some(Verb::ShellCmd(cmd)))
+		}
+		"normal!" => parse_normal(chars),
+		_ if "delete".starts_with(&cmd_name) => Ok(Some(Verb::Delete)),
+		_ if "yank".starts_with(&cmd_name) => Ok(Some(Verb::Yank)),
+		_ if "put".starts_with(&cmd_name) => Ok(Some(Verb::Put(Anchor::After))),
+		_ if "read".starts_with(&cmd_name) => parse_read(chars),
+		_ if "write".starts_with(&cmd_name) => parse_write(chars),
+		_ if "substitute".starts_with(&cmd_name) => parse_substitute(chars),
 		_ => Err(None)
 	}
 }

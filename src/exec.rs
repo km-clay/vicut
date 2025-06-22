@@ -4,7 +4,7 @@
 use log::trace;
 
 use crate::keys::{KeyCode, KeyEvent, ModKeys};
-use crate::linebuf::{ordered, ClampedUsize, MotionKind, SelectRange};
+use crate::linebuf::{ordered, ClampedUsize, MotionKind};
 use crate::modes::ex::ViEx;
 use crate::modes::search::ViSearch;
 use crate::reader::{KeyReader, RawReader};
@@ -51,7 +51,7 @@ impl ViCut {
 				self.set_normal_mode();
 			}
 		}
-		if let ModeReport::Search | ModeReport::Ex = self.mode.report_mode()
+		if matches!(self.mode.report_mode(), ModeReport::Search | ModeReport::Ex)
 			&& !self.mode.pending_seq().unwrap().is_empty() {
 				// We have run out of keys with a pending sequence.
 				// The user may have done something like "-c :%s/foo/bar/" and did not type the explicit "<CR>" to submit

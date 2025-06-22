@@ -189,6 +189,14 @@ impl RegisterContent {
 			Self::Empty => 0
 		}
 	}
+	pub fn is_empty(&self) -> bool {
+		match self {
+			Self::Span(s) => s.is_empty(),
+			Self::Line(s) => s.is_empty(),
+			Self::Block(v) => v.is_empty(),
+			Self::Empty => true
+		}
+	}
 }
 
 /// A single register.
@@ -213,13 +221,13 @@ impl Register {
 	}
 	pub fn append(&mut self, buf: RegisterContent) {
 		match buf {
-			RegisterContent::Empty => return,
+			RegisterContent::Empty => {},
 			RegisterContent::Span(ref s) |
 			RegisterContent::Line(ref s) => {
 				match &mut self.content {
 					RegisterContent::Empty => self.content = buf,
-					RegisterContent::Span(existing) => existing.push_str(&s),
-					RegisterContent::Line(existing) => existing.push_str(&s),
+					RegisterContent::Span(existing) => existing.push_str(s),
+					RegisterContent::Line(existing) => existing.push_str(s),
 					RegisterContent::Block(_) => {
 						self.content = buf
 					}

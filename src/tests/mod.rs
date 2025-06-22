@@ -1,9 +1,6 @@
-use std::io::BufRead;
-use std::{fs, io};
 use std::iter::{Peekable, Skip};
 use std::fmt::Write;
 
-use crate::{execute, format_output, get_lines};
 use crate::{linebuf::LineBuf, modes::{normal::ViNormal, ViMode}, Opts, Cmd};
 use pretty_assertions::assert_eq;
 
@@ -58,18 +55,62 @@ pub fn call_main(args: &[&str], input: &str) -> Result<String,String> {
 	if args.iter().any(|arg| *arg == "--help" || *arg == "-h") {
 		return Ok(get_help())
 	}
-	let args = match Opts::parse_raw(args) {
-		Ok(args) => args,
-		Err(e) => {
-			return Err(format!("vicut: {e}"));
+
+	let mut args_iter = args.iter();
+	args_iter.find(|arg| **arg == "--script"); // let's find the --script flag
+	let script = args_iter.next(); // If we found it, the next arg is the script name
+
+	let args = if let Some(script) = script {
+		let script = PathBuf::from(script);
+		Opts::from_script(script).unwrap_or_else(|e| {
+			eprintln!("{e}");
+			std::process::exit(1)
+		})
+	} else {
+		// Let's see if we got a literal in-line script instead then
+		let mut flags = args.iter().take_while(|arg| **arg != "--");
+		let use_inline = flags.all(|arg| !arg.starts_with('-'));
+
+		if use_inline {
+			// We know that there's at least one argument, so we can safely unwrap
+			let mut args = args.iter();
+			let maybe_script = args.next().unwrap();
+			let mut opts = if Opts::validate_filename(maybe_script).is_err() {
+				// It's not a file...
+				// Let's see if it's a valid in-line script
+				Opts::from_raw(maybe_script).unwrap_or_else(|e| {
+					eprintln!("{e}");
+					std::process::exit(1)
+				})
+			} else {
+				// It's a file, let's see if it's a valid script
+				let script_path = PathBuf::from(maybe_script);
+				Opts::from_script(script_path).unwrap_or_else(|e| {
+					eprintln!("{e}");
+					std::process::exit(1)
+				})
+			};
+			// Now let's grab the file names
+			for arg in args {
+				if let Err(e) = Opts::validate_filename(arg) {
+					eprintln!("vicut: {e}");
+					std::process::exit(1);
+				}
+				opts.files.push(PathBuf::from(arg));
+			}
+			opts
+		} else {
+			eprintln!("args: {args:?}");
+			// We're using command line arguments
+			// boo
+			Opts::parse_raw(args).unwrap_or_else(|e| {
+				eprintln!("vicut: {e}");
+				std::process::exit(1)
+			})
 		}
 	};
 
-	if args.json && args.delimiter.is_some() {
-		eprintln!("vicut: WARNING: --delimiter flag is ignored when --json is used")
-	}
-
-	use std::io::{self, BufRead, Cursor};
+	use std::{io::{self, BufRead, Cursor}, path::PathBuf};
 
 use crate::{execute, execute_linewise, format_output, get_help, get_lines, Opts};
 	if args.linewise {
@@ -159,6 +200,9 @@ impl Opts {
 				"--backup" => {
 					new.backup_files = true;
 				}
+				"--global-uses-line-numbers" => {
+					new.global_uses_line_numbers = true;
+				}
 				"-i" => {
 					new.edit_inplace = true;
 				}
@@ -227,7 +271,7 @@ impl Opts {
 				}
 				"-v" | "--not-global" |
 				"-g" | "--global" => {
-					let global = new.handle_global_arg_raw(arg, &mut args);
+					let global = Self::handle_global_arg_raw(arg, &mut args);
 					new.cmds.push(global);
 				}
 				_ => new.handle_filename(arg.to_string())
@@ -235,7 +279,7 @@ impl Opts {
 		}
 		Ok(new)
 	}
-	fn handle_global_arg_raw(&mut self,arg: &str, args: &mut Peekable<Skip<std::slice::Iter<'_, &str>>>) -> Cmd {
+	fn handle_global_arg_raw(arg: &str, args: &mut Peekable<Skip<std::slice::Iter<'_, &str>>>) -> Cmd {
 		let polarity = match arg {
 			"-v" | "--not-global" => false,
 			"-g" | "--global" => true,
@@ -322,7 +366,7 @@ impl Opts {
 				}
 				"-g" | "--global" |
 				"-v" | "--not-global" => {
-					let nested = self.handle_global_arg_raw(&global_arg, args);
+					let nested = Self::handle_global_arg_raw(global_arg, args);
 					if let Some(cmds) = else_cmds.as_mut() {
 						cmds.push(nested);
 					} else {

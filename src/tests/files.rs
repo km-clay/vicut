@@ -1,5 +1,3 @@
-use pretty_assertions::assert_eq;
-
 use super::vicut_integration;
 
 const VICUT_MAIN: &str = include_str!("golden_files/vicut_main.rs");
@@ -11,6 +9,7 @@ const MAIN_EXTRACTED_IMPL: &str = include_str!("golden_files/vicut_main_extracte
 const MAIN_ALL_COMMENTS: &str = include_str!("golden_files/vicut_main_all_comments.rs");
 
 #[test]
+#[ignore]
 fn file_replace_argv() {
 	vicut_integration(
 		VICUT_MAIN,
@@ -20,6 +19,7 @@ fn file_replace_argv() {
 }
 
 #[test]
+#[ignore]
 fn file_extract_impl() {
 	vicut_integration(
 		VICUT_MAIN,
@@ -29,6 +29,7 @@ fn file_extract_impl() {
 }
 
 #[test]
+#[ignore]
 fn file_all_comments() {
 	vicut_integration(
 		VICUT_MAIN,

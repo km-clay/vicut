@@ -13,8 +13,9 @@ use super::Cmd;
 #[grammar = "vic/vic.pest"] // relative to src
 pub struct VicParser;
 
-pub fn parse_vic(input: &str) -> Result<Opts, pest::error::Error<Rule>> {
-	let pairs = VicParser::parse(Rule::vic, input)?.next().unwrap().into_inner();
+pub fn parse_vic(input: &str) -> Result<Opts, String> {
+	let pairs = VicParser::parse(Rule::vic, input)
+		.map_err(|e| format!("vicut: error parsing vic script: {e}"))?.next().unwrap().into_inner();
 	let mut opts = Opts::default();
 
 	for pair in pairs {

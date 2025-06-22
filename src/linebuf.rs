@@ -863,7 +863,7 @@ impl LineBuf {
 		(line_offset, col_offset)
 	}
 	pub fn get_block_select_windows(&mut self, mode: &SelectMode) -> Vec<(usize,usize)> {
-		let SelectMode::Block { anchor, anchor_pos } = mode else { unreachable!() };
+		let SelectMode::Block { anchor: _, anchor_pos } = mode else { unreachable!() };
 		let mut anchor_pos = *anchor_pos;
 		let mut cursor_pos = self.cursor.get();
 		let cursor_col = self.index_col(cursor_pos);
@@ -878,7 +878,7 @@ impl LineBuf {
 		let cursor_col = self.index_col(cursor_pos);
 		let anchor_col = self.index_col(anchor_pos);
 
-		let (line_offset, col_offset) = {
+		let (line_offset, _) = {
 			let cursor_line = self.cursor_line_number();
 			let anchor_line = self.index_line_number(anchor_pos);
 
@@ -900,7 +900,7 @@ impl LineBuf {
 		for line in line_range {
 			let Some((start,end)) = self.line_bounds(line) else { continue };
 			let exclusive = end != self.cursor.max;
-			let mut clamped_start = ClampedUsize::new(start, end, exclusive).with_min(start);
+			let clamped_start = ClampedUsize::new(start, end, exclusive).with_min(start);
 			let pos1 = clamped_start.ret_add(anchor_col);
 			let pos2 = clamped_start.ret_add(cursor_col);
 
@@ -1299,8 +1299,10 @@ impl LineBuf {
 		}
 		let start = start.unwrap_or(0);
 
-		if count > 1 && let Some((_,new_end)) = self.text_obj_sentence(end, count - 1, bound) {
+		if count > 1 {
+				if let Some((_,new_end)) = self.text_obj_sentence(end, count - 1, bound) {
 			end = new_end;
+			}
 		}
 
 		Some((start,end))
@@ -1353,8 +1355,10 @@ impl LineBuf {
 		}
 		let start = start.unwrap_or(0);
 
-		if count > 1 && let Some((_,new_end)) = self.text_obj_paragraph(end, count - 1, bound) {
+		if count > 1 {
+				if let Some((_,new_end)) = self.text_obj_sentence(end, count - 1, bound) {
 			end = new_end;
+			}
 		}
 		Some((start,end))
 	}
@@ -2147,7 +2151,7 @@ impl LineBuf {
 		// We can be reasonably sure that start is less than pos
 		pos - start
 	}
-	pub fn insert_register_content(&mut self, insert_idx: usize, content: RegisterContent, anchor: Anchor) {
+	pub fn insert_register_content(&mut self, insert_idx: usize, content: RegisterContent, _anchor: Anchor) {
 		let byte_pos = self.index_byte_pos(insert_idx);
 		match content {
 			RegisterContent::Span(text) => {
@@ -2164,7 +2168,7 @@ impl LineBuf {
 			RegisterContent::Block(windows) => {
 				eprintln!("Inserting block at {}", insert_idx);
 				eprintln!("Block: {:?}", windows);
-				let mut col = self.index_col(insert_idx);
+				let col = self.index_col(insert_idx);
 				let line = self.index_line_number(insert_idx);
 
 				let windows_iter = windows.iter()
@@ -2991,14 +2995,11 @@ impl LineBuf {
 			}
 			MotionKind::LineOffset(offset) => {
 				let cursor_line = self.cursor_line_number();
-				dbg!(cursor_line);
 				let target_line = cursor_line.saturating_add_signed(offset);
-				dbg!(target_line);
 				if target_line > self.total_lines() {
 					self.cursor.set(self.cursor.max);
 				} else {
 					let Some((mut target_pos,_)) = self.line_bounds(target_line) else { return };
-					dbg!(self.saved_col);
 					if let Some(col) = self.saved_col {
 						target_pos += col;
 					}
@@ -3189,7 +3190,6 @@ impl LineBuf {
 					return RegisterContent::Empty
 				};
 				if should_drain {
-					let cursor_line = self.cursor_line_number();
 					// If we are deleting or changing, we need to drain the content
 					// and update the grapheme indices
 					let drained = self.drain(start,end);
@@ -3216,13 +3216,8 @@ impl LineBuf {
 				if let Some(SelectRange::TwoDim(sel)) = self.select_range.as_ref() {
 					// If we are in visual block, the cursor is set to the start of the first window
 					let new_pos = sel.first().map_or(0, |(start,_)| *start);
-					dbg!(self.grapheme_before(new_pos));
-					dbg!(self.grapheme_at(new_pos));
-					dbg!(self.grapheme_after(new_pos));
 					if self.grapheme_at(new_pos) == Some("\n") && self.grapheme_before(new_pos) != Some("\n") {
-						dbg!(new_pos.saturating_sub(1));
 						self.cursor.set(new_pos.saturating_sub(1));
-						dbg!(self.cursor.get());
 					} else {
 						self.cursor.set(new_pos);
 					}
@@ -3446,7 +3441,6 @@ impl LineBuf {
 							let first_non_ws = self.eval_motion(None, MotionCmd(1,Motion::FirstGraphicalOnScreenLine));
 							self.move_cursor(first_non_ws);
 						} else {
-							dbg!(self.cursor.get());
 							let insert_idx = match anchor {
 								Anchor::After => self.cursor.ret_add(1),
 								Anchor::Before => self.cursor.get()
@@ -3463,7 +3457,8 @@ impl LineBuf {
 				}
 			}
 			Verb::SwapVisualAnchor => {
-				if let Some(range) = self.select_range.clone() && let Some(mode) = self.select_mode.as_mut() {
+				if let Some(range) = self.select_range.clone() {
+					let Some(mode) = self.select_mode.as_mut() else { return Ok(()) };
 					match mode {
 						SelectMode::Char(anchor) => {
 							let SelectRange::OneDim((start,end)) = range else { unreachable!() };
@@ -3646,6 +3641,20 @@ impl LineBuf {
 				let output = String::from_utf8_lossy(&bytes.stdout).to_string();
 
 				self.replace_range(start, end, &output);
+			}
+			Verb::ShellCmd(cmd) => {
+				let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+				let child = Command::new(shell)
+					.arg("-c")
+					.arg(cmd)
+					.output()
+					.map_err(|e| format!("Failed to spawn child process: {e}"))?;
+
+				if child.status.success() {
+					return Ok(());
+				} else {
+					return Err(format!("Shell command exited with status {}", child.status.code().unwrap_or(-1)));
+				}
 			}
 			Verb::Read(src) => {
 				let insert_line = match motion {
@@ -3851,9 +3860,10 @@ impl LineBuf {
 
 		// Merge character inserts into one edit
 		if edit_is_merging
-			&& cmd.verb.as_ref().is_none_or(|v| !v.1.is_char_insert())
-			&& let Some(edit) = self.undo_stack.last_mut() {
-				edit.stop_merge();
+			&& cmd.verb.as_ref().is_none_or(|v| !v.1.is_char_insert()) {
+				if let Some(edit) = self.undo_stack.last_mut() {
+					edit.stop_merge();
+				}
 		}
 
 		let ViCmd { register, verb, motion, flags, raw_seq: _ } = cmd;
@@ -3934,8 +3944,10 @@ impl LineBuf {
 			self.saved_col = None;
 		}
 
-		if is_char_insert && let Some(edit) = self.undo_stack.last_mut() {
-			edit.start_merge();
+		if is_char_insert {
+			if let Some(edit) = self.undo_stack.last_mut() {
+				edit.start_merge();
+			}
 		}
 
 		if self.grapheme_at_cursor().is_some_and(|gr| gr == "\n")

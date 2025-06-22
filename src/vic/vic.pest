@@ -18,24 +18,26 @@ trim_fields = { "trim_fields" }
 keep_mode = { "keep_mode" }
 backup = { "backup" }
 edit_inplace = { "edit_inplace" }
+global_uses_line_numbers = { "global_uses_line_numbers" }
 
 opt = {
 	json |
-    pipe_in |
-    pipe_out |
+	pipe_in |
+	pipe_out |
 	linewise |
 	serial |
 	trim_fields |
 	keep_mode |
-    backup_ext |
+	backup_ext |
 	backup |
 	template |
 	delimiter |
 	max_jobs |
 	trace |
 	file |
-    edit_inplace |
-    write |
+	global_uses_line_numbers |
+	edit_inplace |
+	write |
 	files
 }
 opts_block = { "{" ~ ((opt ~ ",")* ~ opt?)? ~ "}" }
@@ -55,7 +57,7 @@ move_cmd = { move ~ vim_cmd }
 cut_cmd = { cut ~ name_def? ~ vim_cmd }
 not_global_cmd = { not_global ~ pattern ~ block ~ ("else" ~ block)? }
 
-inner = ${ ((!"\\\"" ~ "\\" ~ "\"") | (!"\"" ~ ANY))* }
+inner = ${ (("\\\\") | ("\\" ~ "\"") | (!"\"" ~ ANY))* }
 atomic_string = @{ "\"" ~ inner ~ "\"" }
 vim_cmd = { "\"" ~ inner ~ "\"" }
 pattern = { "\"" ~ inner ~ "\"" }

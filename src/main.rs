@@ -1,5 +1,4 @@
 #![allow(clippy::unnecessary_to_owned,clippy::while_let_on_iterator)]
-#![feature(let_chains)]
 //! `vicut` is a command-line tool that brings Vim-style motions and commands
 //! to non-interactive text processing.
 //!
@@ -57,7 +56,7 @@ enum Cmd {
 
 /// The arguments passed to the program by the user
 #[derive(Default,Clone,Debug)]
-struct Opts {
+pub struct Opts {
 	delimiter: Option<String>,
 	template: Option<String>,
 	max_jobs: Option<u32>,
@@ -71,6 +70,7 @@ struct Opts {
 	keep_mode: bool,
 	backup_files: bool,
 	single_thread: bool,
+	global_uses_line_numbers: bool,
 
 	pipe_in: Option<String>,
 	pipe_out: Option<String>,
@@ -107,6 +107,9 @@ impl Opts {
 				}
 				"--backup" => {
 					new.backup_files = true;
+				}
+				"--global-uses-line-numbers" => {
+					new.global_uses_line_numbers = true;
 				}
 				"-i" => {
 					new.edit_inplace = true;
@@ -172,7 +175,7 @@ impl Opts {
 				}
 				"-v" | "--not-global" |
 				"-g" | "--global" => {
-					let global = new.handle_global_arg(arg.as_str(), &mut args);
+					let global = Self::handle_global_arg(arg.as_str(), &mut args);
 					new.cmds.push(global);
 				}
 				_ => new.handle_filename(arg)
@@ -194,7 +197,7 @@ impl Opts {
 	/// ```bash
 	/// vicut -g 'foo' -g 'bar' -c 'd' --else -v 'baz' -c 'y' --end --end
 	/// ```
-	fn handle_global_arg(&mut self,arg: &str, args: &mut Peekable<Skip<Args>>) -> Cmd {
+	fn handle_global_arg(arg: &str, args: &mut Peekable<Skip<Args>>) -> Cmd {
 		let polarity = match arg {
 			"-v" | "--not-global" => false,
 			"-g" | "--global" => true,
@@ -281,7 +284,7 @@ impl Opts {
 				}
 				"-g" | "--global" |
 				"-v" | "--not-global" => {
-					let nested = self.handle_global_arg(&global_arg, args);
+					let nested = Self::handle_global_arg(&global_arg, args);
 					if let Some(cmds) = else_cmds.as_mut() {
 						cmds.push(nested);
 					} else {
@@ -509,6 +512,9 @@ fn format_output(args: &Opts, lines: Vec<Vec<(String,String)>>) -> String {
 
 /// Format the output as JSON
 fn format_output_json(lines: Vec<Vec<(String,String)>>) -> String {
+	if lines.is_empty() || lines.iter().all(|line| line.is_empty()) {
+		return String::new();
+	}
 	let array: Vec<Value> = lines
 		.into_iter()
 		.map(|fields| {
@@ -519,6 +525,30 @@ fn format_output_json(lines: Vec<Vec<(String,String)>>) -> String {
 			Value::Object(obj)
 		}).collect();
 
+	let json = Value::Array(array);
+	serde_json::to_string_pretty(&json).unwrap()
+}
+
+type Files = Vec<(PathBuf, Vec<Vec<(String,String)>>)>; // YEESH
+fn format_output_json_files(files: Files) -> String {
+	let mut array = vec![];
+	for (path, content) in files {
+		let mut obj = Map::new();
+		let path = path.to_string_lossy().to_string();
+
+		obj.insert("__filename__".into(), Value::String(path));
+		let array_content: Vec<Value> = content
+			.into_iter()
+			.map(|fields| {
+				let mut obj = Map::new();
+				for (name,field) in fields {
+					obj.insert(name, Value::String(field));
+				}
+				Value::Object(obj)
+			}).collect();
+		obj.insert("__content__".into(), Value::Array(array_content));
+		array.push(Value::Object(obj));
+	}
 	let json = Value::Array(array);
 	serde_json::to_string_pretty(&json).unwrap()
 }
@@ -650,7 +680,6 @@ fn execute(args: &Opts, input: String) -> Result<Vec<Vec<(String,String)>>,Strin
 	let mut spent_cmds: Vec<&Cmd> = vec![];
 
 	let mut field_num = 0;
-	let has_global = args.cmds.iter().any(|cmd| matches!(cmd,Cmd::Global {..}));
 	for cmd in &args.cmds {
 		exec_cmd(
 			cmd,
@@ -672,13 +701,26 @@ fn execute(args: &Opts, input: String) -> Result<Vec<Vec<(String,String)>>,Strin
 	}
 
 	// Let's figure out if we want to print the whole buffer
-	// fmt_lines is empty, so the user didn't write any -c commands
-	// if args has files it is working on, and the command list has a global, that means
-	// that the user is probably searching for something, potentially in a group of files.
-	// We don't want to spam the output with entire files with no matches in that case,
-	// But if the files vector is empty, the user is working on stdin, so they will probably
-	// want to see that output, with or without globals.
-	if fmt_lines.is_empty() && ((!args.files.is_empty() && !has_global) || (args.files.is_empty())) {
+	let no_fields = fmt_lines.is_empty(); // No fields were extracted
+	let has_files = !args.files.is_empty(); // We have files to edit
+	let has_pattern_search = spent_cmds.iter().any(|cmd| {
+		if let Cmd::Global { then_cmds, .. } = cmd {
+			then_cmds.iter().any(|cmd| matches!(cmd, Cmd::Field(_) | Cmd::NamedField(_, _)))
+		} else {
+			false
+		}
+	});
+	let editing_inplace = args.edit_inplace; // We are not editing in place
+
+	// If we have not extracted any fields, and the following conditions are true:
+	// * We have files without editing in place, or
+	// * We don't have any files, order
+	// * We have a pattern search with at least one field extraction
+	//
+	// then we print the entire buffer
+	let should_print_entire_buffer = (!has_pattern_search && (!editing_inplace || !has_files)) && no_fields;
+
+	if should_print_entire_buffer {
 		let big_line = vicut.editor.buffer;
 		fmt_lines.push(vec![("0".into(),big_line)]);
 	}
@@ -775,10 +817,18 @@ fn exec_cmd(
 			if !lines.is_empty() {
 				// Positive branch
 				for line in lines {
+					let mut line_no = line;
+					let field_num = if args.global_uses_line_numbers {
+						// If we are using line numbers, we need to set the field number to the line number
+						&mut line_no
+					} else {
+						&mut field_num.clone()
+					};
 					let Some((start,_)) = vicut.editor.line_bounds(line) else { continue };
 					// Set the cursor on the start of the line
 					vicut.editor.cursor.set(start);
 					// Execute our commands
+
 					for cmd in then_cmds {
 						exec_cmd(
 							cmd,
@@ -898,6 +948,11 @@ fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Opts) {
 		}).collect::<Vec<_>>();
 
 	// Write back to file
+	if args.json  && args.files.len() > 1 {
+		let json = format_output_json_files(results);
+		write!(stdout, "{json}").ok();
+		return
+	}
 	for (path, contents) in results {
 		let output = format_output(args, contents);
 
@@ -988,6 +1043,15 @@ fn execute_multi_thread_files_linewise(mut stdout: io::StdoutLock, args: &Opts) 
 			.or_default()
 			.push((line_no,output));
 	}
+	if args.json  && args.files.len() > 1 {
+		let results = per_file.into_iter()
+			.map(|(path, lines)| (path, lines.into_iter().map(|(num,line)| vec![(num.to_string(),line)]).collect::<Vec<_>>()))
+			.collect::<Vec<_>>(); // two vec collects, holy cringe
+														// it'll come out in the wash
+		let json = format_output_json_files(results);
+		write!(stdout, "{json}").ok();
+		return
+	}
 	// Write back to file
 	for (path, mut lines) in per_file {
 		lines.sort_by_key(|(line_no,_)| *line_no); // Sort lines
@@ -1069,6 +1133,7 @@ fn exec_linewise(args: &Opts) {
 		// We need to initialize stream in each branch, since Box<dyn BufReader> does not implement send/sync
 		// So using it in pool.install() doesn't work. We have to initialize it in the closure there.
 		let mut lines = vec![];
+		let mut json_data = vec![];
 		if !args.files.is_empty() {
 			for path in &args.files {
 				let input = fs::read_to_string(path).unwrap_or_else(|e| {
@@ -1085,6 +1150,10 @@ fn exec_linewise(args: &Opts) {
 							return;
 						}
 					}
+				}
+				if args.json {
+					json_data.push((path.clone(), std::mem::take(&mut lines)));
+					continue
 				}
 				let mut output = format_output(args, std::mem::take(&mut lines));
 				if args.edit_inplace {
@@ -1113,6 +1182,12 @@ fn exec_linewise(args: &Opts) {
 					writeln!(stdout, "{output}").ok();
 				}
 			}
+			if !args.json {
+				// If we are not outputting JSON, we can just return here
+				return;
+			}
+			let json = format_output_json_files(json_data);
+			write!(stdout, "{json}").ok();
 		} else {
 			let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
 			let mut input = String::new();
@@ -1174,6 +1249,7 @@ fn exec_linewise(args: &Opts) {
 ///
 /// Operates on the content of the files, and either prints to stdout, or edits the files in-place
 fn exec_files(args: &Opts) {
+	let mut json_data = vec![];
 	if args.single_thread {
 		let mut stdout = io::stdout().lock();
 		for path in &args.files {
@@ -1183,6 +1259,10 @@ fn exec_files(args: &Opts) {
 			});
 			match execute(args,content) {
 				Ok(output) => {
+					if args.json {
+						json_data.push((path.clone(), output));
+						continue
+					}
 					let mut output = format_output(args, output);
 					if args.edit_inplace {
 						if args.backup_files {
@@ -1212,6 +1292,10 @@ fn exec_files(args: &Opts) {
 				}
 				Err(e) => eprintln!("vicut: {e}"),
 			};
+		}
+		if args.json {
+			let json = format_output_json_files(json_data);
+			write!(stdout, "{json}").ok();
 		}
 	} else if let Some(num) = args.max_jobs {
 		let pool = rayon::ThreadPoolBuilder::new()
@@ -1295,6 +1379,36 @@ fn print_help_or_version() {
 
 }
 
+fn main_script() {
+	// Is it a script file? or an in-line script?
+	let maybe_script = std::env::args().nth(1).unwrap();
+	let opts = if Opts::validate_filename(&maybe_script).is_err() {
+		// It's not a file...
+		// Let's see if it's a valid in-line script
+		Opts::from_raw(&maybe_script).unwrap_or_else(|e| {
+			eprintln!("{e}");
+			std::process::exit(1)
+		})
+	} else {
+		// It's a file, let's see if it's a valid script
+		let script_path = PathBuf::from(maybe_script);
+		Opts::from_script(script_path).unwrap_or_else(|e| {
+			eprintln!("{e}");
+			std::process::exit(1)
+		})
+	};
+
+
+	init_logger(opts.trace);
+
+	if opts.linewise {
+		exec_linewise(&opts);
+	} else if !opts.files.is_empty() {
+		exec_files(&opts);
+	} else {
+		exec_stdin(&opts);
+	}
+}
 
 #[allow(unreachable_code)]
 fn main() {
@@ -1305,30 +1419,7 @@ fn main() {
 
 	if std::env::args().count() == 2 {
 		// We're probably running in a standalone vic script
-		// and the kernel just passed us the script path
-
-		let script_path = std::env::args().nth(1).unwrap();
-		if let Err(e) = Opts::validate_filename(&script_path) {
-			eprintln!("{e}");
-			std::process::exit(1);
-		}
-		let script_path = PathBuf::from(script_path);
-		let opts = Opts::from_script(script_path).unwrap_or_else(|e| {
-			eprintln!("{e}");
-			std::process::exit(1)
-		});
-
-
-		init_logger(opts.trace);
-
-		if opts.linewise {
-			exec_linewise(&opts);
-		} else if !opts.files.is_empty() {
-			exec_files(&opts);
-		} else {
-			exec_stdin(&opts);
-		}
-		return
+		return main_script()
 	}
 
 	let mut args = std::env::args();
@@ -1349,11 +1440,22 @@ fn main() {
 		if use_inline {
 			// We know that there's at least one argument, so we can safely unwrap
 			let mut args = std::env::args().skip(1);
-			let inline_script = args.next().unwrap();
-			let mut opts = Opts::from_raw(&inline_script).unwrap_or_else(|e| {
-				eprintln!("{e}");
-				std::process::exit(1)
-			});
+			let maybe_script = args.next().unwrap();
+			let mut opts = if Opts::validate_filename(&maybe_script).is_err() {
+				// It's not a file...
+				// Let's see if it's a valid in-line script
+				Opts::from_raw(&maybe_script).unwrap_or_else(|e| {
+					eprintln!("{e}");
+					std::process::exit(1)
+				})
+			} else {
+				// It's a file, let's see if it's a valid script
+				let script_path = PathBuf::from(maybe_script);
+				Opts::from_script(script_path).unwrap_or_else(|e| {
+					eprintln!("{e}");
+					std::process::exit(1)
+				})
+			};
 			// Now let's grab the file names
 			for arg in args {
 				if let Err(e) = Opts::validate_filename(&arg) {
