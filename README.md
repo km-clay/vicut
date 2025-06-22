@@ -114,43 +114,60 @@ With the target output being:
 The command used to generate the datasets was this, if you want to reproduce these benchmarks at home:
 `seq -w 1 1000000 | awk 'BEGIN { OFMT="%.2f" } { printf "%05d) Provider-%d (City-%d, State-%d) [%.2f km]\n", $1, $1, $1, $1, rand()*1000 }' > providers.txt`
 
+---
+
 ## 📦 Installation
 
-**NOTE:** Building requires the `rustc` compiler and the `cargo` package manager. Both can be installed using `rustup`.
+> **Note:** Building requires the [Rust toolchain](https://rustup.rs), which includes the `rustc` compiler and the `cargo` package manager.
 
-#### Cargo Installation
-You can have `cargo` download and build the source code using this command:
-```
-cargo install --git https://github.com/km-clay/vicut
-```
-Note that this will install the `vicut` binary to `~/.cargo/bin` so make sure that is in your PATH.  
+---
 
-#### Building from Source
-Alternatively, you can clone the repo and build it manually:
+### Install via Cargo (Recommended)
 
-1. Clone the repository, navigate to it
+If you have Rust installed, you can install `vicut` directly from [crates.io](https://crates.io/crates/vicut) using:
+
 ```bash
-git clone https://github.com/km-clay/vicut
-cd vicut
-```
-2. Build the binary from source
-```bash
-cargo build --release
-```
-3. Install the binary to some place in your PATH
-```bash
-install -Dm755 target/release/vicut ~/.local/bin # or wherever
+cargo install vicut
 ```
 
-Here's a one liner for all of that:
+This will install the `vicut` binary to `~/.cargo/bin` — make sure that directory is in your `$PATH`.
+
+---
+
+### Build from Source
+
+Alternatively, you can build `vicut` manually:
+
+1. Clone the repository and navigate into it:
+
+   ```bash
+   git clone https://github.com/km-clay/vicut
+   cd vicut
+   ```
+
+2. Build the binary:
+
+   ```bash
+   cargo build --release
+   ```
+
+3. Install it to a directory in your `$PATH`:
+
+   ```bash
+   install -Dm755 target/release/vicut ~/.local/bin
+   ```
+Here's a one-liner for all that:
+
 ```bash
 (git clone https://github.com/km-clay/vicut && \
  cd vicut && \
  cargo build --release && \
  mkdir -p ~/.local/bin && \
  install -Dm755 target/release/vicut ~/.local/bin && \
- echo -e "\nInstalled the binary to ~/.local/bin, make sure that is in your \$PATH")
+ echo -e "\nInstalled the binary to ~/.local/bin — make sure that is in your \$PATH")
 ```
+
+---
 
 ## Notes
 
