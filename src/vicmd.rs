@@ -370,6 +370,7 @@ pub enum Motion {
 	ToBracket(Direction),
 	ToParen(Direction),
 	Range(SelectRange),
+	RangeInclusive(SelectRange),
 	RepeatMotion,
 	RepeatMotionRev,
 

@@ -2,6 +2,7 @@
 //!
 //! `LineBuf` is responsible for any and all mutations of the internal buffer.
 
+use std::cmp::Ordering;
 use std::env;
 use std::io::Write as IoWrite;
 use std::process::{Command,Stdio};
@@ -195,6 +196,7 @@ pub enum MotionKind {
 	Lines(Vec<usize>),
 	/// A range between a start and end line
 	LineRange(usize,usize),
+	LineOffset(isize), // Relative to the current line
 
 	BlockRange(Vec<(usize,usize)>), // Windows of lines
 	// Used for linewise operations like 'dj', left is the selected range, right is the cursor's new position on the line
@@ -701,6 +703,12 @@ impl LineBuf {
 	pub fn grapheme_at_cursor(&mut self) -> Option<&str> {
 		self.grapheme_at(self.cursor.get())
 	}
+	pub fn grapheme_before_cursor(&mut self) -> Option<&str> {
+		self.grapheme_before(self.cursor.get())
+	}
+	pub fn grapheme_after_cursor(&mut self) -> Option<&str> {
+		self.grapheme_after(self.cursor.get())
+	}
 	pub fn mark_insert_mode_start_pos(&mut self) {
 		self.insert_mode_start_pos = Some(self.cursor.get())
 	}
@@ -926,8 +934,17 @@ impl LineBuf {
 		let range = self.select_range()?.clone();
 		match range {
 			SelectRange::OneDim((start,end)) => {
-				let slice = self.slice_inclusive(start..=end + 1)?;
-				Some(slice.to_string())
+				match self.select_mode.as_ref().unwrap() {
+					SelectMode::Char(_) => {
+						let slice = self.slice_inclusive(start..=end + 1)?;
+						Some(slice.to_string())
+					}
+					SelectMode::Line(_) => {
+						let slice = self.slice_inclusive(start..=end)?;
+						Some(slice.to_string())
+					}
+					_ => unreachable!()
+				}
 			},
 			SelectRange::TwoDim(lines) => {
 				let mut content = vec![];
@@ -2144,7 +2161,51 @@ impl LineBuf {
 				self.buffer.insert_str(byte_pos, &line);
 				self.update_graphemes();
 			}
-			RegisterContent::Block(items) => todo!(),
+			RegisterContent::Block(windows) => {
+				eprintln!("Inserting block at {}", insert_idx);
+				eprintln!("Block: {:?}", windows);
+				let mut col = self.index_col(insert_idx);
+				let line = self.index_line_number(insert_idx);
+
+				let windows_iter = windows.iter()
+					.rev() // Reverse it once
+					.enumerate() // Enumerate it so we can get the line number
+					.rev(); // Reverse it again
+									// Do not question my methods
+
+				for (i,window) in windows_iter {
+					let line = line + i;
+					if line > self.total_lines() {
+						break
+					}
+					let (start, end) = self.line_bounds(line).unwrap();
+					let insert_idx = start + col;
+
+					if insert_idx >= end {
+						let offset = if self.grapheme_before(end).is_some_and(|gr| gr == "\n") {
+							end - 1
+						} else {
+							end
+						};
+						// We are trying to insert past the end of the line
+						// So we have to pad the line with spaces
+						// To accomodate the insertion
+						let pad = " ".repeat(insert_idx.saturating_sub(offset));
+						let window = format!("{}{}", pad, window);
+						let insert_idx = if end != self.cursor.max {
+							end.saturating_sub(1) // We want to insert before the newline
+						} else {
+							end // We are at the end of the buffer, so no newline
+						};
+						let byte_pos = self.index_byte_pos(insert_idx);
+						self.buffer.insert_str(byte_pos, &window);
+					} else {
+						let byte_pos = self.index_byte_pos(insert_idx);
+						self.buffer.insert_str(byte_pos, window);
+					}
+
+				}
+			}
 			RegisterContent::Empty => {}
 		}
 	}
@@ -2267,23 +2328,24 @@ impl LineBuf {
 		 */
 		let Some(last_edit) = self.undo_stack.last().cloned() else { return };
 		let Some(SelectRange::TwoDim(sel)) = self.last_selection.clone() else { return };
-		let a = last_edit.old[last_edit.pos..].lines().next().unwrap_or_default().to_string();
-		let b = last_edit.new[last_edit.pos..].lines().next().unwrap_or_default().to_string();
-		let first_line_edit = Edit::diff(&a, &b, 0);
 		let last_diff = last_edit.new_diff[..last_edit.merge_pos].to_string();
-		let mut len_delta = first_line_edit.get_len_delta();
-		let len_delta_const = len_delta;
-		let sel = sel.iter().skip(1); // Skip the first line, we already inserted it
 
-		for window in sel {
-			let (start,end) = window; // Only need the start
-			if start == end {
-				continue // No need to insert at an empty window
-			}
-			let start = start.saturating_add_signed(len_delta);
-			self.insert_str_at(start, &last_diff);
-			len_delta += len_delta_const;
+		let start_pos = last_edit.pos;
+		let start_line = self.index_line_number(start_pos);
+		let end_line = start_line + sel.len();
+
+		let mut line_range = start_line..end_line;
+		line_range.next(); // Skip the first line, we already inserted it
+		let line_range = line_range.rev(); // Reverse the range to preserve position validity as we iterate
+
+		let start_col = self.index_col(start_pos);
+
+		for line in line_range {
+			let Some((start,_)) = self.line_bounds(line) else { continue };
+			let pos = start + start_col;
+			self.insert_str_at(pos, &last_diff);
 		}
+
 	}
 	pub fn eval_motion(&mut self, verb: Option<&Verb>, motion: MotionCmd) -> MotionKind {
 		match motion {
@@ -2738,10 +2800,10 @@ impl LineBuf {
 			MotionCmd(count,Motion::LineUpCharwise) => {
 				let Some((start,end)) = (match motion.1 {
 					Motion::ScreenLineUpCharwise |
-						Motion::LineUpCharwise => self.nth_prev_line(count),
-						Motion::ScreenLineDownCharwise |
-							Motion::LineDownCharwise => self.nth_next_line(count),
-						_ => unreachable!()
+					Motion::LineUpCharwise => self.nth_prev_line(count),
+					Motion::ScreenLineDownCharwise |
+					Motion::LineDownCharwise => self.nth_next_line(count),
+					_ => unreachable!()
 				}) else {
 					return MotionKind::Null
 				};
@@ -2762,17 +2824,29 @@ impl LineBuf {
 				MotionKind::On(target_pos)
 			}
 			MotionCmd(_count,Motion::WholeBuffer) => MotionKind::Exclusive((0,self.grapheme_indices().len())),
-			MotionCmd(_count,Motion::BeginningOfBuffer) => MotionKind::On(0),
-			MotionCmd(_count,Motion::EndOfBuffer) => MotionKind::On(self.cursor.max),
+			MotionCmd(_count,Motion::BeginningOfBuffer) => {
+				let lines_up = self.cursor_line_number();
+				let cursor_col = self.cursor_col();
+				self.saved_col = Some(cursor_col);
+				MotionKind::LineOffset(-(lines_up as isize))
+			}
+			MotionCmd(_count,Motion::EndOfBuffer) => {
+				let lines_down = self.total_lines() - self.cursor_line_number();
+				let cursor_col = self.cursor_col();
+				self.saved_col = Some(cursor_col);
+				MotionKind::LineOffset(lines_down as isize)
+			}
 			MotionCmd(count,Motion::ToColumn) => {
 				let start = ClampedUsize::new(self.start_of_line(), self.cursor.max, false);
 				let target_col = count.saturating_sub(1);
 				MotionKind::On(start.ret_add(target_col))
 			}
-			MotionCmd(count,Motion::Range(range)) => {
+			MotionCmd(count,Motion::RangeInclusive(ref range)) |
+			MotionCmd(count,Motion::Range(ref range)) => {
+				let is_inclusive = matches!(motion.1, Motion::RangeInclusive(_));
 				match range {
 					SelectRange::OneDim((start,end)) => {
-						let mut final_end = end;
+						let mut final_end = *end;
 						if self.cursor.exclusive {
 							final_end += 1;
 						}
@@ -2784,10 +2858,14 @@ impl LineBuf {
 						}
 
 						final_end = final_end.min(self.cursor.max);
-						MotionKind::Exclusive((start,final_end))
+						if is_inclusive {
+							MotionKind::Inclusive((*start,final_end))
+						} else {
+							MotionKind::Exclusive((*start,final_end))
+						}
 					}
 					SelectRange::TwoDim(windows) => {
-						MotionKind::BlockRange(windows)
+						MotionKind::BlockRange(windows.to_vec())
 					}
 				}
 			}
@@ -2911,6 +2989,22 @@ impl LineBuf {
 				let Some((start,_)) = self.line_bounds(n) else { return };
 				self.cursor.set(start)
 			}
+			MotionKind::LineOffset(offset) => {
+				let cursor_line = self.cursor_line_number();
+				dbg!(cursor_line);
+				let target_line = cursor_line.saturating_add_signed(offset);
+				dbg!(target_line);
+				if target_line > self.total_lines() {
+					self.cursor.set(self.cursor.max);
+				} else {
+					let Some((mut target_pos,_)) = self.line_bounds(target_line) else { return };
+					dbg!(self.saved_col);
+					if let Some(col) = self.saved_col {
+						target_pos += col;
+					}
+					self.cursor.set(target_pos)
+				}
+			}
 			MotionKind::ExclusiveWithTargetCol((_,_),col) |
 				MotionKind::InclusiveWithTargetCol((_,_),col) => {
 					let (start,end) = self.this_line();
@@ -2974,6 +3068,21 @@ impl LineBuf {
 				 * So we shouldn't be here
 				 */
 				return None
+			}
+			MotionKind::LineOffset(offset) => {
+				let (mut start,mut end) = self.this_line();
+				let cursor_line = self.cursor_line_number();
+				let target_line = cursor_line.saturating_add_signed(*offset);
+				match target_line.cmp(&cursor_line) {
+					Ordering::Less => {
+						start = self.line_bounds(target_line)?.0;
+					}
+					Ordering::Greater => {
+						end = self.line_bounds(target_line)?.1;
+					}
+					Ordering::Equal => {}
+				}
+				return Some((start,end))
 			}
 			MotionKind::On(pos) => ordered(self.cursor.get(), *pos),
 			MotionKind::Onto(pos) => {
@@ -3080,6 +3189,7 @@ impl LineBuf {
 					return RegisterContent::Empty
 				};
 				if should_drain {
+					let cursor_line = self.cursor_line_number();
 					// If we are deleting or changing, we need to drain the content
 					// and update the grapheme indices
 					let drained = self.drain(start,end);
@@ -3106,7 +3216,16 @@ impl LineBuf {
 				if let Some(SelectRange::TwoDim(sel)) = self.select_range.as_ref() {
 					// If we are in visual block, the cursor is set to the start of the first window
 					let new_pos = sel.first().map_or(0, |(start,_)| *start);
-					self.cursor.set(new_pos);
+					dbg!(self.grapheme_before(new_pos));
+					dbg!(self.grapheme_at(new_pos));
+					dbg!(self.grapheme_after(new_pos));
+					if self.grapheme_at(new_pos) == Some("\n") && self.grapheme_before(new_pos) != Some("\n") {
+						dbg!(new_pos.saturating_sub(1));
+						self.cursor.set(new_pos.saturating_sub(1));
+						dbg!(self.cursor.get());
+					} else {
+						self.cursor.set(new_pos);
+					}
 				} else {
 					match motion {
 						MotionKind::ExclusiveWithTargetCol((_,_),pos) |
@@ -3327,6 +3446,7 @@ impl LineBuf {
 							let first_non_ws = self.eval_motion(None, MotionCmd(1,Motion::FirstGraphicalOnScreenLine));
 							self.move_cursor(first_non_ws);
 						} else {
+							dbg!(self.cursor.get());
 							let insert_idx = match anchor {
 								Anchor::After => self.cursor.ret_add(1),
 								Anchor::Before => self.cursor.get()
@@ -3816,6 +3936,12 @@ impl LineBuf {
 
 		if is_char_insert && let Some(edit) = self.undo_stack.last_mut() {
 			edit.start_merge();
+		}
+
+		if self.grapheme_at_cursor().is_some_and(|gr| gr == "\n")
+			&& self.grapheme_before_cursor().is_some_and(|gr| gr != "\n")
+			&& self.cursor.exclusive {
+				self.cursor.sub(1); // push it off the newline
 		}
 
 		Ok(())

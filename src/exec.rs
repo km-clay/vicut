@@ -129,6 +129,9 @@ impl ViCut {
 			if self.editor.grapheme_at(new_pos).is_some_and(|gr| gr != "\n") {
 				self.editor.cursor.sub(1);
 			}
+			if self.editor.should_handle_block_insert() {
+				self.editor.handle_block_insert();
+			}
 		}
 	}
 
@@ -323,7 +326,12 @@ impl ViCut {
 				// The motion is assigned in the line buffer execution, so we also have to assign it here
 				// in order to be able to repeat it
 				let range = self.editor.select_range().unwrap().clone();
-				cmd.motion = Some(MotionCmd(1,Motion::Range(range)))
+				let motion = match self.editor.select_mode.as_ref().unwrap() {
+					SelectMode::Char(_) => Motion::RangeInclusive(range),
+					SelectMode::Line(_) |
+					SelectMode::Block {..} => Motion::Range(range)
+				};
+				cmd.motion = Some(MotionCmd(1,motion))
 			}
 			self.repeat_action = Some(CmdReplay::Single(cmd.clone()));
 		}

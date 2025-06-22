@@ -1242,16 +1242,17 @@ fn exec_stdin(args: &Argv) {
 #[cfg(debug_assertions)]
 fn do_test_stuff() {
 	// Testing
-	let input = "Foo\nBar\nBiz\nFoo\nBuzz\nFoo\nBaz";
+		let input = "abcdefgh\nabcd\nabcdefghi\nabcde\nabcdefg";
 	println!("{input}\n");
 
 	let args = [
-		"-m", ":g/Baz/normal! :g/Bar/normal! :g/Biz/normal! :g/Buzz/normal! :g/Foo/normal! cwWow!",
+			"-m", "$<c-v>0lGdp",
 	];
 	let output = call_main(&args, input).unwrap();
-	assert_eq!(output, "Wow!\nBar\nBiz\nWow!\nBuzz\nWow!\nBaz");
+	//assert_eq!(output, "adbcefgh\nadbc\nadbcefghi\nadbce\nadbcefg");
 	println!("{output}");
 	std::process::exit(0);
+
 }
 
 /// Print help or version info and exit early if `--help` or `--version` are found
