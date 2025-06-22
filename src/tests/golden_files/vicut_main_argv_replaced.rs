@@ -56,7 +56,7 @@ enum Cmd {
 
 /// The arguments passed to the program by the user
 #[derive(Default,Clone,Debug)]
-struct Argv {
+struct Arguments {
 	delimiter: Option<String>,
 	template: Option<String>,
 	max_jobs: Option<u32>,
@@ -75,7 +75,7 @@ struct Argv {
 	files: Vec<PathBuf>
 }
 
-impl Argv {
+impl Arguments {
 	/// Parse the user's arguments
 	pub fn parse() -> Result<Self,String> {
 		let mut new = Self::default();
@@ -211,7 +211,7 @@ impl Argv {
 		}
 		while let Some(global_arg) = args.next() {
 			match global_arg.as_str() {
-				"-n" | "--next" => then_cmds.push(Cmd::BreakGroup),
+				"-n" | "--next" => self.cmds.push(Cmd::BreakGroup),
 				"-r" | "--repeat" => {
 					let cmd_count = args
 						.next()
@@ -473,7 +473,7 @@ fn init_logger(trace: bool) {
 /// Format the stuff we extracted according to user specification
 ///
 /// `lines` is a two-dimensional vector of tuples, each representing a key/value pair for extract fields.
-fn format_output(args: &Argv, lines: Vec<Vec<(String,String)>>) -> String {
+fn format_output(args: &Arguments, lines: Vec<Vec<(String,String)>>) -> String {
 	if args.json {
 		Ok(format_output_json(lines))
 	} else if let Some(template) = args.template.as_deref() {
@@ -621,7 +621,7 @@ fn format_output_template(template: &str, lines: Vec<Vec<(String,String)>>) -> R
 ///
 /// Here we are going to initialize a new instance of `ViCut` to manage state for editing this input
 /// Next we loop over `args.cmds` and execute each one in sequence.
-fn execute(args: &Argv, input: String) -> Result<Vec<Vec<(String,String)>>,String> {
+fn execute(args: &Arguments, input: String) -> Result<Vec<Vec<(String,String)>>,String> {
 	let mut fields: Vec<(String,String)> = vec![];
 	let mut fmt_lines: Vec<Vec<(String,String)>> = vec![];
 
@@ -708,7 +708,7 @@ fn get_lines(value: &str) -> Vec<String> {
 /// Execute a single `Cmd`
 fn exec_cmd(
 	cmd: &Cmd,
-	args: &Argv,
+	args: &Arguments,
 	vicut: &mut ViCut,
 	field_num: &mut usize,
 	spent_cmds: &mut Vec<&Cmd>,
@@ -850,7 +850,7 @@ fn exec_cmd(
 /// 1. Create a `work` vector containing a tuple of the file's path, and it's contents.
 /// 2. Call `execute()` on each file's contents
 /// 3. Decide how to handle output depending on whether args.edit_inplace is set.
-fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Argv) {
+fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Arguments) {
 	let work: Vec<(PathBuf, String)> = args.files.par_iter()
 		.fold(Vec::new, |mut acc,file| {
 			let contents = fs::read_to_string(file).unwrap_or_else(|e| {
@@ -929,7 +929,7 @@ fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Argv) {
 ///
 /// Errors during reading, transformation, or writing will abort the program with a diagnostic.
 /// Backup files are created if `--backup-files` is enabled.
-fn execute_multi_thread_files_linewise(mut stdout: io::StdoutLock, args: &Argv) {
+fn execute_multi_thread_files_linewise(mut stdout: io::StdoutLock, args: &Arguments) {
 
 	let work: Vec<(PathBuf, usize, String)> = args.files.par_iter()
 		.fold(Vec::new, |mut acc,file| {
@@ -1009,7 +1009,7 @@ fn execute_multi_thread_files_linewise(mut stdout: io::StdoutLock, args: &Argv) 
 ///
 /// This function is used for `--linewise` execution on stdin.
 /// Reads the complete input from stdin and then splits it into its lines for execution.
-fn execute_linewise(mut stream: Box<dyn BufRead>, args: &Argv) -> String {
+fn execute_linewise(mut stream: Box<dyn BufRead>, args: &Arguments) -> String {
 	let mut input = String::new();
 	stream.read_to_string(&mut input).unwrap_or_else(|e| {
 		eprintln!("vicut: failed to read input: {e}");
@@ -1042,7 +1042,7 @@ fn execute_linewise(mut stream: Box<dyn BufRead>, args: &Argv) -> String {
 /// The pathway for when the `--linewise` flag is set
 ///
 /// Each route in this function operates on individual lines from the input
-fn exec_linewise(args: &Argv) {
+fn exec_linewise(args: &Arguments) {
 	if args.single_thread {
 		let mut stdout = io::stdout().lock();
 
@@ -1153,7 +1153,7 @@ fn exec_linewise(args: &Argv) {
 /// Execution pathway for handling filenames given as arguments
 ///
 /// Operates on the content of the files, and either prints to stdout, or edits the files in-place
-fn exec_files(args: &Argv) {
+fn exec_files(args: &Arguments) {
 	if args.single_thread {
 		let mut stdout = io::stdout().lock();
 		for path in &args.files {
@@ -1215,7 +1215,7 @@ fn exec_files(args: &Argv) {
 /// Default execution pathway. Operates on `stdin`.
 ///
 /// Simplest of the three routes.
-fn exec_stdin(args: &Argv) {
+fn exec_stdin(args: &Arguments) {
 	let mut stdout = io::stdout().lock();
 	let mut lines = vec![];
 	let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
@@ -1239,7 +1239,7 @@ fn exec_stdin(args: &Argv) {
 }
 
 /// Testing fixture for the debug profile
-#[cfg(all(test,debug_assertions))]
+#[cfg(debug_assertions)]
 fn do_test_stuff() {
 	// Testing
 		let input = "abcdefgh\nabcd\nabcdefghi\nabcde\nabcdefg";
@@ -1248,7 +1248,7 @@ fn do_test_stuff() {
 	let args = [
 			"-m", "$<c-v>0lGdp",
 	];
-	let output = tests::call_main(&args, input).unwrap();
+	let output = call_main(&args, input).unwrap();
 	//assert_eq!(output, "adbcefgh\nadbc\nadbcefghi\nadbce\nadbcefg");
 	println!("{output}");
 	std::process::exit(0);
@@ -1278,12 +1278,12 @@ fn print_help_or_version() {
 
 #[allow(unreachable_code)]
 fn main() {
-	#[cfg(all(test,debug_assertions))]
+	#[cfg(debug_assertions)]
 	do_test_stuff();
 
 	print_help_or_version();
 
-	let args = match Argv::parse() {
+	let args = match Arguments::parse() {
 		Ok(args) => args,
 		Err(e) => {
 			eprintln!("vicut: {e}");
@@ -1299,5 +1299,194 @@ fn main() {
 		exec_files(&args);
 	} else {
 		exec_stdin(&args);
+	}
+}
+
+/*
+ * Stuff down here is for testing
+ */
+
+/// Testing fixture
+/// Used to call the main logic internally
+#[cfg(any(test,debug_assertions))]
+fn call_main(args: &[&str], input: &str) -> Result<String,String> {
+	if args.is_empty() {
+		let mut output = String::new();
+		write!(output,"USAGE:").ok();
+		write!(output,"\tvicut [OPTIONS] [COMMANDS]...").ok();
+		writeln!(output).ok();
+		write!(output,"use '--help' for more information").ok();
+		return Err(output)
+	}
+	if args.iter().any(|arg| *arg == "--help" || *arg == "-h") {
+		return Ok(get_help())
+	}
+	let args = match Arguments::parse_raw(args) {
+		Ok(args) => args,
+		Err(e) => {
+			return Err(format!("vicut: {e}"));
+		}
+	};
+
+	if args.json && args.delimiter.is_some() {
+		eprintln!("vicut: WARNING: --delimiter flag is ignored when --json is used")
+	}
+
+	use std::io::Cursor;
+	if args.linewise {
+		if args.single_thread {
+			// We need to initialize stream in each branch, since Box<dyn BufReader> does not implement send/sync
+			// So using it in pool.install() doesn't work. We have to initialize it in the closure there.
+
+			let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input)));
+			let mut input = String::new();
+			stream.read_to_string(&mut input).unwrap();
+			let mut lines = vec![];
+			for line in get_lines(&input) {
+				match execute(&args,line) {
+					Ok(mut new_line) => {
+						lines.append(&mut new_line);
+					}
+					Err(e) => {
+						return Err(format!("vicut: {e}"));
+					}
+				}
+			}
+			let output = format_output(&args, lines);
+			Ok(output)
+		} else if let Some(num) = args.max_jobs {
+			let pool = rayon::ThreadPoolBuilder::new()
+				.num_threads(num as usize)
+				.build()
+				.unwrap_or_else(|e| {
+					eprintln!("vicut: Failed to build thread pool: {e}");
+					std::process::exit(1)
+				});
+			Ok(pool.install(|| {
+				let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input.to_string())));
+				execute_linewise(stream, &args)
+			}))
+		} else {
+			let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input.to_string())));
+			Ok(execute_linewise(stream, &args))
+		}
+	} else {
+		let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input)));
+		let mut input = String::new();
+		let mut lines = vec![];
+		match stream.read_to_string(&mut input) {
+			Ok(_) => {}
+			Err(e) => {
+				return Err(format!("vicut: {e}"));
+			}
+		}
+		match execute(&args,input) {
+			Ok(mut output) => {
+				lines.append(&mut output);
+			}
+			Err(e) => eprintln!("vicut: {e}"),
+		};
+		let output = format_output(&args, lines);
+		Ok(output)
+	}
+}
+#[cfg(any(test,debug_assertions))]
+impl Arguments {
+	pub fn parse_raw(args: &[&str]) -> Result<Self,String> {
+		let mut new = Self::default();
+		let mut args = args.iter();
+		while let Some(arg) = args.next() {
+			match *arg {
+				"--json" | "-j" => {
+					new.json = true;
+				}
+				"--trace" => {
+					new.trace = true;
+				}
+				"--linewise" => {
+					new.linewise = true;
+				}
+				"--serial" => {
+					new.single_thread = true;
+				}
+				"--trim-fields" => {
+					new.trim_fields = true;
+				}
+				"--keep-mode" => {
+					new.keep_mode = true;
+				}
+				"--backup" => {
+					new.backup_files = true;
+				}
+				"-i" => {
+					new.edit_inplace = true;
+				}
+				"--backup-extension" => {
+					let Some(next_arg) = args.next() else {
+						return Err(format!("Expected a string after '{arg}'"))
+					};
+					if next_arg.starts_with('-') {
+						return Err(format!("Expected a string after '{arg}', found {next_arg}"))
+					}
+					new.backup_extension = Some(next_arg.to_string())
+				}
+				"--template" | "-t" => {
+					let Some(next_arg) = args.next() else {
+						return Err(format!("Expected a format string after '{arg}'"))
+					};
+					if next_arg.starts_with('-') {
+						return Err(format!("Expected a format string after '{arg}', found {next_arg}"))
+					}
+					new.template = Some(next_arg.to_string())
+				}
+				"--delimiter" | "-d" => {
+					let Some(next_arg) = args.next() else { continue };
+					if next_arg.starts_with('-') {
+						return Err(format!("Expected a delimiter after '{arg}', found {next_arg}"))
+					}
+					new.delimiter = Some(next_arg.to_string())
+				}
+				"-n" | "--next" => new.cmds.push(Cmd::BreakGroup),
+				"-r" | "--repeat" => {
+					let cmd_count = args
+						.next()
+						.unwrap_or(&"1")
+						.parse::<usize>()
+						.map_err(|_| format!("Expected a number after '{arg}'"))?;
+					let repeat_count = args
+						.next()
+						.unwrap_or(&"1")
+						.parse::<usize>()
+						.map_err(|_| format!("Expected a number after '{arg}'"))?;
+
+					new.cmds.push(Cmd::Repeat(cmd_count, repeat_count));
+				}
+				"-m" | "--move" => {
+					let Some(arg) = args.next() else { continue };
+					if arg.starts_with('-') {
+						return Err(format!("Expected a motion command after '-m', found {arg}"))
+					}
+					new.cmds.push(Cmd::Motion(arg.to_string()))
+				}
+				"-c" | "--cut" => {
+					let Some(arg) = args.next() else { continue };
+					if arg.starts_with("name=") {
+						let name = arg.strip_prefix("name=").unwrap().to_string();
+						let Some(arg) = args.next() else { continue };
+						if arg.starts_with('-') {
+							return Err(format!("Expected a selection command after '-c', found {arg}"))
+						}
+						new.cmds.push(Cmd::NamedField(name,arg.to_string()));
+					} else {
+						if arg.starts_with('-') {
+							return Err(format!("Expected a selection command after '-c', found {arg}"))
+						}
+						new.cmds.push(Cmd::Field(arg.to_string()));
+					}
+				}
+				_ => new.handle_filename(arg.to_string())
+			}
+		}
+		Ok(new)
 	}
 }

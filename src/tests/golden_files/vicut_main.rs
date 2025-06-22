@@ -211,7 +211,7 @@ impl Argv {
 		}
 		while let Some(global_arg) = args.next() {
 			match global_arg.as_str() {
-				"-n" | "--next" => then_cmds.push(Cmd::BreakGroup),
+				"-n" | "--next" => self.cmds.push(Cmd::BreakGroup),
 				"-r" | "--repeat" => {
 					let cmd_count = args
 						.next()
@@ -1239,7 +1239,7 @@ fn exec_stdin(args: &Argv) {
 }
 
 /// Testing fixture for the debug profile
-#[cfg(all(test,debug_assertions))]
+#[cfg(debug_assertions)]
 fn do_test_stuff() {
 	// Testing
 		let input = "abcdefgh\nabcd\nabcdefghi\nabcde\nabcdefg";
@@ -1248,7 +1248,7 @@ fn do_test_stuff() {
 	let args = [
 			"-m", "$<c-v>0lGdp",
 	];
-	let output = tests::call_main(&args, input).unwrap();
+	let output = call_main(&args, input).unwrap();
 	//assert_eq!(output, "adbcefgh\nadbc\nadbcefghi\nadbce\nadbcefg");
 	println!("{output}");
 	std::process::exit(0);
@@ -1278,7 +1278,7 @@ fn print_help_or_version() {
 
 #[allow(unreachable_code)]
 fn main() {
-	#[cfg(all(test,debug_assertions))]
+	#[cfg(debug_assertions)]
 	do_test_stuff();
 
 	print_help_or_version();
@@ -1299,5 +1299,194 @@ fn main() {
 		exec_files(&args);
 	} else {
 		exec_stdin(&args);
+	}
+}
+
+/*
+ * Stuff down here is for testing
+ */
+
+/// Testing fixture
+/// Used to call the main logic internally
+#[cfg(any(test,debug_assertions))]
+fn call_main(args: &[&str], input: &str) -> Result<String,String> {
+	if args.is_empty() {
+		let mut output = String::new();
+		write!(output,"USAGE:").ok();
+		write!(output,"\tvicut [OPTIONS] [COMMANDS]...").ok();
+		writeln!(output).ok();
+		write!(output,"use '--help' for more information").ok();
+		return Err(output)
+	}
+	if args.iter().any(|arg| *arg == "--help" || *arg == "-h") {
+		return Ok(get_help())
+	}
+	let args = match Argv::parse_raw(args) {
+		Ok(args) => args,
+		Err(e) => {
+			return Err(format!("vicut: {e}"));
+		}
+	};
+
+	if args.json && args.delimiter.is_some() {
+		eprintln!("vicut: WARNING: --delimiter flag is ignored when --json is used")
+	}
+
+	use std::io::Cursor;
+	if args.linewise {
+		if args.single_thread {
+			// We need to initialize stream in each branch, since Box<dyn BufReader> does not implement send/sync
+			// So using it in pool.install() doesn't work. We have to initialize it in the closure there.
+
+			let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input)));
+			let mut input = String::new();
+			stream.read_to_string(&mut input).unwrap();
+			let mut lines = vec![];
+			for line in get_lines(&input) {
+				match execute(&args,line) {
+					Ok(mut new_line) => {
+						lines.append(&mut new_line);
+					}
+					Err(e) => {
+						return Err(format!("vicut: {e}"));
+					}
+				}
+			}
+			let output = format_output(&args, lines);
+			Ok(output)
+		} else if let Some(num) = args.max_jobs {
+			let pool = rayon::ThreadPoolBuilder::new()
+				.num_threads(num as usize)
+				.build()
+				.unwrap_or_else(|e| {
+					eprintln!("vicut: Failed to build thread pool: {e}");
+					std::process::exit(1)
+				});
+			Ok(pool.install(|| {
+				let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input.to_string())));
+				execute_linewise(stream, &args)
+			}))
+		} else {
+			let stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input.to_string())));
+			Ok(execute_linewise(stream, &args))
+		}
+	} else {
+		let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(Cursor::new(input)));
+		let mut input = String::new();
+		let mut lines = vec![];
+		match stream.read_to_string(&mut input) {
+			Ok(_) => {}
+			Err(e) => {
+				return Err(format!("vicut: {e}"));
+			}
+		}
+		match execute(&args,input) {
+			Ok(mut output) => {
+				lines.append(&mut output);
+			}
+			Err(e) => eprintln!("vicut: {e}"),
+		};
+		let output = format_output(&args, lines);
+		Ok(output)
+	}
+}
+#[cfg(any(test,debug_assertions))]
+impl Argv {
+	pub fn parse_raw(args: &[&str]) -> Result<Self,String> {
+		let mut new = Self::default();
+		let mut args = args.iter();
+		while let Some(arg) = args.next() {
+			match *arg {
+				"--json" | "-j" => {
+					new.json = true;
+				}
+				"--trace" => {
+					new.trace = true;
+				}
+				"--linewise" => {
+					new.linewise = true;
+				}
+				"--serial" => {
+					new.single_thread = true;
+				}
+				"--trim-fields" => {
+					new.trim_fields = true;
+				}
+				"--keep-mode" => {
+					new.keep_mode = true;
+				}
+				"--backup" => {
+					new.backup_files = true;
+				}
+				"-i" => {
+					new.edit_inplace = true;
+				}
+				"--backup-extension" => {
+					let Some(next_arg) = args.next() else {
+						return Err(format!("Expected a string after '{arg}'"))
+					};
+					if next_arg.starts_with('-') {
+						return Err(format!("Expected a string after '{arg}', found {next_arg}"))
+					}
+					new.backup_extension = Some(next_arg.to_string())
+				}
+				"--template" | "-t" => {
+					let Some(next_arg) = args.next() else {
+						return Err(format!("Expected a format string after '{arg}'"))
+					};
+					if next_arg.starts_with('-') {
+						return Err(format!("Expected a format string after '{arg}', found {next_arg}"))
+					}
+					new.template = Some(next_arg.to_string())
+				}
+				"--delimiter" | "-d" => {
+					let Some(next_arg) = args.next() else { continue };
+					if next_arg.starts_with('-') {
+						return Err(format!("Expected a delimiter after '{arg}', found {next_arg}"))
+					}
+					new.delimiter = Some(next_arg.to_string())
+				}
+				"-n" | "--next" => new.cmds.push(Cmd::BreakGroup),
+				"-r" | "--repeat" => {
+					let cmd_count = args
+						.next()
+						.unwrap_or(&"1")
+						.parse::<usize>()
+						.map_err(|_| format!("Expected a number after '{arg}'"))?;
+					let repeat_count = args
+						.next()
+						.unwrap_or(&"1")
+						.parse::<usize>()
+						.map_err(|_| format!("Expected a number after '{arg}'"))?;
+
+					new.cmds.push(Cmd::Repeat(cmd_count, repeat_count));
+				}
+				"-m" | "--move" => {
+					let Some(arg) = args.next() else { continue };
+					if arg.starts_with('-') {
+						return Err(format!("Expected a motion command after '-m', found {arg}"))
+					}
+					new.cmds.push(Cmd::Motion(arg.to_string()))
+				}
+				"-c" | "--cut" => {
+					let Some(arg) = args.next() else { continue };
+					if arg.starts_with("name=") {
+						let name = arg.strip_prefix("name=").unwrap().to_string();
+						let Some(arg) = args.next() else { continue };
+						if arg.starts_with('-') {
+							return Err(format!("Expected a selection command after '-c', found {arg}"))
+						}
+						new.cmds.push(Cmd::NamedField(name,arg.to_string()));
+					} else {
+						if arg.starts_with('-') {
+							return Err(format!("Expected a selection command after '-c', found {arg}"))
+						}
+						new.cmds.push(Cmd::Field(arg.to_string()));
+					}
+				}
+				_ => new.handle_filename(arg.to_string())
+			}
+		}
+		Ok(new)
 	}
 }
