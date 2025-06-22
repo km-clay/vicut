@@ -34,7 +34,7 @@ So I decided to repurpose [my shell](https://github.com/km-clay/fern)'s line edi
 
 ## ⚙️ Usage
 
-`vicut` uses an internal text editing engine based on Vim. File names can be given as arguments, or text can be given using stdin. There are four command flags you can use to issue commands to the internal editor.
+`vicut` uses an internal text editing engine based on Vim. File names can be given as arguments, or text can be given using stdin. There are six command flags you can use to issue commands to the internal editor.
 
 * `-c`/`--cut <VIM_CMD>` executes a Vim command (something like `5w`, `vi)`, `:%s/foo/bar/g`, etc) and returns the span of text covered by the cursor's motion as a field. Any arbitrary number of fields can be extracted using `-c`. If no `-c` commands are given, `vicut` will print the entire buffer as a single field.
 * `-m`/`--move <VIM_CMD>` silently executes a Vim command. `-m` does not extract a field from the buffer like `-c` does, making it ideal for positioning the cursor before `-c` calls, or making edits to the buffer.
