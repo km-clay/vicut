@@ -18,10 +18,11 @@ extern crate tikv_jemallocator;
 /// For linux we use Jemalloc. It is ***significantly*** faster than the default allocator in this case, for some reason.
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use exec::ViCut;
+use exec::{Val, ViCut};
 use log::trace;
 use serde_json::{Map, Value};
 use rayon::prelude::*;
+use vic::{BinOp, CmdArg, Expr};
 
 use crate::{linebuf::MotionKind, vicmd::{LineAddr, Motion, MotionCmd}};
 
@@ -40,18 +41,43 @@ pub mod tests;
 pub type Name = String;
 
 #[derive(Clone,Debug)]
-enum Cmd {
-	Motion(String),
-	Field(String),
-	NamedField(Name,String),
-	Repeat(usize,usize),
+pub enum Cmd {
+	Echo(Vec<CmdArg>),
+	Motion(CmdArg),
+	Field(CmdArg),
+	NamedField(Name,CmdArg),
+	Repeat {
+		body: Vec<Cmd>,
+		count: CmdArg
+	},
 	Global{
-		pattern: String,
+		pattern: CmdArg,
 		then_cmds: Vec<Cmd>,
 		else_cmds: Option<Vec<Cmd>>,
 		polarity: bool // Whether to execute on a match, or on no match
 	},
-	BreakGroup
+	BreakGroup,
+	VarDec {
+		name: String,
+		value: CmdArg
+	},
+	MutateVar {
+		name: String,
+		op: BinOp,
+		value: CmdArg
+	},
+	IfBlock {
+		cond_blocks: Vec<CondBlock>,
+		else_block: Option<Vec<Cmd>>
+	},
+	WhileBlock(CondBlock),
+	UntilBlock(CondBlock),
+}
+
+#[derive(Clone,Debug)]
+pub struct CondBlock {
+	cond: CmdArg, // Must be a CmdArg::Expr(Expr::BoolExp{..})
+	cmds: Vec<Cmd>,
 }
 
 /// The arguments passed to the program by the user
@@ -71,6 +97,7 @@ pub struct Opts {
 	backup_files: bool,
 	single_thread: bool,
 	global_uses_line_numbers: bool,
+	silent: bool,
 
 	pipe_in: Option<String>,
 	pipe_out: Option<String>,
@@ -111,6 +138,9 @@ impl Opts {
 				"--global-uses-line-numbers" => {
 					new.global_uses_line_numbers = true;
 				}
+				"--silent" => {
+					new.silent = true;
+				}
 				"-i" => {
 					new.edit_inplace = true;
 				}
@@ -143,14 +173,17 @@ impl Opts {
 						.parse::<usize>()
 						.map_err(|_| format!("Expected a number after '{arg}'"))?;
 
-					new.cmds.push(Cmd::Repeat(cmd_count, repeat_count));
+					let mut body = vec![];
+					let drain_count = new.cmds.len() - cmd_count;
+					body.extend(new.cmds.drain(drain_count..));
+					new.cmds.push(Cmd::Repeat{ body, count: CmdArg::Count(repeat_count + 1) });
 				}
 				"-m" | "--move" => {
 					let Some(arg) = args.next() else { continue };
 					if arg.starts_with('-') {
 						return Err(format!("Expected a motion command after '-m', found {arg}"))
 					}
-					new.cmds.push(Cmd::Motion(arg))
+					new.cmds.push(Cmd::Motion(CmdArg::Literal(Val::Str(arg))));
 				}
 				"-c" | "--cut" => {
 					let Some(arg) = args.next() else { continue };
@@ -165,12 +198,12 @@ impl Opts {
 						if arg.starts_with('-') {
 							return Err(format!("Expected a selection command after '-c', found {arg}"))
 						}
-						new.cmds.push(Cmd::NamedField(name,arg));
+						new.cmds.push(Cmd::NamedField(name,CmdArg::Literal(Val::Str(arg))));
 					} else {
 						if arg.starts_with('-') {
 							return Err(format!("Expected a selection command after '-c', found {arg}"))
 						}
-						new.cmds.push(Cmd::Field(arg));
+						new.cmds.push(Cmd::Field(CmdArg::Literal(Val::Str(arg))));
 					}
 				}
 				"-v" | "--not-global" |
@@ -197,7 +230,7 @@ impl Opts {
 	/// ```bash
 	/// vicut -g 'foo' -g 'bar' -c 'd' --else -v 'baz' -c 'y' --end --end
 	/// ```
-	fn handle_global_arg(arg: &str, args: &mut Peekable<Skip<Args>>) -> Cmd {
+	fn handle_global_arg(arg: &str, args: &mut Peekable<Skip<impl Iterator<Item = String>>>) -> Cmd {
 		let polarity = match arg {
 			"-v" | "--not-global" => false,
 			"-g" | "--global" => true,
@@ -207,7 +240,7 @@ impl Opts {
 		let mut else_cmds = None;
 		let Some(arg) = args.next() else {
 			return Cmd::Global {
-				pattern: arg.into(),
+				pattern: CmdArg::Literal(Val::Str(arg.into())),
 				then_cmds,
 				else_cmds,
 				polarity
@@ -239,9 +272,19 @@ impl Opts {
 						});
 
 					if let Some(else_cmds) = else_cmds.as_mut() {
-						else_cmds.push(Cmd::Repeat(cmd_count, repeat_count));
+						let mut body = vec![];
+						for _ in 0..cmd_count {
+							let Some(cmd) = else_cmds.pop() else { break };
+							body.push(cmd);
+						}
+						else_cmds.push(Cmd::Repeat{ body, count: CmdArg::Count(repeat_count) });
 					} else {
-						then_cmds.push(Cmd::Repeat(cmd_count, repeat_count));
+						let mut body = vec![];
+						for _ in 0..cmd_count {
+							let Some(cmd) = then_cmds.pop() else { break };
+							body.push(cmd);
+						}
+						then_cmds.push(Cmd::Repeat{ body, count: CmdArg::Count(repeat_count) });
 					}
 				}
 				"-m" | "--move" => {
@@ -251,9 +294,9 @@ impl Opts {
 						std::process::exit(1);
 					}
 					if let Some(else_cmds) = else_cmds.as_mut() {
-						else_cmds.push(Cmd::Motion(arg))
+						else_cmds.push(Cmd::Motion(CmdArg::Literal(Val::Str(arg))));
 					} else {
-						then_cmds.push(Cmd::Motion(arg))
+						then_cmds.push(Cmd::Motion(CmdArg::Literal(Val::Str(arg))));
 					}
 				}
 				"-c" | "--cut" => {
@@ -266,9 +309,9 @@ impl Opts {
 							std::process::exit(1);
 						}
 						if let Some(cmds) = else_cmds.as_mut() {
-							cmds.push(Cmd::NamedField(name,arg));
+							cmds.push(Cmd::NamedField(name,CmdArg::Literal(Val::Str(arg))));
 						} else {
-							then_cmds.push(Cmd::NamedField(name,arg));
+							then_cmds.push(Cmd::NamedField(name,CmdArg::Literal(Val::Str(arg))));
 						}
 					} else {
 						if arg.starts_with('-') {
@@ -276,9 +319,9 @@ impl Opts {
 							std::process::exit(1);
 						}
 						if let Some(cmds) = else_cmds.as_mut() {
-							cmds.push(Cmd::Field(arg));
+							cmds.push(Cmd::Field(CmdArg::Literal(Val::Str(arg))));
 						} else {
-							then_cmds.push(Cmd::Field(arg));
+							then_cmds.push(Cmd::Field(CmdArg::Literal(Val::Str(arg))));
 						}
 					}
 				}
@@ -298,7 +341,7 @@ impl Opts {
 				"--end" => {
 					// We're done here
 					return Cmd::Global {
-						pattern: arg,
+						pattern: CmdArg::Literal(Val::Str(arg)),
 						then_cmds,
 						else_cmds,
 						polarity
@@ -316,7 +359,7 @@ impl Opts {
 		// Let's just submit the current -g commands.
 		// no need to be pressed about a missing '--end' when nothing would come after it
 		Cmd::Global {
-			pattern: arg,
+			pattern: CmdArg::Literal(Val::Str(arg)),
 			then_cmds,
 			else_cmds,
 			polarity
@@ -671,13 +714,19 @@ fn format_output_template(template: &str, lines: Vec<Vec<(String,String)>>) -> R
 ///
 /// Here we are going to initialize a new instance of `ViCut` to manage state for editing this input
 /// Next we loop over `args.cmds` and execute each one in sequence.
-fn execute(args: &Opts, input: String) -> Result<Vec<Vec<(String,String)>>,String> {
+fn execute(args: &Opts, input: String, filename: Option<PathBuf>) -> Result<Vec<Vec<(String,String)>>,String> {
 	let mut fields: Vec<(String,String)> = vec![];
 	let mut fmt_lines: Vec<Vec<(String,String)>> = vec![];
 
 	let mut vicut = ViCut::new(input, 0)?;
+	let basename = filename.clone()
+		.map(|s| s.file_name().unwrap_or_default().to_string_lossy().to_string())
+		.unwrap_or_else(|| String::from("stdin"));
+	let filepath = filename.map(|s| s.to_string_lossy().to_string()).unwrap_or(String::from("stdin"));
+	vicut.set_var("filename".into(), Val::Str(basename));
+	vicut.set_var("filepath".into(), Val::Str(filepath));
+	vicut.update_builtins(); // Initialize the builtin variables
 
-	let mut spent_cmds: Vec<&Cmd> = vec![];
 
 	let mut field_num = 0;
 	for cmd in &args.cmds {
@@ -686,11 +735,10 @@ fn execute(args: &Opts, input: String) -> Result<Vec<Vec<(String,String)>>,Strin
 			args,
 			&mut vicut,
 			&mut field_num,
-			&mut spent_cmds,
 			&mut fields,
 			&mut fmt_lines
 		);
-		spent_cmds.push(cmd);
+		vicut.update_builtins();
 		if !args.keep_mode {
 			vicut.set_normal_mode();
 		}
@@ -700,10 +748,14 @@ fn execute(args: &Opts, input: String) -> Result<Vec<Vec<(String,String)>>,Strin
 		fmt_lines.push(std::mem::take(&mut fields));
 	}
 
+	if fmt_lines.is_empty() && args.silent {
+		return Ok(vec![]);
+	}
+
 	// Let's figure out if we want to print the whole buffer
 	let no_fields = fmt_lines.is_empty(); // No fields were extracted
 	let has_files = !args.files.is_empty(); // We have files to edit
-	let has_pattern_search = spent_cmds.iter().any(|cmd| {
+	let has_pattern_search = args.cmds.iter().any(|cmd| {
 		if let Cmd::Global { then_cmds, .. } = cmd {
 			then_cmds.iter().any(|cmd| matches!(cmd, Cmd::Field(_) | Cmd::NamedField(_, _)))
 		} else {
@@ -773,38 +825,127 @@ fn exec_cmd(
 	args: &Opts,
 	vicut: &mut ViCut,
 	field_num: &mut usize,
-	spent_cmds: &mut Vec<&Cmd>,
 	fields: &mut Vec<(String,String)>,
 	fmt_lines: &mut Vec<Vec<(String,String)>>
 ) {
 	match cmd {
+		Cmd::Echo(args) => {
+			if args.is_empty() {
+				println!();
+				return
+			}
+			let mut display_args = vec![];
+			for arg in args {
+				let value = match arg {
+					CmdArg::Literal(value) => value.clone(),
+					CmdArg::Var(var) => {
+						let Some(val) = vicut.get_var(var) else {
+							eprintln!("vicut: variable '{var}' not found");
+							std::process::exit(1)
+						};
+						val.clone()
+					}
+					CmdArg::Expr(expr) => {
+						match expr {
+							Expr::Return(cmd) => {
+								match vicut.read_field(&cmd) {
+									Ok(field) => {
+										Val::Str(field)
+									}
+									Err(e) => {
+										eprintln!("vicut: {e}");
+										Val::Str("".into())
+									}
+								}
+							}
+							Expr::Var(var) => {
+								let Some(val) = vicut.get_var(var) else {
+									eprintln!("vicut: variable '{var}' not found");
+									std::process::exit(1)
+								};
+								val.clone()
+							}
+							Expr::Int(int) => {
+								Val::Num(*int as isize)
+							}
+							Expr::Bool(bool) => {
+								Val::Bool(*bool)
+							}
+							Expr::Literal(lit) => {
+								Val::Str(lit.clone())
+							}
+							Expr::BoolExp { op, left, right } => {
+								vicut.eval_bool_expr(op, left, right).unwrap_or_else(|e| {
+									eprintln!("vicut: {e}");
+									std::process::exit(1)
+								})
+							}
+							Expr::BinExp { op, left, right } => {
+								vicut.eval_bin_expr(op, left, right).unwrap_or_else(|e| {
+									eprintln!("vicut: {e}");
+									std::process::exit(1)
+								})
+							}
+						}
+					}
+					_ => unreachable!()
+				};
+				display_args.push(value.to_string());
+			}
+			let output = display_args.join(" ");
+			println!("{output}");
+		}
 		// -r <N> <R>
-		Cmd::Repeat(n_cmds, n_repeats) => {
-			trace!("Repeating {n_cmds} commands, {n_repeats} times");
-			for _ in 0..*n_repeats {
+		Cmd::Repeat{ body, count } => {
+			let n_repeats = match count {
+				CmdArg::Count(n) => *n,
+				CmdArg::Var(var) => {
+					let Some(val) = vicut.get_var(var) else {
+						eprintln!("vicut: variable '{var}' not found");
+						std::process::exit(1)
+					};
+					let Val::Num(n) = val else {
+						eprintln!("vicut: variable '{var}' is not a number");
+						std::process::exit(1)
+					};
+					*n as usize
+				}
+				_ => unreachable!()
+			};
+			vicut.descend(); // new scope
+			for _ in 0..n_repeats {
 
-				let mut pulled_cmds = vec![];
-				let total = spent_cmds.len();
-				let start = total.saturating_sub(*n_cmds);
-				pulled_cmds.extend(spent_cmds.drain(start..));
-
-				for r_cmd in pulled_cmds {
+				for r_cmd in body {
 					// We use recursion so that we can nest repeats easily
 					exec_cmd(
 						r_cmd,
 						args,
 						vicut,
 						field_num,
-						spent_cmds,
 						fields,
 						fmt_lines
 					);
-					spent_cmds.push(r_cmd);
+				}
+				vicut.update_builtins();
+				if !args.keep_mode {
+					vicut.set_normal_mode();
 				}
 			}
+			vicut.ascend(); // leave scope
 		}
 		// -g/-v <PATTERN> <COMMANDS> [--else <COMMANDS>]
 		Cmd::Global { pattern, then_cmds, else_cmds, polarity } => {
+			let pattern = match pattern {
+				CmdArg::Literal(pattern) => pattern,
+				CmdArg::Var(var) => {
+					let Some(val) = vicut.get_var(var) else {
+						eprintln!("vicut: variable '{var}' not found");
+						std::process::exit(1)
+					};
+					val
+				}
+				_ => unreachable!()
+			};
 			let motion = match polarity {
 				false  => Motion::NotGlobal(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pattern.to_string()),
 				true => Motion::Global(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pattern.to_string())
@@ -813,7 +954,6 @@ fn exec_cmd(
 			// Here we ask ViCut's editor directly to evaluate the Global motion for us.
 			// LineBuf::eval_motion() *always* returns MotionKind::Lines() for Motion::Global/NotGlobal.
 			let MotionKind::Lines(lines) = vicut.editor.eval_motion(None, MotionCmd(1,motion)) else { unreachable!() };
-			let mut scoped_spent_cmds = vec![];
 			if !lines.is_empty() {
 				// Positive branch
 				for line in lines {
@@ -829,53 +969,97 @@ fn exec_cmd(
 					vicut.editor.cursor.set(start);
 					// Execute our commands
 
+					vicut.descend(); // new scope
 					for cmd in then_cmds {
 						exec_cmd(
 							cmd,
 							args,
 							vicut,
 							field_num,
-							&mut scoped_spent_cmds,
 							fields,
 							fmt_lines
 						);
-						scoped_spent_cmds.push(cmd);
+						vicut.update_builtins();
 						if !args.keep_mode {
 							vicut.set_normal_mode();
 						}
 					}
+					vicut.ascend(); // leave scope
 				}
 			} else if let Some(else_cmds) = else_cmds {
 				// Negative branch
+				vicut.descend();
 				for cmd in else_cmds {
 					exec_cmd(
 						cmd,
 						args,
 						vicut,
 						field_num,
-						&mut scoped_spent_cmds,
 						fields,
 						fmt_lines
 					);
-					scoped_spent_cmds.push(cmd);
+					vicut.update_builtins();
 					if !args.keep_mode {
 						vicut.set_normal_mode();
 					}
 				}
+				vicut.ascend();
 			}
 		}
 		// -m <VIM_CMDS>
 		Cmd::Motion(motion) => {
-			trace!("Executing non-capturing command: {motion}");
-			if let Err(e) = vicut.move_cursor(motion) {
-				eprintln!("vicut: {e}");
-			}
+			match motion {
+				CmdArg::Literal(motion) => {
+					let Val::Str(motion) = motion else {
+						eprintln!("vicut: expected a string");
+						std::process::exit(1)
+					};
+					if let Err(e) = vicut.move_cursor(motion) {
+						eprintln!("vicut: {e}");
+					}
+				}
+				CmdArg::Var(var) => {
+					let Some(val) = vicut.get_var(var) else {
+						eprintln!("vicut: variable '{var}' not found");
+						std::process::exit(1)
+					};
+					let Val::Str(motion) = val else {
+						eprintln!("vicut: variable '{var}' is not a string");
+						std::process::exit(1)
+					};
+					let motion = motion.clone();
+					if let Err(e) = vicut.move_cursor(&motion) {
+						eprintln!("vicut: {e}");
+					}
+				}
+				_ => unreachable!()
+			};
 		}
 		// -c <VIM_CMDS>
 		Cmd::Field(motion) => {
-			trace!("Executing capturing command: {motion}");
+			let motion = match motion {
+				CmdArg::Literal(motion) => {
+					let Val::Str(motion) = motion else {
+						eprintln!("vicut: expected a string");
+						std::process::exit(1)
+					};
+					motion.clone()
+				}
+				CmdArg::Var(var) => {
+					let Some(val) = vicut.get_var(var) else {
+						eprintln!("vicut: variable '{var}' not found");
+						std::process::exit(1)
+					};
+					let Val::Str(motion) = val else {
+						eprintln!("vicut: variable '{var}' is not a string");
+						std::process::exit(1)
+					};
+					motion.clone()
+				}
+				_ => unreachable!()
+			};
 			*field_num += 1;
-			match vicut.read_field(motion) {
+			match vicut.read_field(&motion) {
 				Ok(field) => {
 					let name = format!("{field_num}");
 					fields.push((name,field))
@@ -888,8 +1072,29 @@ fn exec_cmd(
 		// -c name=<NAME> <VIM_CMDS>
 		Cmd::NamedField(name, motion) => {
 			trace!("Executing capturing command with name '{name}': {motion}");
+			let motion = match motion {
+				CmdArg::Literal(motion) => {
+					let Val::Str(motion) = motion else {
+						eprintln!("vicut: expected a string");
+						std::process::exit(1)
+					};
+					motion.clone()
+				}
+				CmdArg::Var(var) => {
+					let Some(val) = vicut.get_var(var) else {
+						eprintln!("vicut: variable '{var}' not found");
+						std::process::exit(1)
+					};
+					let Val::Str(motion) = val else {
+						eprintln!("vicut: variable '{var}' is not a string");
+						std::process::exit(1)
+					};
+					motion.clone()
+				}
+				_ => unreachable!()
+			};
 			*field_num += 1;
-			match vicut.read_field(motion) {
+			match vicut.read_field(&motion) {
 				Ok(field) => fields.push((name.clone(),field)),
 				Err(e) => {
 					eprintln!("vicut: {e}");
@@ -909,6 +1114,213 @@ fn exec_cmd(
 			*field_num = 0;
 			if !fields.is_empty() {
 				fmt_lines.push(std::mem::take(fields));
+			}
+		}
+		Cmd::VarDec { name, value } => {
+			let value = match value {
+				CmdArg::Literal(value) => value.clone(),
+				CmdArg::Var(var) => {
+					let Some(val) = vicut.get_var(var) else {
+						eprintln!("vicut: variable '{var}' not found");
+						std::process::exit(1)
+					};
+					val.clone()
+				}
+				CmdArg::Expr(expr) => {
+					match expr {
+						Expr::Return(cmd) => {
+							match vicut.read_field(&cmd) {
+								Ok(field) => {
+									Val::Str(field)
+								}
+								Err(e) => {
+									eprintln!("vicut: {e}");
+									Val::Str("".into())
+								}
+							}
+						}
+						Expr::Var(var) => {
+							let Some(val) = vicut.get_var(var) else {
+								eprintln!("vicut: variable '{var}' not found");
+								std::process::exit(1)
+							};
+							val.clone()
+						}
+						Expr::Int(int) => {
+							Val::Num(*int as isize)
+						}
+						Expr::Bool(bool) => {
+							Val::Bool(*bool)
+						}
+						Expr::Literal(lit) => {
+							Val::Str(lit.clone())
+						}
+						Expr::BoolExp { op, left, right } => {
+							vicut.eval_bool_expr(op, left, right).unwrap_or_else(|e| {
+								eprintln!("vicut: {e}");
+								std::process::exit(1)
+							})
+						}
+						Expr::BinExp { op, left, right } => {
+							vicut.eval_bin_expr(op, left, right).unwrap_or_else(|e| {
+								eprintln!("vicut: {e}");
+								std::process::exit(1)
+							})
+						}
+					}
+				}
+				_ => unreachable!("vicut: expected a literal or variable, found {value:?}")
+			};
+			vicut.set_var(name.clone(), value.clone());
+		}
+		Cmd::MutateVar { name, op, value } => {
+			let value = match value {
+				CmdArg::Literal(value) => value.clone(),
+				CmdArg::Expr(expr) => {
+					match expr {
+						Expr::Return(cmd) => {
+							match vicut.read_field(&cmd) {
+								Ok(field) => {
+									Val::Str(field)
+								}
+								Err(e) => {
+									eprintln!("vicut: {e}");
+									Val::Str("".into())
+								}
+							}
+						}
+						Expr::Var(var) => {
+							let Some(val) = vicut.get_var(var) else {
+								eprintln!("vicut: variable '{var}' not found");
+								std::process::exit(1)
+							};
+							val.clone()
+						}
+						Expr::Literal(lit) => {
+							Val::Str(lit.clone())
+						}
+						Expr::Int(int) => {
+							Val::Num(*int as isize)
+						}
+						Expr::Bool(bool) => {
+							Val::Bool(*bool)
+						}
+						Expr::BoolExp { op, left, right } => {
+							vicut.eval_bool_expr(op, left, right).unwrap_or_else(|e| {
+								eprintln!("vicut: {e}");
+								std::process::exit(1)
+							})
+						}
+						Expr::BinExp { op, left, right } => {
+							vicut.eval_bin_expr(op, left, right).unwrap_or_else(|e| {
+								eprintln!("vicut: {e}");
+								std::process::exit(1)
+							})
+						}
+					}
+				}
+				CmdArg::Var(var) => {
+					let Some(val) = vicut.get_var(var) else {
+						eprintln!("vicut: variable '{var}' not found");
+						std::process::exit(1)
+					};
+					val.clone()
+				}
+				_ => unreachable!()
+			};
+			vicut.mutate_var(name.clone(), op.clone(), value.clone()).unwrap_or_else(|e| {
+				eprintln!("vicut: {e}");
+				std::process::exit(1)
+			});
+		}
+		Cmd::IfBlock { cond_blocks, else_block } => {
+			let mut executed = false;
+			for block in cond_blocks {
+				let CondBlock { cond, cmds } = block;
+				let result = cond.is_truthy(vicut);
+				if result {
+					executed = true;
+					vicut.descend(); // new scope
+					for cmd in cmds {
+						exec_cmd(
+							cmd,
+							args,
+							vicut,
+							field_num,
+							fields,
+							fmt_lines
+						);
+						vicut.update_builtins();
+						if !args.keep_mode {
+							vicut.set_normal_mode();
+						}
+					}
+					vicut.ascend(); // leave scope
+					break;
+				}
+			}
+
+			if let Some(else_block) = else_block {
+				if !executed {
+					vicut.descend(); // new scope
+					for cmd in else_block {
+						exec_cmd(
+							cmd,
+							args,
+							vicut,
+							field_num,
+							fields,
+							fmt_lines
+						);
+						vicut.update_builtins();
+						if !args.keep_mode {
+							vicut.set_normal_mode();
+						}
+					}
+					vicut.ascend(); // leave scope
+				}
+			}
+		}
+		Cmd::WhileBlock(cond_block) => {
+			let CondBlock { cond, cmds } = cond_block;
+			while cond.is_truthy(vicut) {
+				vicut.descend(); // new scope
+				for cmd in cmds {
+					exec_cmd(
+						cmd,
+						args,
+						vicut,
+						field_num,
+						fields,
+						fmt_lines
+					);
+					vicut.update_builtins();
+					if !args.keep_mode {
+						vicut.set_normal_mode();
+					}
+				}
+				vicut.ascend(); // leave scope
+			}
+		}
+		Cmd::UntilBlock(cond_block) => {
+			let CondBlock { cond, cmds } = cond_block;
+			while !cond.is_truthy(vicut) {
+				vicut.descend(); // new scope
+				for cmd in cmds {
+					exec_cmd(
+						cmd,
+						args,
+						vicut,
+						field_num,
+						fields,
+						fmt_lines
+					);
+					vicut.update_builtins();
+					if !args.keep_mode {
+						vicut.set_normal_mode();
+					}
+				}
+				vicut.ascend(); // leave scope
 			}
 		}
 	}
@@ -937,7 +1349,7 @@ fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Opts) {
 	// Process each file's content
 	let results = work.into_par_iter()
 		.map(|(path, content)| {
-			let processed = match execute(args, content) {
+			let processed = match execute(args, content, Some(path.clone())) {
 				Ok(content) => content,
 				Err(e) => {
 					eprintln!("vicut: error in file '{}': {e}",path.display());
@@ -1024,7 +1436,7 @@ fn execute_multi_thread_files_linewise(mut stdout: io::StdoutLock, args: &Opts) 
 	// Process each line's content
 	let results = work.into_par_iter()
 		.map(|(path, line_no, line)| {
-			let processed = match execute(args, line) {
+			let processed = match execute(args, line, Some(path.clone())) {
 				Ok(line) => line,
 				Err(e) => {
 					eprintln!("vicut: error in file '{}', line {}: {e}",path.display(),line_no);
@@ -1105,7 +1517,7 @@ fn execute_linewise(mut stream: Box<dyn BufRead>, args: &Opts) -> String {
 		.into_par_iter()
 		.enumerate()
 		.map(|(i, line)| {
-			let output = match execute(args, line) {
+			let output = match execute(args, line, None) {
 				Ok(line) => line,
 				Err(e) => {
 					eprintln!("vicut: {e}");
@@ -1141,7 +1553,7 @@ fn exec_linewise(args: &Opts) {
 					std::process::exit(1)
 				});
 				for line in get_lines(&input) {
-					match execute(args,line) {
+					match execute(args,line, Some(path.clone())) {
 						Ok(mut new_line) => {
 							lines.append(&mut new_line);
 						}
@@ -1196,7 +1608,7 @@ fn exec_linewise(args: &Opts) {
 				std::process::exit(1)
 			});
 			for line in get_lines(&input) {
-				match execute(args,line) {
+				match execute(args,line, None) {
 					Ok(mut new_line) => {
 						lines.append(&mut new_line);
 					}
@@ -1257,7 +1669,7 @@ fn exec_files(args: &Opts) {
 				eprintln!("vicut: failed to read file '{}': {e}",path.display());
 				std::process::exit(1)
 			});
-			match execute(args,content) {
+			match execute(args,content, Some(path.clone())) {
 				Ok(output) => {
 					if args.json {
 						json_data.push((path.clone(), output));
@@ -1331,7 +1743,7 @@ fn exec_stdin(args: &Opts) {
 			return;
 		}
 	}
-	match execute(args,input) {
+	match execute(args,input, None) {
 		Ok(mut output) => {
 			lines.append(&mut output);
 		}

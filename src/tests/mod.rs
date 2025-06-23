@@ -1,6 +1,8 @@
 use std::iter::{Peekable, Skip};
 use std::fmt::Write;
 
+use crate::exec::Val;
+use crate::vic::CmdArg;
 use crate::{linebuf::LineBuf, modes::{normal::ViNormal, ViMode}, Opts, Cmd};
 use pretty_assertions::assert_eq;
 
@@ -123,7 +125,7 @@ use crate::{execute, execute_linewise, format_output, get_help, get_lines, Opts}
 			stream.read_to_string(&mut input).unwrap();
 			let mut lines = vec![];
 			for line in get_lines(&input) {
-				match execute(&args,line) {
+				match execute(&args,line,None) {
 					Ok(mut new_line) => {
 						lines.append(&mut new_line);
 					}
@@ -160,7 +162,7 @@ use crate::{execute, execute_linewise, format_output, get_help, get_lines, Opts}
 				return Err(format!("vicut: {e}"));
 			}
 		}
-		match execute(&args,input) {
+		match execute(&args,input,None) {
 			Ok(mut output) => {
 				lines.append(&mut output);
 			}
@@ -176,9 +178,10 @@ impl Opts {
 		let mut new = Self::default();
 		let mut full_args = vec!["vicut"];
 		full_args.extend(args.iter());
-		let mut args = full_args.iter().skip(1).peekable();
+		let mut args = full_args.into_iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+		let mut args = args.into_iter().skip(1).peekable();
 		while let Some(arg) = args.next() {
-			match *arg {
+			match arg.as_str() {
 				"--json" | "-j" => {
 					new.json = true;
 				}
@@ -206,15 +209,6 @@ impl Opts {
 				"-i" => {
 					new.edit_inplace = true;
 				}
-				"--backup-extension" => {
-					let Some(next_arg) = args.next() else {
-						return Err(format!("Expected a string after '{arg}'"))
-					};
-					if next_arg.starts_with('-') {
-						return Err(format!("Expected a string after '{arg}', found {next_arg}"))
-					}
-					new.backup_extension = Some(next_arg.to_string())
-				}
 				"--template" | "-t" => {
 					let Some(next_arg) = args.next() else {
 						return Err(format!("Expected a format string after '{arg}'"))
@@ -222,56 +216,66 @@ impl Opts {
 					if next_arg.starts_with('-') {
 						return Err(format!("Expected a format string after '{arg}', found {next_arg}"))
 					}
-					new.template = Some(next_arg.to_string())
+					new.template = Some(next_arg.to_string());
 				}
 				"--delimiter" | "-d" => {
 					let Some(next_arg) = args.next() else { continue };
 					if next_arg.starts_with('-') {
 						return Err(format!("Expected a delimiter after '{arg}', found {next_arg}"))
 					}
-					new.delimiter = Some(next_arg.to_string())
+					new.delimiter = Some(next_arg.to_string());
 				}
 				"-n" | "--next" => new.cmds.push(Cmd::BreakGroup),
 				"-r" | "--repeat" => {
 					let cmd_count = args
 						.next()
-						.unwrap_or(&"1")
+						.unwrap_or("1".into())
 						.parse::<usize>()
 						.map_err(|_| format!("Expected a number after '{arg}'"))?;
 					let repeat_count = args
 						.next()
-						.unwrap_or(&"1")
+						.unwrap_or("1".into())
 						.parse::<usize>()
 						.map_err(|_| format!("Expected a number after '{arg}'"))?;
 
-					new.cmds.push(Cmd::Repeat(cmd_count, repeat_count));
+					let mut body = vec![];
+					let drain_count = new.cmds.len().saturating_sub(cmd_count);
+					body.extend(new.cmds.drain(drain_count..));
+					dbg!(&body);
+					dbg!(&repeat_count);
+					new.cmds.push(Cmd::Repeat{ body, count: CmdArg::Count(repeat_count + 1) });
 				}
 				"-m" | "--move" => {
 					let Some(arg) = args.next() else { continue };
 					if arg.starts_with('-') {
 						return Err(format!("Expected a motion command after '-m', found {arg}"))
 					}
-					new.cmds.push(Cmd::Motion(arg.to_string()))
+					new.cmds.push(Cmd::Motion(CmdArg::Literal(Val::Str(arg.to_string()))));
 				}
 				"-c" | "--cut" => {
 					let Some(arg) = args.next() else { continue };
 					if arg.starts_with("name=") {
 						let name = arg.strip_prefix("name=").unwrap().to_string();
+						if name == "0" {
+							// We use '0' as a sentinel value to say "We didn't slice any fields, so this field is the entire buffer"
+							// So we can't let people use it arbitrarily, or weird shit starts happening
+							return Err("Field name '0' is a reserved field name.".into())
+						}
 						let Some(arg) = args.next() else { continue };
 						if arg.starts_with('-') {
 							return Err(format!("Expected a selection command after '-c', found {arg}"))
 						}
-						new.cmds.push(Cmd::NamedField(name,arg.to_string()));
+						new.cmds.push(Cmd::NamedField(name,CmdArg::Literal(Val::Str(arg.to_string()))));
 					} else {
 						if arg.starts_with('-') {
 							return Err(format!("Expected a selection command after '-c', found {arg}"))
 						}
-						new.cmds.push(Cmd::Field(arg.to_string()));
+						new.cmds.push(Cmd::Field(CmdArg::Literal(Val::Str(arg.to_string()))));
 					}
 				}
 				"-v" | "--not-global" |
 				"-g" | "--global" => {
-					let global = Self::handle_global_arg_raw(arg, &mut args);
+					let global = Self::handle_global_arg(&arg, &mut args);
 					new.cmds.push(global);
 				}
 				_ => new.handle_filename(arg.to_string())
@@ -289,7 +293,7 @@ impl Opts {
 		let mut else_cmds = None;
 		let Some(arg) = args.next() else {
 			return Cmd::Global {
-				pattern: arg.into(),
+				pattern: CmdArg::Literal(Val::Str(arg.to_string())),
 				then_cmds,
 				else_cmds,
 				polarity
@@ -307,23 +311,28 @@ impl Opts {
 						.next()
 						.unwrap_or(&"1")
 						.parse::<usize>()
-						.unwrap_or_else(|_| {
-							eprintln!("Expected a number after '{global_arg}'");
-							std::process::exit(1)
-						});
+						.unwrap();
 					let repeat_count = args
 						.next()
 						.unwrap_or(&"1")
 						.parse::<usize>()
-						.unwrap_or_else(|_| {
-							eprintln!("Expected a number after '{global_arg}'");
-							std::process::exit(1)
-						});
+						.unwrap();
 
-					if let Some(else_cmds) = else_cmds.as_mut() {
-						else_cmds.push(Cmd::Repeat(cmd_count, repeat_count));
+					let mut body = vec![];
+					for _ in 0..cmd_count {
+						let cmds = if let Some(else_cmds) = else_cmds.as_mut() {
+							else_cmds
+						} else {
+							&mut then_cmds
+						};
+						let Some(cmd) = cmds.pop() else { break };
+						body.push(cmd);
+					}
+					let cmd = Cmd::Repeat{ body, count: CmdArg::Count(repeat_count) };
+					if let Some(cmds) = else_cmds.as_mut() {
+						cmds.push(cmd);
 					} else {
-						then_cmds.push(Cmd::Repeat(cmd_count, repeat_count));
+						then_cmds.push(cmd);
 					}
 				}
 				"-m" | "--move" => {
@@ -333,9 +342,9 @@ impl Opts {
 						std::process::exit(1);
 					}
 					if let Some(else_cmds) = else_cmds.as_mut() {
-						else_cmds.push(Cmd::Motion(arg.to_string()))
+						else_cmds.push(Cmd::Motion(CmdArg::Literal(Val::Str(arg.to_string()))));
 					} else {
-						then_cmds.push(Cmd::Motion(arg.to_string()))
+						then_cmds.push(Cmd::Motion(CmdArg::Literal(Val::Str(arg.to_string()))));
 					}
 				}
 				"-c" | "--cut" => {
@@ -348,9 +357,9 @@ impl Opts {
 							std::process::exit(1);
 						}
 						if let Some(cmds) = else_cmds.as_mut() {
-							cmds.push(Cmd::NamedField(name,arg.to_string()));
+							cmds.push(Cmd::NamedField(name,CmdArg::Literal(Val::Str(arg.to_string()))));
 						} else {
-							then_cmds.push(Cmd::NamedField(name,arg.to_string()));
+							then_cmds.push(Cmd::NamedField(name,CmdArg::Literal(Val::Str(arg.to_string()))));
 						}
 					} else {
 						if arg.starts_with('-') {
@@ -358,9 +367,9 @@ impl Opts {
 							std::process::exit(1);
 						}
 						if let Some(cmds) = else_cmds.as_mut() {
-							cmds.push(Cmd::Field(arg.to_string()));
+							cmds.push(Cmd::Field(CmdArg::Literal(Val::Str(arg.to_string()))));
 						} else {
-							then_cmds.push(Cmd::Field(arg.to_string()));
+							then_cmds.push(Cmd::Field(CmdArg::Literal(Val::Str(arg.to_string()))));
 						}
 					}
 				}
@@ -380,7 +389,7 @@ impl Opts {
 				"--end" => {
 					// We're done here
 					return Cmd::Global {
-						pattern: arg.to_string(),
+						pattern: CmdArg::Literal(Val::Str(arg.to_string())),
 						then_cmds,
 						else_cmds,
 						polarity
@@ -398,7 +407,7 @@ impl Opts {
 		// Let's just submit the current -g commands.
 		// no need to be pressed about a missing '--end' when nothing would come after it
 		Cmd::Global {
-			pattern: arg.to_string(),
+			pattern: CmdArg::Literal(Val::Str(arg.to_string())),
 			then_cmds,
 			else_cmds,
 			polarity

@@ -1,6 +1,9 @@
 //! This module contains the `ViCut` struct, which is the central container for state in the program.
 //!
 //! Everything that moves through this program passes through the `ViCut` struct at some point.
+use std::collections::HashMap;
+use std::fmt::Display;
+
 use log::trace;
 
 use crate::keys::{KeyCode, KeyEvent, ModKeys};
@@ -8,11 +11,52 @@ use crate::linebuf::{ordered, ClampedUsize, MotionKind};
 use crate::modes::ex::ViEx;
 use crate::modes::search::ViSearch;
 use crate::reader::{KeyReader, RawReader};
-use crate::vicmd::LineAddr;
+use crate::vic::{BinOp, BoolOp, Expr};
+use crate::vicmd::{Bound, LineAddr, Word};
+use crate::Cmd;
 
 use super::linebuf::{LineBuf, SelectAnchor, SelectMode};
 use super::vicmd::{CmdFlags, Motion, MotionCmd, RegisterName, Verb, VerbCmd, ViCmd};
 use super::modes::{CmdReplay, ModeReport, insert::ViInsert, ViMode, normal::ViNormal, replace::ViReplace, visual::ViVisual};
+
+#[derive(Default, Debug, Clone)]
+pub enum Val {
+	#[default]
+	Null,
+	Str(String),
+	Num(isize),
+	Bool(bool),
+}
+
+impl Val {
+	pub fn display_type(&self) -> String {
+		match self {
+			Self::Str(_) => "string".to_string(),
+			Self::Num(_) => "number".to_string(),
+			Self::Bool(_) => "boolean".to_string(),
+			Self::Null => "null".to_string()
+		}
+	}
+	pub fn is_truthy(&self) -> bool {
+		match self {
+			Self::Str(s) => !s.is_empty(),
+			Self::Num(n) => *n != 0,
+			Self::Bool(b) => *b,
+			Self::Null => false
+		}
+	}
+}
+
+impl Display for Val {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::Str(s) => write!(f, "{s}"),
+			Self::Num(n) => write!(f, "{n}"),
+			Self::Bool(b) => write!(f, "{b}"),
+			Self::Null => write!(f, "null")
+		}
+	}
+}
 
 pub struct ViCut {
 	pub reader: RawReader,
@@ -20,6 +64,15 @@ pub struct ViCut {
 	pub repeat_action: Option<CmdReplay>,
 	pub repeat_motion: Option<MotionCmd>,
 	pub editor: LineBuf,
+
+	/// We use a vector of hashmaps here
+	/// Each hashmap represents a "stack frame" of variables
+	/// So you can shadow variables in vic
+	/// The outer-most hashmap always contains the built-in variables
+	pub variables: Vec<HashMap<String, Val>>,
+	/// We do the same stack frame thing for aliases
+	/// Though might not be as necessary
+	pub aliases: Vec<HashMap<String, Vec<Cmd>>>,
 }
 
 
@@ -31,6 +84,8 @@ impl ViCut {
 			repeat_action: None,
 			repeat_motion: None,
 			editor: LineBuf::new().with_initial(input, cursor),
+			variables: vec![HashMap::new()],
+			aliases: vec![HashMap::new()],
 		})
 	}
 	pub fn exec_loop(&mut self) -> Result<(),String> {
@@ -408,6 +463,261 @@ impl ViCut {
 			_ => unreachable!()
 		}
 		std::mem::swap(&mut self.mode, &mut mode);
+		Ok(())
+	}
+	pub fn descend(&mut self) {
+		self.variables.push(HashMap::new());
+		self.aliases.push(HashMap::new());
+	}
+	pub fn ascend(&mut self) {
+		// Never pop the global scopes
+		if self.variables.len() > 1 {
+			self.variables.pop();
+		}
+		if self.aliases.len() > 1 {
+			self.aliases.pop();
+		}
+	}
+	pub fn update_builtins(&mut self) {
+		// We grab the first one, since built-ins are kept in the outermost frame
+		let Some(frame) = self.variables.first_mut() else {
+			panic!("There is supposed to be a stack frame here")
+		};
+		let col = self.editor.cursor_col();
+		let line = self.editor.cursor_line_number();
+		let pos = self.editor.cursor_byte_pos();
+		let lines = self.editor.total_lines();
+		let selection = self.editor.selected_content().unwrap_or_default();
+		let (word_start,word_end) = self.editor.text_obj_word(1, Bound::Inside, Word::Normal).unwrap_or_default();
+		let word_end = ClampedUsize::new(word_end, self.editor.cursor.cap(), false).ret_add(1);
+		let word = self.editor.slice_inclusive(word_start..=word_end)
+			.map(|slice| slice.to_string())
+			.unwrap_or_default();
+		let (big_word_start,big_word_end) = self.editor.text_obj_word(1, Bound::Inside, Word::Big).unwrap_or_default();
+		let big_word_end = ClampedUsize::new(big_word_end, self.editor.cursor.cap(), false).ret_add(1);
+		let big_word = self.editor.slice_inclusive(big_word_start..=big_word_end)
+			.map(|slice| slice.to_string())
+			.unwrap_or_default();
+
+		frame.insert("col".to_string(), Val::Num(col as isize));
+		frame.insert("line".to_string(), Val::Num(line as isize));
+		frame.insert("lines".to_string(), Val::Num(lines as isize));
+		frame.insert("pos".to_string(), Val::Num(pos as isize));
+		frame.insert("selection".to_string(), Val::Str(selection));
+		frame.insert("word".to_string(), Val::Str(word));
+		frame.insert("WORD".to_string(), Val::Str(big_word));
+	}
+	pub fn get_var_mut(&mut self, name: &str) -> Option<&mut Val> {
+		for frame in self.variables.iter_mut().rev() {
+			if frame.contains_key(name) {
+				return frame.get_mut(name)
+			}
+		}
+		None
+	}
+	pub fn get_var(&self, name: &str) -> Option<&Val> {
+		// Search the stack frames for the variable
+		// We do this in reverse order, so that we get the most local variable
+		for frame in self.variables.iter().rev() {
+			if frame.contains_key(name) {
+				return frame.get(name)
+			}
+		}
+		None
+	}
+	pub fn set_var(&mut self, name: String, value: Val) {
+		let Some(frame) = self.variables.last_mut() else {
+			panic!("There is supposed to be a stack frame here")
+		};
+		frame.insert(name, value);
+	}
+	pub fn get_alias(&self, name: &str) -> Option<&[Cmd]> {
+		for frame in self.aliases.iter().rev() {
+			if frame.contains_key(name) {
+				return frame.get(name).map(|v| v.as_slice())
+			}
+		}
+		None
+	}
+	pub fn set_alias(&mut self, name: String, value: Vec<Cmd>) {
+		let Some(frame) = self.aliases.last_mut() else {
+			panic!("There is supposed to be a stack frame here")
+		};
+		frame.insert(name, value);
+	}
+
+	pub fn eval_bool_expr(&mut self, op: &BoolOp, left: &(bool,Box<Expr>), right: &(bool,Box<Expr>)) -> Result<Val,String> {
+		let left_negated = left.0;
+		let left = match &*left.1 {
+			Expr::Var(var) => {
+				let Some(var) = self.get_var(var) else {
+					return Err(format!("Variable {var} not found"))
+				};
+				var.clone()
+			}
+			Expr::Literal(lit) => Val::Str(lit.to_string()),
+			Expr::Int(int) => Val::Num(*int as isize),
+			Expr::BinExp { op, left, right } => self.eval_bin_expr(op, left, right)?,
+			Expr::BoolExp { op, left, right } => self.eval_bool_expr(op, left, right)?,
+			Expr::Bool(bool) => Val::Bool(*bool),
+			Expr::Return(cmd) => {
+				let Ok(field) = self.read_field(cmd) else {
+					return Err("Failed to read field".to_string())
+				};
+				Val::Str(field)
+			}
+		};
+		let right_negated = right.0;
+		let right = match &*right.1 {
+			Expr::Var(var) => {
+				let Some(var) = self.get_var(var) else {
+					return Err(format!("Variable {var} not found"))
+				};
+				var.clone()
+			}
+			Expr::Int(int) => Val::Num(*int as isize),
+			Expr::Literal(lit) => Val::Str(lit.to_string()),
+			Expr::BinExp { op, left, right } => self.eval_bin_expr(op, left, right)?,
+			Expr::BoolExp { op, left, right } => self.eval_bool_expr(op, left, right)?,
+			Expr::Bool(bool) => Val::Bool(*bool),
+			Expr::Return(cmd) => {
+				let Ok(field) = self.read_field(cmd) else {
+					return Err("Failed to read field".to_string())
+				};
+				Val::Str(field)
+			}
+		};
+		match left {
+			Val::Null => Err(format!("Left value {left} is null")),
+			Val::Str(l_string) => {
+				let Val::Str(r_string) = right else {
+					return Err(format!("Expected string, got {}",right.display_type()))
+				};
+				match op {
+					BoolOp::Eq => Ok(Val::Bool(l_string == r_string)),
+					BoolOp::Ne => Ok(Val::Bool(l_string != r_string)),
+					BoolOp::Lt => Err("Cannot compare strings with <".into()),
+					BoolOp::LtEq => Err("Cannot compare strings with <=".into()),
+					BoolOp::Gt => Err("Cannot compare strings with >".into()),
+					BoolOp::GtEq => Err("Cannot compare strings with >=".into()),
+					_ => todo!()
+				}
+			}
+			Val::Num(l_num) => {
+				let Val::Num(r_num) = right else {
+					return Err(format!("Expected number, got {}",right.display_type()))
+				};
+				match op {
+					BoolOp::Eq => Ok(Val::Bool(l_num == r_num)),
+					BoolOp::Ne => Ok(Val::Bool(l_num != r_num)),
+					BoolOp::Lt => Ok(Val::Bool(l_num < r_num)),
+					BoolOp::LtEq => Ok(Val::Bool(l_num <= r_num)),
+					BoolOp::Gt => Ok(Val::Bool(l_num > r_num)),
+					BoolOp::GtEq => Ok(Val::Bool(l_num >= r_num)),
+					_ => todo!()
+				}
+			}
+			Val::Bool(l_bool) => {
+				let l_bool = if left_negated {
+					!l_bool
+				} else {
+					l_bool
+				};
+				let Val::Bool(r_bool) = right else {
+					return Err(format!("Expected boolean, got {}",right.display_type()))
+				};
+				let r_bool = if right_negated {
+					!r_bool
+				} else {
+					r_bool
+				};
+				match op {
+					BoolOp::And => Ok(Val::Bool(l_bool && r_bool)),
+					BoolOp::Or => Ok(Val::Bool(l_bool || r_bool)),
+					// The structure of vic's grammar should mean that we only get And/Or here
+					// (probably)
+					_ => unreachable!()
+				}
+			}
+		}
+	}
+	pub fn eval_bin_expr(&self, op: &BinOp, left: &Box<Expr>, right: &Box<Expr>) -> Result<Val,String> {
+		let left = match &**left {
+			Expr::Var(var) => {
+				let Some(var) = self.get_var(var) else {
+					return Err(format!("Variable {var} not found"))
+				};
+				let Val::Num(_) = &var else {
+					return Err(format!("Variable {var} is not a number"))
+				};
+				var.clone()
+			}
+			Expr::Int(int) => Val::Num(*int as isize),
+			Expr::BinExp { op, left, right } => self.eval_bin_expr(op, left, right)?,
+			_ => unreachable!(),
+		};
+		let right = match &**right {
+			Expr::Var(var) => {
+				let Some(var) = self.get_var(var) else {
+					return Err(format!("Variable {var} not found"))
+				};
+				let Val::Num(_) = &var else {
+					return Err(format!("Variable {var} is not a number"))
+				};
+				var.clone()
+			}
+			Expr::Int(int) => Val::Num(*int as isize),
+			Expr::BinExp { op, left, right } => self.eval_bin_expr(op, left, right)?,
+			_ => unreachable!(),
+		};
+		let Val::Num(left) = left else {
+			return Err(format!("Left value {left} is not a number"))
+		};
+		let Val::Num(right) = right else {
+			return Err(format!("Right value {right} is not a number"))
+		};
+		Ok(Val::Num(match op {
+			BinOp::Add => left + right,
+			BinOp::Sub => left - right,
+			BinOp::Mult => left * right,
+			BinOp::Div => left / right,
+			BinOp::Mod => left % right,
+			BinOp::Pow => left.pow(right as u32),
+		}))
+	}
+	pub fn mutate_var(&mut self, name: String, op: BinOp, value: Val) -> Result<(),String> {
+		let Some(var) = self.get_var_mut(&name) else {
+			return Err(format!("Variable {name} not found"))
+		};
+		let Val::Num(var) = var else {
+			return Err(format!("Variable {name} is not a number"))
+		};
+		let Val::Num(value) = value else {
+			return Err(format!("Value {value} is not a number"))
+		};
+		match op {
+			BinOp::Add => {
+				*var += value;
+			}
+			BinOp::Sub => {
+				*var -= value;
+			}
+			BinOp::Mult => {
+				*var *= value;
+			}
+			BinOp::Div => {
+				if value == 0 {
+					return Err("Division by zero".to_string())
+				}
+				*var /= value;
+			}
+			BinOp::Mod => {
+				*var %= value;
+			}
+			BinOp::Pow => {
+				*var = var.pow(value as u32);
+			}
+		}
 		Ok(())
 	}
 }

@@ -1250,7 +1250,11 @@ impl LineBuf {
 				} else {
 					self.start_of_word_backward(self.cursor.get(), word)
 				};
-				let end = self.dispatch_word_motion(count, To::Start, word, Direction::Forward, true);
+				let end = if self.is_word_bound(self.cursor.get(), word, Direction::Forward) {
+					self.cursor.get()
+				} else {
+					self.end_of_word_forward(self.cursor.get(), word)
+				};
 				Some((start,end))
 			}
 			Bound::Around => {
@@ -1259,7 +1263,11 @@ impl LineBuf {
 				} else {
 					self.start_of_word_backward(self.cursor.get(), word)
 				};
-				let end = self.dispatch_word_motion(count, To::Start, word, Direction::Forward, false);
+				let end = if self.is_word_bound(self.cursor.get(), word, Direction::Forward) {
+					self.cursor.get()
+				} else {
+					self.end_of_word_forward(self.cursor.get(), word)
+				};
 				Some((start,end))
 			}
 		}
