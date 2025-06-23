@@ -1607,8 +1607,8 @@ impl LineBuf {
 		];
 		let mut fwd_indices = self.cursor.get()..end;
 		let mut bkwd_indices = (start..self.cursor.get()).rev();
-		let idx = bkwd_indices.find(|idx| self.grapheme_at(*idx).is_some_and(|gr| opener_delims.contains(&gr)))
-			.or_else(|| fwd_indices.find(|idx| self.grapheme_at(*idx).is_some_and(|gr| delims.contains(&gr))))?;
+		let idx = fwd_indices.find(|idx| self.grapheme_at(*idx).is_some_and(|gr| delims.contains(&gr)))
+			.or_else(|| bkwd_indices.find(|idx| self.grapheme_at(*idx).is_some_and(|gr| opener_delims.contains(&gr))))?;
 		let search_direction = match self.grapheme_at(idx)? {
 			"[" |
 			"{" |

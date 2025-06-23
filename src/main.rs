@@ -837,7 +837,13 @@ fn exec_cmd(
 			let mut display_args = vec![];
 			for arg in args {
 				let value = match arg {
-					CmdArg::Literal(value) => value.clone(),
+					CmdArg::Literal(value) => {
+						let expanded = vicut.expand_literal(&value.to_string()).unwrap_or_else(|e| {
+							eprintln!("vicut: {e}");
+							std::process::exit(1)
+						});
+						Val::Str(expanded)
+					}
 					CmdArg::Var(var) => {
 						let Some(val) = vicut.get_var(var) else {
 							eprintln!("vicut: variable '{var}' not found");
@@ -848,7 +854,11 @@ fn exec_cmd(
 					CmdArg::Expr(expr) => {
 						match expr {
 							Expr::Return(cmd) => {
-								match vicut.read_field(&cmd) {
+								let expanded = vicut.expand_literal(&cmd.to_string()).unwrap_or_else(|e| {
+									eprintln!("vicut: {e}");
+									std::process::exit(1)
+								});
+								match vicut.read_field(&expanded) {
 									Ok(field) => {
 										Val::Str(field)
 									}
@@ -872,7 +882,11 @@ fn exec_cmd(
 								Val::Bool(*bool)
 							}
 							Expr::Literal(lit) => {
-								Val::Str(lit.clone())
+								let expanded = vicut.expand_literal(&lit.to_string()).unwrap_or_else(|e| {
+									eprintln!("vicut: {e}");
+									std::process::exit(1)
+								});
+								Val::Str(expanded)
 							}
 							Expr::BoolExp { op, left, right } => {
 								vicut.eval_bool_expr(op, left, right).unwrap_or_else(|e| {
@@ -967,6 +981,7 @@ fn exec_cmd(
 					let Some((start,_)) = vicut.editor.line_bounds(line) else { continue };
 					// Set the cursor on the start of the line
 					vicut.editor.cursor.set(start);
+					vicut.update_builtins(); // Updates the line number and column number
 					// Execute our commands
 
 					vicut.descend(); // new scope
@@ -1043,7 +1058,11 @@ fn exec_cmd(
 						eprintln!("vicut: expected a string");
 						std::process::exit(1)
 					};
-					motion.clone()
+
+					vicut.expand_literal(motion).unwrap_or_else(|e| {
+						eprintln!("vicut: {e}");
+						std::process::exit(1)
+					})
 				}
 				CmdArg::Var(var) => {
 					let Some(val) = vicut.get_var(var) else {
@@ -1078,7 +1097,10 @@ fn exec_cmd(
 						eprintln!("vicut: expected a string");
 						std::process::exit(1)
 					};
-					motion.clone()
+					vicut.expand_literal(motion).unwrap_or_else(|e| {
+						eprintln!("vicut: {e}");
+						std::process::exit(1)
+					})
 				}
 				CmdArg::Var(var) => {
 					let Some(val) = vicut.get_var(var) else {
@@ -1118,7 +1140,13 @@ fn exec_cmd(
 		}
 		Cmd::VarDec { name, value } => {
 			let value = match value {
-				CmdArg::Literal(value) => value.clone(),
+				CmdArg::Literal(value) => {
+					let expanded = vicut.expand_literal(&value.to_string()).unwrap_or_else(|e| {
+						eprintln!("vicut: {e}");
+						std::process::exit(1)
+					});
+					Val::Str(expanded)
+				}
 				CmdArg::Var(var) => {
 					let Some(val) = vicut.get_var(var) else {
 						eprintln!("vicut: variable '{var}' not found");
@@ -1129,7 +1157,12 @@ fn exec_cmd(
 				CmdArg::Expr(expr) => {
 					match expr {
 						Expr::Return(cmd) => {
-							match vicut.read_field(&cmd) {
+							let expanded = vicut.expand_literal(&cmd.to_string()).unwrap_or_else(|e| {
+								eprintln!("vicut: {e}");
+								std::process::exit(1)
+							});
+
+							match vicut.read_field(&expanded) {
 								Ok(field) => {
 									Val::Str(field)
 								}
@@ -1153,7 +1186,11 @@ fn exec_cmd(
 							Val::Bool(*bool)
 						}
 						Expr::Literal(lit) => {
-							Val::Str(lit.clone())
+							let expanded = vicut.expand_literal(&lit.to_string()).unwrap_or_else(|e| {
+								eprintln!("vicut: {e}");
+								std::process::exit(1)
+							});
+							Val::Str(expanded)
 						}
 						Expr::BoolExp { op, left, right } => {
 							vicut.eval_bool_expr(op, left, right).unwrap_or_else(|e| {
@@ -1175,11 +1212,21 @@ fn exec_cmd(
 		}
 		Cmd::MutateVar { name, op, value } => {
 			let value = match value {
-				CmdArg::Literal(value) => value.clone(),
+				CmdArg::Literal(value) => {
+					let expanded = vicut.expand_literal(&value.to_string()).unwrap_or_else(|e| {
+						eprintln!("vicut: {e}");
+						std::process::exit(1)
+					});
+					Val::Str(expanded)
+				}
 				CmdArg::Expr(expr) => {
 					match expr {
 						Expr::Return(cmd) => {
-							match vicut.read_field(&cmd) {
+							let expanded = vicut.expand_literal(&cmd.to_string()).unwrap_or_else(|e| {
+								eprintln!("vicut: {e}");
+								std::process::exit(1)
+							});
+							match vicut.read_field(&expanded) {
 								Ok(field) => {
 									Val::Str(field)
 								}
@@ -1197,7 +1244,11 @@ fn exec_cmd(
 							val.clone()
 						}
 						Expr::Literal(lit) => {
-							Val::Str(lit.clone())
+							let expanded = vicut.expand_literal(&lit.to_string()).unwrap_or_else(|e| {
+								eprintln!("vicut: {e}");
+								std::process::exit(1)
+							});
+							Val::Str(expanded)
 						}
 						Expr::Int(int) => {
 							Val::Num(*int as isize)

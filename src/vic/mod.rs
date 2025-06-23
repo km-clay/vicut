@@ -497,6 +497,9 @@ pub fn parse_vic(input: &str) -> Result<Opts, String> {
 				}
 			}
 			Rule::cmd => parse_cmd(&mut opts.cmds, pair),
+			Rule::EOI => {
+				// End of input
+			}
 			_ => unreachable!("Unexpected rule in vic: {:?}", pair.as_rule()),
 		}
 	}

@@ -484,7 +484,7 @@ impl ViCut {
 			panic!("There is supposed to be a stack frame here")
 		};
 		let col = self.editor.cursor_col();
-		let line = self.editor.cursor_line_number();
+		let line = self.editor.cursor_line_number() + 1; // 1-based line numbers
 		let pos = self.editor.cursor_byte_pos();
 		let lines = self.editor.total_lines();
 		let selection = self.editor.selected_content().unwrap_or_default();
@@ -719,5 +719,68 @@ impl ViCut {
 			}
 		}
 		Ok(())
+	}
+	pub fn expand_literal(&self, literal: &str) -> Result<String,String> {
+		let mut expanded = String::new();
+		let mut var_name = String::new();
+		let mut chars = literal.chars().peekable();
+		while let Some(c) = chars.next() {
+			match c {
+				'\\' => {
+					// Skip the next character
+					if let Some(next) = chars.next() {
+						expanded.push(next);
+						if next != '$' {
+							// It's not escaping a variable, so we push the backslash too
+							expanded.push('\\');
+						}
+					}
+					continue
+				}
+				'$' => {
+					match (chars.next(), chars.next()) {
+						(Some('{'), Some('{')) => {
+							// This is a variable
+							let mut closed = false;
+							while let Some(ch) = chars.next() {
+								match ch {
+									'}' if chars.peek() == Some(&'}') => {
+										// End of variable
+										closed = true;
+										chars.next();
+										break
+									}
+									_ => {
+										var_name.push(ch);
+									}
+								}
+							}
+							if !closed {
+								return Err("Unmatched ${{".to_string())
+							}
+							if let Some(var) = self.get_var(&std::mem::take(&mut var_name)) {
+								match var {
+									Val::Str(s) => expanded.push_str(s),
+									Val::Num(n) => expanded.push_str(&n.to_string()),
+									Val::Bool(b) => expanded.push_str(&b.to_string()),
+									Val::Null => {}
+								}
+							}
+						}
+						(ch1,ch2) => {
+							// Not a variable, just push what we got
+							expanded.push('$');
+							if let Some(ch1) = ch1 { expanded.push(ch1); }
+							if let Some(ch2) = ch2 { expanded.push(ch2); }
+						}
+					}
+				}
+				_ => {
+					// Just a normal character
+					expanded.push(c);
+				}
+			}
+		}
+		Ok(expanded)
 	}
 }
