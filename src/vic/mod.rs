@@ -130,6 +130,7 @@ pub enum Expr {
 	Bool(bool),
 	Literal(String),
 	Regex(String),
+	Pop(String), // pop a value from a stack
 	Range(Box<Expr>,Box<Expr>), // 1..10
 	RangeInclusive(Box<Expr>,Box<Expr>), // 1..=10
 	Null,
@@ -157,6 +158,13 @@ impl Expr {
 	pub fn is_truthy(&self, vicut: &mut ViCut, ctx: &mut ExecCtx) -> bool {
 		match self {
 			Expr::Regex(_) => true,
+			Expr::Pop(stack_name) => {
+				let Some(val) = vicut.get_var(stack_name) else {
+					eprintln!("vicut: stack '{stack_name}' not found for pop command");
+					std::process::exit(1);
+				};
+				val.is_truthy()
+			}
 			Expr::RangeInclusive(start, end) |
 			Expr::Range(start, end) => {
 				let start = start.is_truthy(vicut,ctx);
@@ -368,6 +376,12 @@ impl Expr {
 			Rule::false_lit => {
 				Self::Bool(false)
 			}
+			Rule::pop_cmd => {
+				let stack_name = inner.into_inner().next().unwrap()
+					.into_inner().next().unwrap()
+					.as_str().to_string();
+				Self::Pop(stack_name)
+			}
 			Rule::bin_atom => {
 				let inner = inner.into_inner().next().unwrap();
 				Self::from_rule(inner)
@@ -449,10 +463,10 @@ impl Expr {
 
 			Rule::bool_expr_single => {
 				let mut expr = inner.into_inner();
-				let mut left_pair = expr.next().unwrap().into_inner().next().unwrap();
+				let mut left_pair = expr.next().unwrap();
 				let mut left_negated = false;
 				if let Rule::not = left_pair.as_rule() {
-					left_pair = left_pair.into_inner().next().unwrap();
+					left_pair = expr.next().unwrap();
 					left_negated = true;
 				}
 				let mut left = Self::from_rule(left_pair);
@@ -486,10 +500,10 @@ impl Expr {
 			}
 			Rule::bool_expr => {
 				let mut expr = inner.into_inner();
-				let mut left_pair = expr.next().unwrap().into_inner().next().unwrap();
+				let mut left_pair = expr.next().unwrap();
 				let mut left_negated = false;
 				if let Rule::not = left_pair.as_rule() {
-					left_pair = left_pair.into_inner().next().unwrap();
+					left_pair = expr.next().unwrap();
 					left_negated = true;
 				}
 				let mut left = Self::from_rule(left_pair);
@@ -522,6 +536,7 @@ impl Expr {
 		match self {
 			Expr::VarIndex(_,_) |
 			Expr::Var(_) => String::from("var"),
+			Expr::Pop(_) => String::from("pop"),
 			Expr::Regex(_) => String::from("regex"),
 			Expr::Range(_,_) => String::from("range"),
 			Expr::RangeInclusive(_,_) => String::from("range_inclusive"),
@@ -557,6 +572,9 @@ impl Display for BinOp {
 impl Display for Expr {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
+			Expr::Pop(stack_name) => {
+				write!(f, "pop {stack_name}")
+			}
 			Expr::RangeInclusive(start, end) => {
 				write!(f, "{}..={}", start, end)
 			}
@@ -733,6 +751,10 @@ pub fn parse_vic(input: &str) -> Result<Opts, String> {
 fn parse_cmd(cmds: &mut Vec<Cmd>, pair: Pair<Rule>) {
 	for pair in pair.into_inner() {
 		match pair.as_rule() {
+			Rule::include => {
+				let include_cmds = include_cmd(pair);
+				cmds.extend(include_cmds);
+			}
 			Rule::global_cmd => {
 				let cmd = parse_global(pair,true);
 				cmds.push(cmd);
@@ -753,6 +775,26 @@ fn parse_cmd(cmds: &mut Vec<Cmd>, pair: Pair<Rule>) {
 			Rule::move_cmd => {
 				let move_cmd = parse_argument(pair.into_inner().next().unwrap());
 				let cmd = Cmd::Motion(move_cmd);
+				cmds.push(cmd);
+			}
+			Rule::push_cmd => {
+				let mut inner = pair.into_inner();
+				let stack_name = inner.next().unwrap()
+					.into_inner().next().unwrap()
+					.into_inner().next().unwrap()
+					.as_str().to_string();
+				let expr = inner.next().unwrap();
+				let expr = Expr::from_rule(expr);
+				let cmd = Cmd::Push(CmdArg::Var(stack_name), CmdArg::Expr(expr));
+				cmds.push(cmd);
+			}
+			Rule::pop_cmd => {
+				let mut inner = pair.into_inner();
+				let stack_name = inner.next().unwrap()
+					.into_inner().next().unwrap()
+					.into_inner().next().unwrap()
+					.as_str().to_string();
+				let cmd = Cmd::Pop(CmdArg::Var(stack_name));
 				cmds.push(cmd);
 			}
 			Rule::return_cmd => {
@@ -1004,4 +1046,20 @@ fn parse_argument(pair: Pair<Rule>) -> CmdArg {
 		}
 		_ => unreachable!("Unexpected rule in argument: {:?}", pair.as_rule()),
 	}
+}
+
+fn include_cmd(pair: Pair<Rule>) -> Vec<Cmd> {
+	let mut cmds = vec![];
+	let mut inner = pair.into_inner();
+	let file_pair = inner.next().unwrap();
+	let file = file_pair.into_inner().next().unwrap()
+		.as_str().to_string();
+
+	let file_content = std::fs::read_to_string(&file)
+		.unwrap_or_else(|_| panic!("vicut: error reading included file '{file}'"));
+
+	let included_cmds = parse_vic(&file_content).unwrap_or_else(complain_and_exit);
+
+	cmds.extend(included_cmds.cmds);
+	cmds
 }

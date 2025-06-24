@@ -21,7 +21,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use exec::{CompoundVal, Val, ViCut};
 use log::trace;
 use register::{append_register, write_register, RegisterContent};
-use serde_json::{Map, Value};
+use serde_json::{map, Map, Value};
 use rayon::prelude::*;
 use vic::{BinOp, CmdArg, Expr};
 
@@ -42,9 +42,10 @@ pub mod tests;
 pub type Name = String;
 
 /// Print the given error message and exit the program.
+/// Since we're a command-line tool, exiting on errors is the expected behavior, which makes things easy.
 ///
-/// This function is marked as returning `T` to allow it to be used in contexts like `.unwrap_or_else(complain_and_exit)`, which is nice and concise
-/// but it never actually returns — it always terminates the process with `std::process::exit(1)`.
+/// Despite the header, this function does not return anything. It always calls `std::process::exit(1)`.
+/// This is done so that the function can be easily used as an argument to methods such as `unwrap_or_else`.
 ///
 /// The error message will be prefixed with `vicut:` if it is not already.
 pub fn complain_and_exit<T>(err: impl Display) -> T {
@@ -72,6 +73,8 @@ pub enum Cmd {
 	Motion(CmdArg),
 	Field(CmdArg),
 	Return(CmdArg),
+	Push(CmdArg,CmdArg), // Push a value onto an array or string
+	Pop(CmdArg), 				 // Pop a value from an array or string
 	Yank(CmdArg,char), // The char is the register to yank into
 	NamedField(Name,CmdArg),
 	Repeat {
@@ -863,6 +866,59 @@ fn exec_cmd(
 	ctx: &mut ExecCtx,
 ) -> Option<Val>{
 	match cmd {
+		Cmd::Push(stack_var, arg) => {
+			let stack_var = match stack_var {
+				CmdArg::Null => return None,
+				CmdArg::Literal(val) => val.to_string(),
+				CmdArg::Var(var) => var.to_string(),
+				CmdArg::Count(_) => return None,
+				CmdArg::Expr(expr) => vicut.eval_expr(expr, ctx).unwrap_or_else(complain_and_exit).to_string(),
+			};
+			let value = vicut.eval_cmd_arg(arg, ctx).unwrap_or_else(complain_and_exit).clone();
+			let stack = vicut.get_var_mut(&stack_var)
+				.ok_or_else(|| format!("vicut: variable '{stack_var}' not found"))
+				.unwrap_or_else(complain_and_exit);
+			let Ok(iterable) = CompoundVal::try_from(stack.clone()) else {
+				eprintln!("vicut: expected an array or string for variable '{stack_var}', found {value}");
+				std::process::exit(1);
+			};
+			let new_val = match iterable {
+				CompoundVal::Str(mut str) => {
+					str.push_str(&value.to_string());
+					Val::Str(str)
+				}
+				CompoundVal::Arr(mut vals) => {
+					vals.push(value);
+					Val::Arr(vals)
+				}
+			};
+			*stack = new_val.clone();
+		}
+		Cmd::Pop(stack_var) => {
+			let stack_var = stack_var.to_string();
+			dbg!(&stack_var);
+			let Some(stack_val) = vicut.get_var_mut(&stack_var) else {
+				eprintln!("vicut: variable '{stack_var}' not found");
+				std::process::exit(1);
+			};
+			let iterable = CompoundVal::try_from(stack_val.clone()).unwrap_or_else(|_| {
+				eprintln!("vicut: expected a list or map for variable '{stack_var}', found {stack_val}");
+				std::process::exit(1);
+			});
+			let popped_value = match iterable {
+				CompoundVal::Str(mut str) => {
+					let last_char = str.pop()?;
+					*stack_val = Val::Str(str);
+					Val::Str(last_char.to_string())
+				}
+				CompoundVal::Arr(mut vals) => {
+					let popped_value = vals.pop()?;
+					*stack_val = Val::Arr(vals);
+					popped_value
+				}
+			};
+			return Some(popped_value)
+		}
 		Cmd::LoopBreak |
 		Cmd::LoopContinue => {
 			// These are only checked for in loop contexts

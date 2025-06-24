@@ -2147,8 +2147,17 @@ impl LineBuf {
 	pub fn cursor_max(&self) -> usize {
 		self.cursor.max
 	}
-	pub fn cursor_at_max(&self) -> bool {
-		self.cursor.get() == self.cursor.upper_bound()
+	pub fn cursor_at_max(&mut self) -> bool {
+		// hack
+		let cursor_pos = self.cursor.get();
+		if self.cursor.exclusive {
+			cursor_pos == self.cursor.max.saturating_sub(2)
+		} else {
+			cursor_pos == self.cursor.max.saturating_sub(1)
+		}
+	}
+	pub fn cursor_at_eol(&mut self) -> bool {
+		self.grapheme_after_cursor().is_none_or(|gr| gr == "\n")
 	}
 	pub fn cursor_col(&mut self) -> usize {
 		let start = self.start_of_line();
@@ -2612,8 +2621,15 @@ impl LineBuf {
 				} else {
 					self.end_of_line()
 				};
-
-				MotionKind::On(pos.saturating_sub(1)) // Exclude the newline
+				dbg!(self.grapheme_at(pos));
+				dbg!(pos);
+				if self.grapheme_at(pos) == Some("\n") {
+					// If we are at the end of the line, we want to go back one
+					// So we don't land on the newline
+					MotionKind::On(pos.saturating_sub(1))
+				} else {
+					MotionKind::On(pos)
+				}
 			}
 			MotionCmd(count,Motion::CharSearch(direction, dest, ch)) => {
 				let mut ch_buf = [0u8;4];

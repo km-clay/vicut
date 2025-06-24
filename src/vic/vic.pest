@@ -54,6 +54,8 @@ echo = _{ "echo" }
 repeat = _{ "repeat" | "r" }
 yank = _{ "yank" | "y" }
 break_loop = _{ "break" }
+push = _{ "push" }
+pop = _{ "pop" }
 continue_loop = _{ "continue" }
 return = _{ "return" | "ret" }
 int = @{ ASCII_DIGIT+ }
@@ -66,6 +68,8 @@ move_cmd = { move ~ vim_cmd }
 echo_cmd = { echo ~ expr* }
 cut_cmd = { cut ~ name_def? ~ vim_cmd }
 return_cmd = { return ~ vim_cmd }
+push_cmd = { push ~ var ~ expr }
+pop_cmd = { pop ~ var }
 yank_cmd = { yank ~ register? ~ expr }
 not_global_cmd = { not_global ~ pattern ~ block ~ ("else" ~ block)? }
 
@@ -96,11 +100,11 @@ var_pow = { var_name ~ "^=" ~ (bin_expr|int|var) }
 var_mod = { var_name ~ "%=" ~ (bin_expr|int|var) }
 
 func_def_args = { "(" ~ (var_name ~ ",")* ~ var_name? ~ ")" }
-func_name = { var_name ~ func_def_args }
+func_name = { var_ident ~ func_def_args }
 func_def = { "def" ~ func_name ~ block }
 
 func_call_args = { "(" ~ ((expr) ~ ",")* ~ (expr)? ~ ")" }
-func_call = { var_name ~ func_call_args }
+func_call = { var_ident ~ func_call_args }
 
 
 // Regex values
@@ -108,7 +112,7 @@ func_call = { var_name ~ func_call_args }
 // then take any number of those delimiters
 // then stop when we find the same number of those delimiters in a row
 regex_lit = { PUSH(regex_delim) ~ (&PEEK ~ PUSH(regex_delim))* ~ regex ~ POP_ALL }
-regex_delim = _{ !(ASCII_ALPHANUMERIC | "}" | "{" | "(" | ")" | "[" | "]") ~ ANY }
+regex_delim = _{ !(ASCII_ALPHANUMERIC | "'" | "}" | "{" | "(" | ")" | "[" | "]") ~ ANY }
 regex = { (!PEEK_ALL ~ ANY)* }
 
 bin_op = _{ add | sub | mult | div | modulo | pow }
@@ -133,17 +137,17 @@ bool_conjunction = { and | or }
 
 unary_minus = { "-" }
 bin_lit = { unary_minus? ~ (var|int) }
-bool_lit = { not? ~ ("(" ~ bool_expr_single ~ ")" | value | func_call) }
+bool_lit = { not? ~ ("(" ~ bool_expr_single ~ ")" | value | pop_cmd | func_call) }
 bin_atom = { bin_lit | ("(" ~ bin_expr ~ ")") }
 bin_expr = { bin_atom ~ (bin_op ~ bin_atom)* }
-bool_expr_single = { (bool_lit ~ bool_op ~ bool_lit) | bool | "(" ~ bool_expr ~ ")" }
+bool_expr_single = { (bool_lit ~ bool_op ~ bool_lit) | (not ~ bool_lit) | bool | "(" ~ bool_expr ~ ")" }
 bool_expr = { bool_expr_single ~ (bool_conjunction ~ bool_expr_single)* }
 array = { "[" ~ ((expr ~ ",")* ~ expr?)? ~ "]"}
 ternary = { expr_not_ternary ~ "?" ~ expr ~ ":" ~ expr }
 expr_not_ternary = { array | return_cmd | bin_expr | bool_expr | value }
 null = { "null" }
 num_expr = { bin_expr | ternary | var | int }
-expr = { array | ternary | return_cmd | bin_expr | bool_expr | value | func_call | null }
+expr = { array | ternary | pop_cmd | return_cmd | bin_expr | bool_expr | value |  func_call | null }
 
 
 value = { var | int | literal | bool | register | regex_lit }
@@ -181,6 +185,8 @@ cmd = {
   cut_cmd |
   yank_cmd |
   echo_cmd |
+  push_cmd |
+  pop_cmd |
   return_cmd |
   func_def |
   func_call |

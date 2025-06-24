@@ -632,14 +632,26 @@ impl ViCut {
 		let big_word = self.editor.slice_inclusive(big_word_start..=big_word_end)
 			.map(|slice| slice.to_string())
 			.unwrap_or_default();
+		let char_at_cursor = self.editor.grapheme_at_cursor()
+			.map(|gr| gr.to_string())
+			.unwrap_or_default();
+		let is_eof = self.editor.cursor_at_max();
+		let is_eol = self.editor.cursor_at_eol();
+		let is_bof = self.editor.cursor.get() == 0;
+		let buf_len = self.editor.buffer.len();
 
 		frame.insert("col".to_string(), Val::Num(col as isize));
 		frame.insert("line".to_string(), Val::Num(line as isize));
 		frame.insert("lines".to_string(), Val::Num(lines as isize));
 		frame.insert("pos".to_string(), Val::Num(pos as isize));
+		frame.insert("buf_len".to_string(), Val::Num(buf_len as isize));
 		frame.insert("selection".to_string(), Val::Str(selection));
 		frame.insert("word".to_string(), Val::Str(word));
 		frame.insert("WORD".to_string(), Val::Str(big_word));
+		frame.insert("is_eof".to_string(), Val::Bool(is_eof));
+		frame.insert("is_eol".to_string(), Val::Bool(is_eol));
+		frame.insert("is_bof".to_string(), Val::Bool(is_bof));
+		frame.insert("char".to_string(), Val::Str(char_at_cursor));
 	}
 	pub fn get_var_mut(&mut self, name: &str) -> Option<&mut Val> {
 		for frame in self.variables.iter_mut().rev() {
@@ -730,6 +742,34 @@ impl ViCut {
 	}
 	pub fn eval_expr(&mut self, expr: &Expr, ctx: &mut ExecCtx) -> Result<Val,String> {
 		Ok(match expr {
+			Expr::Pop(stack_name) => {
+				let Some(var) = self.get_var_mut(stack_name) else {
+					return Err(format!("Stack variable {stack_name} not found"))
+				};
+				let iterable = CompoundVal::try_from(var.clone())
+					.map_err(|e| format!("Failed to convert variable {stack_name} to iterable: {e}"))?;
+
+				let (ret,new_var) = match iterable {
+					CompoundVal::Str(str) => {
+						let mut graphemes = str.graphemes(true).collect::<Vec<_>>();
+						if graphemes.is_empty() {
+							return Ok(Val::Null)
+						}
+						let last = graphemes.pop().unwrap();
+						let new_str = graphemes.join("");
+						(Val::Str(last.into()),Val::Str(new_str))
+					}
+					CompoundVal::Arr(mut vals) => {
+						if vals.is_empty() {
+							return Ok(Val::Null)
+						}
+						let last = vals.pop().unwrap();
+						(last,Val::Arr(vals))
+					}
+				};
+				*var = new_var;
+				ret
+			}
 			Expr::Null => Val::Null,
 			Expr::Regex(raw) => {
 				// 'raw' is a String, we compile the regex during evaluation here.
@@ -872,7 +912,17 @@ impl ViCut {
 		}
 
 		match left {
-			Val::Null => Err(format!("Left value {left} is null")),
+			Val::Null => {
+				if matches!(op, BoolOp::Eq | BoolOp::Ne) {
+					if matches!(right, Val::Null) {
+						Ok(Val::Bool(op == &BoolOp::Eq))
+					} else {
+						Ok(Val::Bool(false)) // Null is not equal to anything but null
+					}
+				} else {
+					Err(format!("Cannot compare null with {op}"))
+				}
+			}
 			Val::Arr(l_arr) => {
 				let Val::Arr(r_arr) = right else {
 					return Err(format!("Expected array, got {}",right.display_type()))
@@ -992,42 +1042,56 @@ impl ViCut {
 		let Some(var) = self.get_var_mut(&name) else {
 			return Err(format!("Variable {name} not found"))
 		};
-		let Val::Num(var) = var else {
-			return Err(format!("Variable {name} is not a number"))
-		};
-		let Val::Num(value) = value else {
-			return Err(format!("Value {value} is not a number"))
-		};
-		match op {
-			BinOp::Equals => {
-				*var = value;
-			}
-			BinOp::Add => {
-				*var += value;
-			}
-			BinOp::Sub => {
-				*var -= value;
-			}
-			BinOp::Mult => {
-				*var *= value;
-			}
-			BinOp::Div => {
-				if value == 0 {
-					return Err("Division by zero".to_string())
+		match var {
+			Val::Bool(b) => {
+				let Val::Bool(value) = value else {
+					return Err(format!("Value {value} is not a boolean"))
+				};
+				match op {
+					BinOp::Equals => {
+						*b = value;
+					}
+					BinOp::Add | BinOp::Sub | BinOp::Mult | BinOp::Div | BinOp::Mod | BinOp::Pow => {
+						return Err(format!("Cannot perform {op} on boolean variable {name}"))
+					}
 				}
-				*var /= value;
 			}
-			BinOp::Mod => {
-				*var %= value;
+			Val::Num(var) => {
+				let Val::Num(value) = value else {
+					return Err(format!("Value {value} is not a number"))
+				};
+				match op {
+					BinOp::Equals => {
+						*var = value;
+					}
+					BinOp::Add => {
+						*var += value;
+					}
+					BinOp::Sub => {
+						*var -= value;
+					}
+					BinOp::Mult => {
+						*var *= value;
+					}
+					BinOp::Div => {
+						if value == 0 {
+							return Err("Division by zero".to_string())
+						}
+						*var /= value;
+					}
+					BinOp::Mod => {
+						*var %= value;
+					}
+					BinOp::Pow => {
+						*var = var.pow(value as u32);
+					}
+				}
 			}
-			BinOp::Pow => {
-				*var = var.pow(value as u32);
-			}
+			_ => unimplemented!()
 		}
 		Ok(())
 	}
 	pub fn set_index_var(&mut self, name: String, index: usize, value: Val) -> Result<(),String> {
-		eprintln!("setting index {index} of {name} to {value}");
 		let Some(var) = self.get_var_mut(&name) else {
 			return Err(format!("Variable {name} not found"))
 		};
