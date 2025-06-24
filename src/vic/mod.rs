@@ -85,6 +85,8 @@ pub enum BoolOp {
 	Gt,
 	LtEq,
 	GtEq,
+	Not,
+	Null
 }
 impl BoolOp {
 	pub fn bool_op_from_rule(mut pair: Pair<Rule>) -> Self {
@@ -117,6 +119,8 @@ impl Display for BoolOp {
 			BoolOp::Gt => write!(f, ">"),
 			BoolOp::LtEq => write!(f, "<="),
 			BoolOp::GtEq => write!(f, ">="),
+			BoolOp::Not => write!(f, "!"),
+			BoolOp::Null => write!(f, ""),
 		}
 	}
 }
@@ -145,7 +149,7 @@ pub enum Expr {
 	BoolExp {
 		op: BoolOp,
 		left: (bool,Box<Expr>), // (is negated, expr)
-		right: (bool,Box<Expr>), // (is negated, expr)
+		right: Option<(bool,Box<Expr>)>, // (is negated, expr)
 	},
 	BinExp {
 		op: BinOp,
@@ -242,7 +246,7 @@ impl Expr {
 				}
 			}
 			Expr::BoolExp { op, left, right } => {
-				vicut.eval_bool_expr(op, left, right,ctx).unwrap_or_else(complain_and_exit).is_truthy()
+				vicut.eval_bool_expr(op, left, right.as_ref(),ctx).unwrap_or_else(complain_and_exit).is_truthy()
 			}
 			Expr::BinExp { op, left, right } => {
 				vicut.eval_bin_expr(op, left, right).unwrap_or_else(complain_and_exit).is_truthy()
@@ -281,11 +285,16 @@ impl Expr {
 
 	pub fn from_rule(pair: Pair<Rule>) -> Self {
 		// we do a little hacking
-		let inner = if matches!(pair.as_rule(), Rule::func_call | Rule::var_ident | Rule::range | Rule::range_inclusive | Rule::bin_expr | Rule::bool_expr_single | Rule::int | Rule::null) {
+		let inner = if matches!(pair.as_rule(), Rule::func_call | Rule::var_ident | Rule::range | Rule::range_inclusive | Rule::bin_expr | Rule::bool_expr_single | Rule::bool_expr | Rule::int | Rule::null) {
 			pair
 		} else {
 			let rule = format!("{:?}",pair.as_rule());
-			pair.into_inner().next().unwrap_or_else(|| panic!("Unwrapped nothing on rule: {rule}"))
+			let inner_check = pair.clone();
+			if inner_check.into_inner().next().is_none() {
+				pair
+			} else {
+				pair.into_inner().next().unwrap_or_else(|| panic!("Unwrapped nothing on rule: {rule}"))
+			}
 		};
 		match inner.as_rule() {
 			Rule::return_cmd => {
@@ -477,6 +486,7 @@ impl Expr {
 					}
 				};
 
+
 				if let Some(op_pair) = expr.next() {
 					let op = BoolOp::bool_op_from_rule(op_pair);
 					let mut right_pair = expr.next().unwrap().into_inner().next().unwrap();
@@ -493,34 +503,41 @@ impl Expr {
 						}
 					};
 
-					return Self::BoolExp { op, left: (left_negated,Box::new(left)), right: (right_negated,Box::new(right)) };
+					return Self::BoolExp { op, left: (left_negated,Box::new(left)), right: Some((right_negated,Box::new(right))) };
 				}
-
-				left
+				Self::BoolExp { op: BoolOp::Null, left: (left_negated,Box::new(left)), right: None }
 			}
 			Rule::bool_expr => {
 				let mut expr = inner.into_inner();
-				let mut left_pair = expr.next().unwrap();
+				let mut left_expr = expr.next().unwrap();
 				let mut left_negated = false;
-				if let Rule::not = left_pair.as_rule() {
-					left_pair = expr.next().unwrap();
+				if let Rule::not = left_expr.as_rule() {
+					left_expr = expr.next().unwrap();
 					left_negated = true;
 				}
-				let mut left = Self::from_rule(left_pair);
-
+				let mut left = Self::from_rule(left_expr);
+				let mut right_expressions = vec![];
 				while let Some(op_pair) = expr.next() {
 					let op = BoolOp::bool_op_from_rule(op_pair);
-					let mut right_pair = expr.next().unwrap().into_inner().next().unwrap();
+					let mut right_pair = expr.next().unwrap().into_inner();
+					let mut right_expr = right_pair.next().unwrap();
 					let mut right_negated = false;
-					if let Rule::not = right_pair.as_rule() {
-						right_pair = right_pair.into_inner().next().unwrap();
+					if let Rule::not = right_expr.as_rule() {
+						right_expr = right_pair.next().unwrap();
 						right_negated = true;
 					}
-					let right = Self::from_rule(right_pair);
-
-					left = Self::BoolExp { op, left: (left_negated,Box::new(left)), right: (right_negated,Box::new(right)) };
+					let right = Self::from_rule(right_expr);
+					right_expressions.push((op,right_negated,Box::new(right)));
 				}
 
+				for expr in right_expressions {
+					let (op, right_negated, right) = expr;
+					left = Self::BoolExp {
+						op,
+						left: (left_negated, Box::new(left)),
+						right: Some((right_negated, right)),
+					};
+				}
 				left
 			}
 			Rule::expr => {
@@ -613,18 +630,26 @@ impl Display for Expr {
 			}
 			Expr::BoolExp { op, left, right } => {
 				let (left_negated, left) = left;
-				let (right_negated, right) = right;
-				let right_display = if *right_negated {
-					format!("!{right}")
+				if let Some((right_negated, right)) = right {
+					let right_display = if *right_negated {
+						format!("!{right}")
+					} else {
+						right.to_string()
+					};
+					let left_display = if *left_negated {
+						format!("!{left}")
+					} else {
+						left.to_string()
+					};
+					write!(f, "({left_display} {op} {right_display})")
 				} else {
-					right.to_string()
-				};
-				let left_display = if *left_negated {
-					format!("!{left}")
-				} else {
-					left.to_string()
-				};
-				write!(f, "({left_display} {op} {right_display})")
+					let left_display = if *left_negated {
+						format!("!{left}")
+					} else {
+						left.to_string()
+					};
+					write!(f, "({left_display} {op})")
+				}
 			}
 			Expr::BinExp { op, left, right } => {
 				write!(f, "({left} {op} {right})")
@@ -798,10 +823,14 @@ fn parse_cmd(cmds: &mut Vec<Cmd>, pair: Pair<Rule>) {
 				cmds.push(cmd);
 			}
 			Rule::return_cmd => {
-				let return_cmd = pair.into_inner().next().unwrap();
-				let return_cmd = Expr::from_rule(return_cmd);
-				let cmd = Cmd::Return(CmdArg::Expr(return_cmd));
-				cmds.push(cmd);
+				if let Some(cmd) = pair.into_inner().next() {
+					let return_cmd = Expr::from_rule(cmd);
+					let cmd = Cmd::Return(CmdArg::Expr(return_cmd));
+					cmds.push(cmd);
+				} else {
+					// If there is no return command, we just push an empty return
+					cmds.push(Cmd::Return(CmdArg::Null));
+				}
 			}
 			Rule::yank_cmd => {
 				let mut inner = pair.into_inner();
@@ -837,7 +866,8 @@ fn parse_cmd(cmds: &mut Vec<Cmd>, pair: Pair<Rule>) {
 				let mut args = vec![];
 				let mut name_and_args = inner.next().unwrap().into_inner();
 				let name = name_and_args.next().unwrap().as_str().to_string();
-				for arg in name_and_args {
+				let arg_list = name_and_args.next().unwrap().into_inner();
+				for arg in arg_list {
 					let arg = arg.as_str().to_string();
 					args.push(arg);
 				}
@@ -858,6 +888,16 @@ fn parse_cmd(cmds: &mut Vec<Cmd>, pair: Pair<Rule>) {
 				let body = parse_block(block);
 				let cmd = Cmd::ForBlock { var_name, iterable, body };
 				cmds.push(cmd);
+			}
+			Rule::func_call => {
+				let mut inner = pair.into_inner();
+				let func_name = inner.next().unwrap().as_str().to_string();
+				let pair_args = inner.next().unwrap().into_inner();
+				let mut args = vec![];
+				for arg in pair_args {
+					args.push(CmdArg::Expr(Expr::from_rule(arg)));
+				}
+				cmds.push(Cmd::FuncCall { name: func_name, args });
 			}
 			Rule::until_block |
 			Rule::while_block => {

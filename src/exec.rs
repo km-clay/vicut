@@ -204,6 +204,20 @@ pub struct ViCut {
 
 
 impl ViCut {
+	const BUILTINS: [&str;12] = [
+		"col",
+		"line",
+		"lines",
+		"pos",
+		"buf_len",
+		"selection",
+		"word",
+		"WORD",
+		"is_eof",
+		"is_eol",
+		"is_bof",
+		"char"
+	];
 	pub fn new(input: String, cursor: usize) -> Result<Self,String> {
 		Ok(Self {
 			reader: RawReader::new(),
@@ -612,47 +626,6 @@ impl ViCut {
 			self.functions.pop();
 		}
 	}
-	pub fn update_builtins(&mut self) {
-		// We grab the first one, since built-ins are kept in the outermost frame
-		let Some(frame) = self.variables.first_mut() else {
-			panic!("There is supposed to be a stack frame here")
-		};
-		let col = self.editor.cursor_col() + 1; // 1-based column numbers
-		let line = self.editor.cursor_line_number() + 1; // 1-based line numbers
-		let pos = self.editor.cursor_byte_pos();
-		let lines = self.editor.total_lines();
-		let selection = self.editor.selected_content().unwrap_or_default();
-		let (word_start,word_end) = self.editor.text_obj_word(1, Bound::Inside, Word::Normal).unwrap_or_default();
-		let word_end = ClampedUsize::new(word_end, self.editor.cursor.cap(), false).ret_add(1);
-		let word = self.editor.slice_inclusive(word_start..=word_end)
-			.map(|slice| slice.to_string())
-			.unwrap_or_default();
-		let (big_word_start,big_word_end) = self.editor.text_obj_word(1, Bound::Inside, Word::Big).unwrap_or_default();
-		let big_word_end = ClampedUsize::new(big_word_end, self.editor.cursor.cap(), false).ret_add(1);
-		let big_word = self.editor.slice_inclusive(big_word_start..=big_word_end)
-			.map(|slice| slice.to_string())
-			.unwrap_or_default();
-		let char_at_cursor = self.editor.grapheme_at_cursor()
-			.map(|gr| gr.to_string())
-			.unwrap_or_default();
-		let is_eof = self.editor.cursor_at_max();
-		let is_eol = self.editor.cursor_at_eol();
-		let is_bof = self.editor.cursor.get() == 0;
-		let buf_len = self.editor.buffer.len();
-
-		frame.insert("col".to_string(), Val::Num(col as isize));
-		frame.insert("line".to_string(), Val::Num(line as isize));
-		frame.insert("lines".to_string(), Val::Num(lines as isize));
-		frame.insert("pos".to_string(), Val::Num(pos as isize));
-		frame.insert("buf_len".to_string(), Val::Num(buf_len as isize));
-		frame.insert("selection".to_string(), Val::Str(selection));
-		frame.insert("word".to_string(), Val::Str(word));
-		frame.insert("WORD".to_string(), Val::Str(big_word));
-		frame.insert("is_eof".to_string(), Val::Bool(is_eof));
-		frame.insert("is_eol".to_string(), Val::Bool(is_eol));
-		frame.insert("is_bof".to_string(), Val::Bool(is_bof));
-		frame.insert("char".to_string(), Val::Str(char_at_cursor));
-	}
 	pub fn get_var_mut(&mut self, name: &str) -> Option<&mut Val> {
 		for frame in self.variables.iter_mut().rev() {
 			if frame.contains_key(name) {
@@ -661,15 +634,56 @@ impl ViCut {
 		}
 		None
 	}
-	pub fn get_var(&self, name: &str) -> Option<&Val> {
+	pub fn get_var(&mut self, name: &str) -> Option<Val> {
 		// Search the stack frames for the variable
 		// We do this in reverse order, so that we get the most local variable
 		for frame in self.variables.iter().rev() {
 			if frame.contains_key(name) {
-				return frame.get(name)
+				return frame.get(name).cloned()
 			}
 		}
+		if Self::BUILTINS.contains(&name) {
+			// If the variable is a built-in, we return it as a Val::Str
+			// This is to allow for built-in variables like 'col', 'line', etc.
+			return self.get_builtin_var(name).clone()
+		}
 		None
+	}
+	pub fn get_builtin_var(&mut self, name: &str) -> Option<Val> {
+		if !Self::BUILTINS.contains(&name) {
+			return None // Not a built-in variable
+		}
+		Some(match name {
+			"col" => Val::Num((self.editor.cursor_col() + 1) as isize),
+			"line" => Val::Num((self.editor.cursor_line_number() + 1) as isize),
+			"lines" => Val::Num(self.editor.total_lines() as isize),
+			"pos" => Val::Num(self.editor.cursor_byte_pos() as isize),
+			"buf_len" => Val::Num(self.editor.buffer.len() as isize),
+			"selection" => Val::Str(self.editor.selected_content().unwrap_or_default()),
+			"word" => {
+				let (word_start,word_end) = self.editor.text_obj_word(1, Bound::Inside, Word::Normal).unwrap_or_default();
+				let word_end = ClampedUsize::new(word_end, self.editor.cursor.cap(), false).ret_add(1);
+				self.editor.slice_inclusive(word_start..=word_end)
+					.map(|slice| Val::Str(slice.to_string()))
+					.unwrap_or(Val::Str(String::new()))
+			}
+			"WORD" => {
+				let (big_word_start,big_word_end) = self.editor.text_obj_word(1, Bound::Inside, Word::Big).unwrap_or_default();
+				let big_word_end = ClampedUsize::new(big_word_end, self.editor.cursor.cap(), false).ret_add(1);
+				self.editor.slice_inclusive(big_word_start..=big_word_end)
+					.map(|slice| Val::Str(slice.to_string()))
+					.unwrap_or(Val::Str(String::new()))
+			}
+			"is_eof" => Val::Bool(self.editor.cursor_at_max()),
+			"is_eol" => Val::Bool(self.editor.cursor_at_eol()),
+			"is_bof" => Val::Bool(self.editor.cursor.get() == 0),
+			"char" => {
+				self.editor.grapheme_at_cursor()
+					.map(|gr| Val::Str(gr.to_string()))
+					.unwrap_or(Val::Str(String::new()))
+			}
+			_ => unreachable!()
+		})
 	}
 	pub fn set_var(&mut self, name: String, value: Val) {
 		let Some(frame) = self.variables.last_mut() else {
@@ -719,7 +733,7 @@ impl ViCut {
 					eprintln!("vicut: variable '{var}' is not a number");
 					std::process::exit(1)
 				};
-				Ok(*n as usize)
+				Ok(n as usize)
 			}
 			_ => Err(format!("Expected count, got {}",count.display_type()))
 		}
@@ -838,7 +852,7 @@ impl ViCut {
 			Expr::Int(int) => Val::Num(*int as isize),
 			Expr::TernaryExp { cond, true_case, false_case } => self.eval_ternary_expr(cond, true_case, false_case,ctx)?,
 			Expr::BinExp { op, left, right } => self.eval_bin_expr(op, left, right)?,
-			Expr::BoolExp { op, left, right } => self.eval_bool_expr(op, left, right,ctx)?,
+			Expr::BoolExp { op, left, right } => self.eval_bool_expr(op, left, right.as_ref(),ctx)?,
 			Expr::Bool(bool) => Val::Bool(*bool),
 			Expr::Return(cmd) => {
 				let Ok(field) = self.read_field(cmd) else {
@@ -885,9 +899,21 @@ impl ViCut {
 			self.eval_expr(false_case,ctx)
 		}
 	}
-	pub fn eval_bool_expr(&mut self, op: &BoolOp, left: &(bool,Box<Expr>), right: &(bool,Box<Expr>), ctx: &mut ExecCtx) -> Result<Val,String> {
+	pub fn eval_bool_expr(&mut self, op: &BoolOp, left: &(bool,Box<Expr>), right: Option<&(bool,Box<Expr>)>, ctx: &mut ExecCtx) -> Result<Val,String> {
 		let left_negated = left.0;
 		let left = self.eval_expr(&left.1,ctx)?;
+
+		let Some(right) = right else {
+			// This is a unary boolean expression
+			// We only support negation here
+			let right = if left_negated {
+				!left.is_truthy()
+			} else {
+				left.is_truthy()
+			};
+			return Ok(Val::Bool(right))
+		};
+
 		let right_negated = right.0;
 		let right = self.eval_expr(&right.1,ctx)?;
 
@@ -941,6 +967,9 @@ impl ViCut {
 				let Val::Str(r_string) = right else {
 					return Err(format!("Expected string, got {}",right.display_type()))
 				};
+				if r_string == "\\\"" {
+					panic!("we didn't unescape the string properly, got {r_string}");
+				}
 				match op {
 					BoolOp::Eq => Ok(Val::Bool(l_string == r_string)),
 					BoolOp::Ne => Ok(Val::Bool(l_string != r_string)),
@@ -993,7 +1022,7 @@ impl ViCut {
 			}
 		}
 	}
-	pub fn eval_bin_expr(&self, op: &BinOp, left: &Expr, right: &Expr) -> Result<Val,String> {
+	pub fn eval_bin_expr(&mut self, op: &BinOp, left: &Expr, right: &Expr) -> Result<Val,String> {
 		let left = match left {
 			Expr::Var(var) => {
 				let Some(var) = self.get_var(var) else {
@@ -1117,7 +1146,7 @@ impl ViCut {
 		let item = compound.into_iter().nth(index).ok_or(format!("Index {index} out of bounds for array {name}, length is {len}",))?;
 		Ok(item)
 	}
-	pub fn expand_literal(&self, literal: &str) -> Result<String,String> {
+	pub fn expand_literal(&mut self, literal: &str) -> Result<String,String> {
 		let mut expanded = String::new();
 		let mut var_name = String::new();
 		let mut chars = literal.chars().peekable();
@@ -1126,11 +1155,17 @@ impl ViCut {
 				'\\' => {
 					// Skip the next character
 					if let Some(next) = chars.next() {
-						expanded.push(next);
-						if next != '$' {
-							// It's not escaping a variable, so we push the backslash too
-							expanded.push('\\');
+						match next {
+							'$' |
+							'"' => {
+								// Dollar sign and double quotes are special cases
+								// These are control characters in 'vic' strings, so we remove a layer of escaping
+							}
+							_ => {
+								expanded.push('\\');
+							}
 						}
+						expanded.push(next);
 					}
 					continue
 				}

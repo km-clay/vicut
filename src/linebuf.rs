@@ -933,7 +933,6 @@ impl LineBuf {
 	}
 	pub fn selected_content(&mut self) -> Option<String> {
 		let range = self.select_range()?.clone();
-		dbg!(&range);
 		match range {
 			SelectRange::OneDim((start,end)) => {
 				match self.select_mode.as_ref().unwrap() {
@@ -2621,8 +2620,6 @@ impl LineBuf {
 				} else {
 					self.end_of_line()
 				};
-				dbg!(self.grapheme_at(pos));
-				dbg!(pos);
 				if self.grapheme_at(pos) == Some("\n") {
 					// If we are at the end of the line, we want to go back one
 					// So we don't land on the newline

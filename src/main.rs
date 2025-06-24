@@ -762,7 +762,6 @@ fn execute(args: &Opts, input: String, filename: Option<PathBuf>) -> Result<Vec<
 	let filepath = filename.map(|s| s.to_string_lossy().to_string()).unwrap_or(String::from("stdin"));
 	vicut.set_var("filename".into(), Val::Str(basename));
 	vicut.set_var("filepath".into(), Val::Str(filepath));
-	vicut.update_builtins(); // Initialize the builtin variables
 
 
 	let mut field_num = 0;
@@ -778,7 +777,6 @@ fn execute(args: &Opts, input: String, filename: Option<PathBuf>) -> Result<Vec<
 			&mut vicut,
 			&mut ctx
 		);
-		vicut.update_builtins();
 		if !ctx.args.keep_mode {
 			vicut.set_normal_mode();
 		}
@@ -896,7 +894,6 @@ fn exec_cmd(
 		}
 		Cmd::Pop(stack_var) => {
 			let stack_var = stack_var.to_string();
-			dbg!(&stack_var);
 			let Some(stack_val) = vicut.get_var_mut(&stack_var) else {
 				eprintln!("vicut: variable '{stack_var}' not found");
 				std::process::exit(1);
@@ -981,7 +978,6 @@ fn exec_cmd(
 						ctx
 					);
 				}
-				vicut.update_builtins();
 				if !ctx.args.keep_mode {
 					vicut.set_normal_mode();
 				}
@@ -1025,7 +1021,6 @@ fn exec_cmd(
 					let Some((start,_)) = vicut.editor.line_bounds(line) else { continue };
 					// Set the cursor on the start of the line
 					vicut.editor.cursor.set(start);
-					vicut.update_builtins(); // Updates the line number and column number
 					// Execute our commands
 
 					vicut.descend(); // new scope
@@ -1035,7 +1030,6 @@ fn exec_cmd(
 							vicut,
 							ctx
 						);
-						vicut.update_builtins();
 						if !ctx.args.keep_mode {
 							vicut.set_normal_mode();
 						}
@@ -1051,7 +1045,6 @@ fn exec_cmd(
 						vicut,
 						ctx,
 					);
-					vicut.update_builtins();
 					if !ctx.args.keep_mode {
 						vicut.set_normal_mode();
 					}
@@ -1139,7 +1132,6 @@ fn exec_cmd(
 							vicut,
 							ctx
 						);
-						vicut.update_builtins();
 						if !ctx.args.keep_mode {
 							vicut.set_normal_mode();
 						}
@@ -1158,7 +1150,6 @@ fn exec_cmd(
 							vicut,
 							ctx
 						);
-						vicut.update_builtins();
 						if !ctx.args.keep_mode {
 							vicut.set_normal_mode();
 						}
@@ -1195,7 +1186,6 @@ fn exec_cmd(
 						vicut,
 						ctx
 					);
-					vicut.update_builtins();
 					if !ctx.args.keep_mode {
 						vicut.set_normal_mode();
 					}
@@ -1219,7 +1209,6 @@ fn exec_cmd(
 						vicut,
 						ctx
 					);
-					vicut.update_builtins();
 					if !ctx.args.keep_mode {
 						vicut.set_normal_mode();
 					}
@@ -1243,7 +1232,6 @@ fn exec_cmd(
 						vicut,
 						ctx
 					);
-					vicut.update_builtins();
 					if !ctx.args.keep_mode {
 						vicut.set_normal_mode();
 					}

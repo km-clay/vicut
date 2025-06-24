@@ -62,16 +62,16 @@ int = @{ ASCII_DIGIT+ }
 
 include = { "include" ~ atomic_string }
 alias = { "alias" ~ var_name ~ block }
-repeat_cmd = { repeat ~ (int|var) ~ block }
-global_cmd = { global ~ pattern ~ block ~ ("else" ~ block)? }
-move_cmd = { move ~ vim_cmd }
-echo_cmd = { echo ~ expr* }
-cut_cmd = { cut ~ name_def? ~ vim_cmd }
-return_cmd = { return ~ vim_cmd }
-push_cmd = { push ~ var ~ expr }
-pop_cmd = { pop ~ var }
-yank_cmd = { yank ~ register? ~ expr }
-not_global_cmd = { not_global ~ pattern ~ block ~ ("else" ~ block)? }
+repeat_cmd = ${ repeat ~ WHITESPACE+ ~ (int|var) ~ WHITESPACE+ ~ block }
+global_cmd = ${ global ~ WHITESPACE+ ~ pattern ~ block ~ ("else" ~ block)? }
+move_cmd = ${ move ~ WHITESPACE+ ~ vim_cmd }
+echo_cmd = ${ echo ~ (WHITESPACE+ ~ expr)* }
+cut_cmd = ${ cut ~ (WHITESPACE+ ~ name_def)? ~ WHITESPACE+ ~ vim_cmd }
+return_cmd = ${ return ~ (WHITESPACE+ ~ vim_cmd)? }
+push_cmd = ${ push ~ WHITESPACE+ ~ var ~ WHITESPACE+ ~ expr }
+pop_cmd = ${ pop ~ WHITESPACE+ ~ var }
+yank_cmd = ${ yank ~ (WHITESPACE+ ~ register)? ~ WHITESPACE+ ~ expr }
+not_global_cmd = ${ not_global ~ WHITESPACE+ ~ pattern ~ block ~ ("else" ~ block)? }
 
 range = { expr ~ ".." ~ expr }
 range_inclusive = { expr ~ "..=" ~ expr }
@@ -141,13 +141,13 @@ bool_lit = { not? ~ ("(" ~ bool_expr_single ~ ")" | value | pop_cmd | func_call)
 bin_atom = { bin_lit | ("(" ~ bin_expr ~ ")") }
 bin_expr = { bin_atom ~ (bin_op ~ bin_atom)* }
 bool_expr_single = { (bool_lit ~ bool_op ~ bool_lit) | (not ~ bool_lit) | bool | "(" ~ bool_expr ~ ")" }
-bool_expr = { bool_expr_single ~ (bool_conjunction ~ bool_expr_single)* }
+bool_expr = { bool_expr_single ~ (bool_conjunction ~ (bool_expr_single|bool_lit))* }
 array = { "[" ~ ((expr ~ ",")* ~ expr?)? ~ "]"}
 ternary = { expr_not_ternary ~ "?" ~ expr ~ ":" ~ expr }
 expr_not_ternary = { array | return_cmd | bin_expr | bool_expr | value }
 null = { "null" }
 num_expr = { bin_expr | ternary | var | int }
-expr = { array | ternary | pop_cmd | return_cmd | bin_expr | bool_expr | value |  func_call | null }
+expr = { array | ternary | pop_cmd | return_cmd | bool_expr | bin_expr  | value |  func_call | null }
 
 
 value = { var | int | literal | bool | register | regex_lit }
