@@ -5,15 +5,18 @@ use std::collections::HashMap;
 use std::fmt::Display;
 
 use log::trace;
+use regex::Regex;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::keys::{KeyCode, KeyEvent, ModKeys};
-use crate::linebuf::{ordered, ClampedUsize, MotionKind};
+use crate::linebuf::{ordered, ordered_signed, ClampedUsize, MotionKind};
 use crate::modes::ex::ViEx;
 use crate::modes::search::ViSearch;
 use crate::reader::{KeyReader, RawReader};
-use crate::vic::{BinOp, BoolOp, Expr};
+use crate::register::read_register;
+use crate::vic::{BinOp, BoolOp, CmdArg, Expr};
 use crate::vicmd::{Bound, LineAddr, Word};
-use crate::Cmd;
+use crate::{complain_and_exit, Cmd, ExecCtx};
 
 use super::linebuf::{LineBuf, SelectAnchor, SelectMode};
 use super::vicmd::{CmdFlags, Motion, MotionCmd, RegisterName, Verb, VerbCmd, ViCmd};
@@ -24,8 +27,111 @@ pub enum Val {
 	#[default]
 	Null,
 	Str(String),
+	Arr(Vec<Val>),
 	Num(isize),
 	Bool(bool),
+	Regex(Regex),
+}
+
+impl PartialEq for Val {
+	fn eq(&self, other: &Self) -> bool {
+		match (self, other) {
+			(Val::Str(s1), Val::Str(s2)) => s1 == s2,
+			(Val::Arr(a1), Val::Arr(a2)) => a1 == a2,
+			(Val::Num(n1), Val::Num(n2)) => n1 == n2,
+			(Val::Bool(b1), Val::Bool(b2)) => b1 == b2,
+			(Val::Null, Val::Null) => true,
+			(Val::Regex(r1), Val::Regex(r2)) => r1.as_str() == r2.as_str(),
+			(Val::Regex(r1), val) => {
+				let val_str = val.to_string();
+				r1.is_match(&val_str)
+			}
+			(val, Val::Regex(r2)) => {
+				let val_str = val.to_string();
+				r2.is_match(&val_str)
+			}
+			_ => false
+		}
+	}
+}
+
+impl From<CompoundVal> for Val {
+	fn from(value: CompoundVal) -> Self {
+		match value {
+			CompoundVal::Str(s) => Val::Str(s),
+			CompoundVal::Arr(arr) => Val::Arr(arr),
+		}
+	}
+}
+
+pub enum CompoundVal {
+	Str(String),
+	Arr(Vec<Val>),
+}
+
+impl CompoundVal {
+	pub fn len(&self) -> usize {
+		match self {
+			CompoundVal::Str(s) => s.len(),
+			CompoundVal::Arr(arr) => arr.len(),
+		}
+	}
+	pub fn is_empty(&self) -> bool {
+		match self {
+			CompoundVal::Str(s) => s.is_empty(),
+			CompoundVal::Arr(arr) => arr.is_empty(),
+		}
+	}
+	pub fn set(&mut self, index: usize, value: Val) {
+		let len = self.len();
+		match self {
+			CompoundVal::Str(s) => {
+				if let Some((i,_)) = s.grapheme_indices(true).nth(index) {
+					s.replace_range(i..=i, &value.to_string());
+				} else {
+					let padding = index.saturating_sub(len);
+					if padding > 0 {
+						s.push_str(&" ".repeat(padding));
+					}
+					s.push_str(&value.to_string());
+				}
+			}
+			CompoundVal::Arr(arr) => {
+				if index < arr.len() {
+					arr[index] = value;
+				}
+			}
+		}
+	}
+}
+
+impl IntoIterator for CompoundVal {
+	type Item = Val;
+	type IntoIter = std::vec::IntoIter<Val>;
+
+	fn into_iter(self) -> Self::IntoIter {
+		match self {
+
+			CompoundVal::Str(s) => {
+				// There has got to be a better way to do this
+				// but I will figure it out later
+				s.graphemes(true).map(|s| Val::Str(s.to_string())).collect::<Vec<_>>().into_iter()
+			}
+			CompoundVal::Arr(arr) => arr.into_iter(),
+		}
+	}
+}
+
+impl TryFrom<Val> for CompoundVal {
+	type Error = String;
+
+	fn try_from(value: Val) -> Result<Self, Self::Error> {
+		match value {
+			Val::Str(s) => Ok(CompoundVal::Str(s)),
+			Val::Arr(arr) => Ok(CompoundVal::Arr(arr)),
+			_ => Err(format!("Expected a compound value, got {}", value.display_type()))
+		}
+	}
 }
 
 impl Val {
@@ -33,7 +139,9 @@ impl Val {
 		match self {
 			Self::Str(_) => "string".to_string(),
 			Self::Num(_) => "number".to_string(),
+			Self::Arr(_) => "array".to_string(),
 			Self::Bool(_) => "boolean".to_string(),
+			Self::Regex(_) => "regex".to_string(),
 			Self::Null => "null".to_string()
 		}
 	}
@@ -41,8 +149,12 @@ impl Val {
 		match self {
 			Self::Str(s) => !s.is_empty(),
 			Self::Num(n) => *n != 0,
+			Self::Arr(arr) => !arr.is_empty(),
 			Self::Bool(b) => *b,
-			Self::Null => false
+			Self::Null => false,
+
+			// Weird case. The regex compiled successfully, so we consider it truthy
+			Self::Regex(_) => true,
 		}
 	}
 }
@@ -50,12 +162,26 @@ impl Val {
 impl Display for Val {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
+			Self::Arr(arr) => {
+				let inner = arr.iter()
+					.map(|val| val.to_string())
+					.collect::<Vec<_>>()
+					.join(", ");
+				write!(f, "[{inner}]")
+			}
 			Self::Str(s) => write!(f, "{s}"),
 			Self::Num(n) => write!(f, "{n}"),
 			Self::Bool(b) => write!(f, "{b}"),
+			Self::Regex(r) => write!(f, "{r}"),
 			Self::Null => write!(f, "null")
 		}
 	}
+}
+
+#[derive(Debug, Clone)]
+pub struct VicFunc {
+	pub args: Vec<String>,
+	pub body: Vec<Cmd>,
 }
 
 pub struct ViCut {
@@ -70,9 +196,10 @@ pub struct ViCut {
 	/// So you can shadow variables in vic
 	/// The outer-most hashmap always contains the built-in variables
 	pub variables: Vec<HashMap<String, Val>>,
-	/// We do the same stack frame thing for aliases
-	/// Though might not be as necessary
-	pub aliases: Vec<HashMap<String, Vec<Cmd>>>,
+	/// We do the same stack frame thing for functions
+	/// Though might not be as necessary,
+	/// we do want all of our user definitions, variable or otherwise, to be scoped
+	pub functions: Vec<HashMap<String, VicFunc>>,
 }
 
 
@@ -84,8 +211,15 @@ impl ViCut {
 			repeat_action: None,
 			repeat_motion: None,
 			editor: LineBuf::new().with_initial(input, cursor),
-			variables: vec![HashMap::new()],
-			aliases: vec![HashMap::new()],
+
+			// Initialize the stack frames
+			// The first is the "built-in" scope, which includes built-in variables
+			// and standard library functions from "prelude.vic"
+			// The second is the "global" scope, which is where user-defined variables and functions go
+			// User definitions can shadow built-ins this way.
+			// Never allow these vectors to dip below length 2.
+			variables: vec![HashMap::new(),HashMap::new()],
+			functions: vec![HashMap::new(),HashMap::new()],
 		})
 	}
 	pub fn exec_loop(&mut self) -> Result<(),String> {
@@ -467,15 +601,15 @@ impl ViCut {
 	}
 	pub fn descend(&mut self) {
 		self.variables.push(HashMap::new());
-		self.aliases.push(HashMap::new());
+		self.functions.push(HashMap::new());
 	}
 	pub fn ascend(&mut self) {
-		// Never pop the global scopes
-		if self.variables.len() > 1 {
+		// Never pop the built-in/global scopes
+		if self.variables.len() > 2 {
 			self.variables.pop();
 		}
-		if self.aliases.len() > 1 {
-			self.aliases.pop();
+		if self.functions.len() > 2 {
+			self.functions.pop();
 		}
 	}
 	pub fn update_builtins(&mut self) {
@@ -483,7 +617,7 @@ impl ViCut {
 		let Some(frame) = self.variables.first_mut() else {
 			panic!("There is supposed to be a stack frame here")
 		};
-		let col = self.editor.cursor_col();
+		let col = self.editor.cursor_col() + 1; // 1-based column numbers
 		let line = self.editor.cursor_line_number() + 1; // 1-based line numbers
 		let pos = self.editor.cursor_byte_pos();
 		let lines = self.editor.total_lines();
@@ -531,64 +665,228 @@ impl ViCut {
 		};
 		frame.insert(name, value);
 	}
-	pub fn get_alias(&self, name: &str) -> Option<&[Cmd]> {
-		for frame in self.aliases.iter().rev() {
+	pub fn clear_var(&mut self, name: &str) {
+		let Some(frame) = self.variables.last_mut() else {
+			panic!("There is supposed to be a stack frame here")
+		};
+		frame.remove(name);
+	}
+	pub fn set_function(&mut self, name: String, args: Vec<String>, body: Vec<Cmd>) {
+		let Some(frame) = self.functions.last_mut() else {
+			panic!("There is supposed to be a stack frame here")
+		};
+		let func = VicFunc {
+			args,
+			body,
+		};
+		frame.insert(name, func);
+	}
+	pub fn get_function(&self, name: &str) -> Option<&VicFunc> {
+		for frame in self.functions.iter().rev() {
 			if frame.contains_key(name) {
-				return frame.get(name).map(|v| v.as_slice())
+				return frame.get(name)
 			}
 		}
 		None
 	}
-	pub fn set_alias(&mut self, name: String, value: Vec<Cmd>) {
-		let Some(frame) = self.aliases.last_mut() else {
+	pub fn clear_function(&mut self, name: &str) {
+		let Some(frame) = self.functions.last_mut() else {
 			panic!("There is supposed to be a stack frame here")
 		};
-		frame.insert(name, value);
+		frame.remove(name);
 	}
-
-	pub fn eval_bool_expr(&mut self, op: &BoolOp, left: &(bool,Box<Expr>), right: &(bool,Box<Expr>)) -> Result<Val,String> {
+	pub fn eval_count(&mut self, count: &CmdArg) -> Result<usize,String> {
+		match count {
+			CmdArg::Count(n) => Ok(*n),
+			CmdArg::Var(var) => {
+				let Some(val) = self.get_var(var) else {
+					eprintln!("vicut: variable '{var}' not found");
+					std::process::exit(1)
+				};
+				let Val::Num(n) = val else {
+					eprintln!("vicut: variable '{var}' is not a number");
+					std::process::exit(1)
+				};
+				Ok(*n as usize)
+			}
+			_ => Err(format!("Expected count, got {}",count.display_type()))
+		}
+	}
+	pub fn eval_cmd_arg(&mut self, arg: &CmdArg,ctx: &mut ExecCtx) -> Result<Val,String> {
+		match arg {
+			CmdArg::Literal(value) => {
+				let expanded = self.expand_literal(&value.to_string())?;
+				Ok(Val::Str(expanded))
+			}
+			CmdArg::Expr(expr) => self.eval_expr(expr,ctx),
+			CmdArg::Var(var) => {
+				let Some(val) = self.get_var(var) else {
+					return Ok(Val::Null)
+				};
+				Ok(val.clone())
+			}
+			_ => unreachable!()
+		}
+	}
+	pub fn eval_expr(&mut self, expr: &Expr, ctx: &mut ExecCtx) -> Result<Val,String> {
+		Ok(match expr {
+			Expr::Null => Val::Null,
+			Expr::Regex(raw) => {
+				// 'raw' is a String, we compile the regex during evaluation here.
+				let regex = Regex::new(raw)
+					.map_err(|e| format!("Invalid regex: {e}"))?;
+				Val::Regex(regex)
+			}
+			Expr::RangeInclusive(start, end) |
+			Expr::Range(start, end) => {
+				let is_inclusive = matches!(expr, Expr::RangeInclusive(_, _));
+				let start = self.eval_expr(start,ctx)?;
+				let end = self.eval_expr(end,ctx)?;
+				let Val::Num(start) = start else {
+					return Err(format!("Expected number in range, got {}",start.display_type()))
+				};
+				let Val::Num(end) = end else {
+					return Err(format!("Expected number in range, got {}",end.display_type()))
+				};
+				let rev = start > end;
+				let range = if rev {
+					if is_inclusive {
+						(start..=end).rev().map(Val::Num).collect()
+					} else {
+						(start..end).rev().map(Val::Num).collect()
+					}
+				} else if is_inclusive {
+					(start..=end).map(Val::Num).collect()
+				} else {
+					(start..end).map(Val::Num).collect()
+				};
+				Val::Arr(range)
+			}
+			Expr::Register(name) => {
+				let Some(content) = read_register(Some(*name)) else {
+					return Ok(Val::Null)
+				};
+				let content = content.to_string();
+				Val::Str(content)
+			}
+			Expr::VarIndex(name, expr) => {
+				let val = self.eval_expr(expr,ctx)?;
+				let Val::Num(idx) = val else {
+					return Err(format!("Attempt to index variable {name} with non-number {val}"))
+				};
+				let idx = idx as usize;
+				self.read_index_var(name.to_string(), idx)?
+			}
+			Expr::Var(var) => {
+				let Some(var) = self.get_var(var) else {
+					return Err(format!("Variable {var} not found"))
+				};
+				var.clone()
+			}
+			Expr::Array(arr) => {
+				let mut val_arr = Vec::new();
+				for item in arr {
+					let val = self.eval_expr(item,ctx)?;
+					val_arr.push(val);
+				}
+				Val::Arr(val_arr)
+			}
+			Expr::Literal(lit) => {
+				let expanded = self.expand_literal(lit)?;
+				Val::Str(expanded)
+			}
+			Expr::Int(int) => Val::Num(*int as isize),
+			Expr::TernaryExp { cond, true_case, false_case } => self.eval_ternary_expr(cond, true_case, false_case,ctx)?,
+			Expr::BinExp { op, left, right } => self.eval_bin_expr(op, left, right)?,
+			Expr::BoolExp { op, left, right } => self.eval_bool_expr(op, left, right,ctx)?,
+			Expr::Bool(bool) => Val::Bool(*bool),
+			Expr::Return(cmd) => {
+				let Ok(field) = self.read_field(cmd) else {
+					return Err("Failed to read field".to_string())
+				};
+				Val::Str(field)
+			}
+			Expr::FuncCall(name,args) => {
+				let args = args.iter()
+					.map(|arg| self.eval_expr(arg,ctx))
+					.collect::<Result<Vec<_>,_>>()?;
+				self.eval_function(name.clone(), args, ctx)?
+			}
+		})
+	}
+	pub fn eval_function(&mut self, name: String, args: Vec<Val>, ctx: &mut ExecCtx) -> Result<Val,String> {
+		let Some(func) = self.get_function(&name) else {
+			return Err(format!("Function {name} not found"))
+		};
+		let func = func.clone();
+		if func.args.len() != args.len() {
+			return Err(format!("Function {name} expects {} arguments, got {}", func.args.len(), args.len()))
+		}
+		self.descend();
+		for (arg_name, arg_value) in func.args.iter().zip(args.into_iter()) {
+			self.set_var(arg_name.clone(), arg_value);
+		}
+		let mut ret_val = None;
+		for cmd in &func.body {
+			// Here we can use our existing mutable reference to self
+			// Along with the function cmd and the ctx we have
+			// To maintain context even in nested function calls
+			ret_val = super::exec_cmd(cmd, self, ctx);
+			if ret_val.is_some() { break } // We got a 'return' call, so we break now
+		}
+		self.ascend();
+		Ok(ret_val.unwrap_or(Val::Null))
+	}
+	pub fn eval_ternary_expr(&mut self, cond: &(bool,Box<Expr>), true_case: &Expr, false_case: &Expr, ctx: &mut ExecCtx) -> Result<Val,String> {
+		let cond = self.eval_expr(&cond.1,ctx)?;
+		if cond.is_truthy() {
+			self.eval_expr(true_case,ctx)
+		} else {
+			self.eval_expr(false_case,ctx)
+		}
+	}
+	pub fn eval_bool_expr(&mut self, op: &BoolOp, left: &(bool,Box<Expr>), right: &(bool,Box<Expr>), ctx: &mut ExecCtx) -> Result<Val,String> {
 		let left_negated = left.0;
-		let left = match &*left.1 {
-			Expr::Var(var) => {
-				let Some(var) = self.get_var(var) else {
-					return Err(format!("Variable {var} not found"))
-				};
-				var.clone()
-			}
-			Expr::Literal(lit) => Val::Str(lit.to_string()),
-			Expr::Int(int) => Val::Num(*int as isize),
-			Expr::BinExp { op, left, right } => self.eval_bin_expr(op, left, right)?,
-			Expr::BoolExp { op, left, right } => self.eval_bool_expr(op, left, right)?,
-			Expr::Bool(bool) => Val::Bool(*bool),
-			Expr::Return(cmd) => {
-				let Ok(field) = self.read_field(cmd) else {
-					return Err("Failed to read field".to_string())
-				};
-				Val::Str(field)
-			}
-		};
+		let left = self.eval_expr(&left.1,ctx)?;
 		let right_negated = right.0;
-		let right = match &*right.1 {
-			Expr::Var(var) => {
-				let Some(var) = self.get_var(var) else {
-					return Err(format!("Variable {var} not found"))
-				};
-				var.clone()
+		let right = self.eval_expr(&right.1,ctx)?;
+
+		// Check for regex comparisons
+		if matches!(left, Val::Regex(_)) || matches!(right, Val::Regex(_)) {
+			// Check for weird operators
+			if !matches!(op, BoolOp::Eq | BoolOp::Ne) {
+				return Err(format!("Cannot compare regex with {op}"))
 			}
-			Expr::Int(int) => Val::Num(*int as isize),
-			Expr::Literal(lit) => Val::Str(lit.to_string()),
-			Expr::BinExp { op, left, right } => self.eval_bin_expr(op, left, right)?,
-			Expr::BoolExp { op, left, right } => self.eval_bool_expr(op, left, right)?,
-			Expr::Bool(bool) => Val::Bool(*bool),
-			Expr::Return(cmd) => {
-				let Ok(field) = self.read_field(cmd) else {
-					return Err("Failed to read field".to_string())
-				};
-				Val::Str(field)
+
+			// The PartialEq implementation for Val handles regex matching automatically
+			// So we can just use Val::eq() here
+			match op {
+				BoolOp::Eq => {
+					return Ok(Val::Bool(left.eq(&right)));
+				}
+				BoolOp::Ne => {
+					return Ok(Val::Bool(!left.eq(&right)));
+				}
+				_ => unreachable!()
 			}
-		};
+		}
+
 		match left {
 			Val::Null => Err(format!("Left value {left} is null")),
+			Val::Arr(l_arr) => {
+				let Val::Arr(r_arr) = right else {
+					return Err(format!("Expected array, got {}",right.display_type()))
+				};
+				match op {
+					BoolOp::Eq => Ok(Val::Bool(l_arr == r_arr)),
+					BoolOp::Ne => Ok(Val::Bool(l_arr != r_arr)),
+					BoolOp::Lt => Err("Cannot compare arrays with <".into()),
+					BoolOp::LtEq => Err("Cannot compare arrays with <=".into()),
+					BoolOp::Gt => Err("Cannot compare arrays with >".into()),
+					BoolOp::GtEq => Err("Cannot compare arrays with >=".into()),
+					_ => todo!()
+				}
+			}
 			Val::Str(l_string) => {
 				let Val::Str(r_string) = right else {
 					return Err(format!("Expected string, got {}",right.display_type()))
@@ -639,10 +937,14 @@ impl ViCut {
 					_ => unreachable!()
 				}
 			}
+			Val::Regex(_) => {
+				// Already handled above
+				unreachable!()
+			}
 		}
 	}
-	pub fn eval_bin_expr(&self, op: &BinOp, left: &Box<Expr>, right: &Box<Expr>) -> Result<Val,String> {
-		let left = match &**left {
+	pub fn eval_bin_expr(&self, op: &BinOp, left: &Expr, right: &Expr) -> Result<Val,String> {
+		let left = match left {
 			Expr::Var(var) => {
 				let Some(var) = self.get_var(var) else {
 					return Err(format!("Variable {var} not found"))
@@ -656,7 +958,7 @@ impl ViCut {
 			Expr::BinExp { op, left, right } => self.eval_bin_expr(op, left, right)?,
 			_ => unreachable!(),
 		};
-		let right = match &**right {
+		let right = match right {
 			Expr::Var(var) => {
 				let Some(var) = self.get_var(var) else {
 					return Err(format!("Variable {var} not found"))
@@ -683,6 +985,7 @@ impl ViCut {
 			BinOp::Div => left / right,
 			BinOp::Mod => left % right,
 			BinOp::Pow => left.pow(right as u32),
+			BinOp::Equals => unreachable!() // Not used in this context
 		}))
 	}
 	pub fn mutate_var(&mut self, name: String, op: BinOp, value: Val) -> Result<(),String> {
@@ -696,6 +999,9 @@ impl ViCut {
 			return Err(format!("Value {value} is not a number"))
 		};
 		match op {
+			BinOp::Equals => {
+				*var = value;
+			}
 			BinOp::Add => {
 				*var += value;
 			}
@@ -719,6 +1025,33 @@ impl ViCut {
 			}
 		}
 		Ok(())
+	}
+	pub fn set_index_var(&mut self, name: String, index: usize, value: Val) -> Result<(),String> {
+		eprintln!("setting index {index} of {name} to {value}");
+		let Some(var) = self.get_var_mut(&name) else {
+			return Err(format!("Variable {name} not found"))
+		};
+		let Some(mut compound) = CompoundVal::try_from(var.clone()).ok() else {
+			return Err(format!("Variable {name} is not indexable"))
+		};
+		let len = compound.len();
+		if index >= len {
+			return Err(format!("Index {index} out of bounds for array {name}, length is {len}",))
+		}
+		compound.set(index, value);
+		self.set_var(name, compound.into());
+		Ok(())
+	}
+	pub fn read_index_var(&mut self, name: String, index: usize) -> Result<Val,String> {
+		let Some(var) = self.get_var_mut(&name) else {
+			return Err(format!("Variable {name} not found"))
+		};
+		let Some(compound) = CompoundVal::try_from(var.clone()).ok() else {
+			return Err(format!("Variable {name} is not indexable"))
+		};
+		let len = compound.len();
+		let item = compound.into_iter().nth(index).ok_or(format!("Index {index} out of bounds for array {name}, length is {len}",))?;
+		Ok(item)
 	}
 	pub fn expand_literal(&self, literal: &str) -> Result<String,String> {
 		let mut expanded = String::new();
@@ -759,12 +1092,7 @@ impl ViCut {
 								return Err("Unmatched ${{".to_string())
 							}
 							if let Some(var) = self.get_var(&std::mem::take(&mut var_name)) {
-								match var {
-									Val::Str(s) => expanded.push_str(s),
-									Val::Num(n) => expanded.push_str(&n.to_string()),
-									Val::Bool(b) => expanded.push_str(&b.to_string()),
-									Val::Null => {}
-								}
+								expanded.push_str(&var.to_string());
 							}
 						}
 						(ch1,ch2) => {

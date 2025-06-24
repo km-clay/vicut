@@ -52,6 +52,9 @@ cut = _{ "cut" | "c" }
 next = { "next" | "n" }
 echo = _{ "echo" }
 repeat = _{ "repeat" | "r" }
+yank = _{ "yank" | "y" }
+break_loop = _{ "break" }
+continue_loop = _{ "continue" }
 return = _{ "return" | "ret" }
 int = @{ ASCII_DIGIT+ }
 
@@ -63,17 +66,28 @@ move_cmd = { move ~ vim_cmd }
 echo_cmd = { echo ~ expr* }
 cut_cmd = { cut ~ name_def? ~ vim_cmd }
 return_cmd = { return ~ vim_cmd }
+yank_cmd = { yank ~ register? ~ expr }
 not_global_cmd = { not_global ~ pattern ~ block ~ ("else" ~ block)? }
 
+range = { expr ~ ".." ~ expr }
+range_inclusive = { expr ~ "..=" ~ expr }
+for_block = { "for" ~ var_name ~ "in" ~ (range_inclusive|range|array|var) ~ block }
 while_block = { "while" ~ (bool_expr|bool_expr_single|var|bool) ~ block }
 until_block = { "until" ~ (bool_expr|bool_expr_single|var|bool) ~ block }
 if_block = { "if" ~ (bool_expr|bool_expr_single|var|bool) ~ block ~ elif_block* ~ else_block? }
 elif_block = { "elif" ~ (bool_expr|bool_expr_single|var|bool) ~ block }
 else_block = { "else" ~ block }
 
-var_name = @{ (ASCII_ALPHANUMERIC | "_")+ }
+register = { "@" ~ reg_name }
+reg_name = { ASCII_ALPHA }
+
+var_ident = @{ (ASCII_ALPHANUMERIC | "_")+ }
+index = { expr }
+var_index = { var_ident ~ "[" ~ index ~ "]" }
+var_name = { var_index | var_ident }
 var = { "$" ~ var_name }
 var_declare = { "let" ~ var_name ~ "=" ~ expr }
+var_mut = { var_name ~ "=" ~ expr }
 var_add = { var_name ~ "+=" ~ (bin_expr|int|var) }
 var_sub = { var_name ~ "-=" ~ (bin_expr|int|var) }
 var_mult = { var_name ~ "*=" ~ (bin_expr|int|var) }
@@ -81,8 +95,23 @@ var_div = { var_name ~ "/=" ~ (bin_expr|int|var) }
 var_pow = { var_name ~ "^=" ~ (bin_expr|int|var) }
 var_mod = { var_name ~ "%=" ~ (bin_expr|int|var) }
 
+func_def_args = { "(" ~ (var_name ~ ",")* ~ var_name? ~ ")" }
+func_name = { var_name ~ func_def_args }
+func_def = { "def" ~ func_name ~ block }
 
-bin_op = _{ add | sub | mult | div }
+func_call_args = { "(" ~ ((expr) ~ ",")* ~ (expr)? ~ ")" }
+func_call = { var_name ~ func_call_args }
+
+
+// Regex values
+// first we match and push a valid delimiter
+// then take any number of those delimiters
+// then stop when we find the same number of those delimiters in a row
+regex_lit = { PUSH(regex_delim) ~ (&PEEK ~ PUSH(regex_delim))* ~ regex ~ POP_ALL }
+regex_delim = _{ !(ASCII_ALPHANUMERIC | "}" | "{" | "(" | ")" | "[" | "]") ~ ANY }
+regex = { (!PEEK_ALL ~ ANY)* }
+
+bin_op = _{ add | sub | mult | div | modulo | pow }
 	add = { "+" }
 	sub = { "-" }
 	mult = { "*" }
@@ -103,16 +132,21 @@ bool_op = _{ eq | ne | lt | le | ge | gt }
 bool_conjunction = { and | or }
 
 unary_minus = { "-" }
-bin_lit = { unary_minus? ~ int }
-bool_lit = { not? ~ ("(" ~ bool_expr_single ~ ")" | value) }
-bin_atom = { bin_lit | var | "(" ~ bin_expr ~ ")" }
-bin_expr = { bin_atom ~ (bin_op ~ bin_atom)+ }
-bool_expr_single = { (bool_lit ~ (bool_op ~ bool_lit)?) | "(" ~ bool_expr ~ ")" }
-bool_expr = { bool_expr_single ~ (bool_conjunction ~ bool_expr_single)+ }
-expr = { return_cmd | bin_expr | bool_expr | value }
+bin_lit = { unary_minus? ~ (var|int) }
+bool_lit = { not? ~ ("(" ~ bool_expr_single ~ ")" | value | func_call) }
+bin_atom = { bin_lit | ("(" ~ bin_expr ~ ")") }
+bin_expr = { bin_atom ~ (bin_op ~ bin_atom)* }
+bool_expr_single = { (bool_lit ~ bool_op ~ bool_lit) | bool | "(" ~ bool_expr ~ ")" }
+bool_expr = { bool_expr_single ~ (bool_conjunction ~ bool_expr_single)* }
+array = { "[" ~ ((expr ~ ",")* ~ expr?)? ~ "]"}
+ternary = { expr_not_ternary ~ "?" ~ expr ~ ":" ~ expr }
+expr_not_ternary = { array | return_cmd | bin_expr | bool_expr | value }
+null = { "null" }
+num_expr = { bin_expr | ternary | var | int }
+expr = { array | ternary | return_cmd | bin_expr | bool_expr | value | func_call | null }
 
 
-value = { var | int | literal | bool }
+value = { var | int | literal | bool | register | regex_lit }
 bool = { true_lit | false_lit }
 true_lit = { "true" }
 false_lit = { "false" }
@@ -120,7 +154,7 @@ false_lit = { "false" }
 inner = ${ (("\\\\") | ("\\" ~ "\"") | (!"\"" ~ ANY))* }
 atomic_string = @{ "\"" ~ inner ~ "\"" }
 literal = { ("\"" ~ inner ~ "\"") }
-vim_cmd = { literal | var }
+vim_cmd = { expr }
 pattern = { literal | var }
 name_def = { "name" ~ "=" ~ "\"" ~ inner ~ "\"" }
 
@@ -128,10 +162,12 @@ name_def = { "name" ~ "=" ~ "\"" ~ inner ~ "\"" }
 cmd = {
   var_declare |
   var_add |
+  for_block |
   if_block |
   while_block |
   until_block |
   var_sub |
+  var_mut |
   var_mult |
   var_div |
   var_pow |
@@ -143,10 +179,16 @@ cmd = {
   repeat_cmd |
   move_cmd |
   cut_cmd |
+  yank_cmd |
   echo_cmd |
-  next
+  return_cmd |
+  func_def |
+  func_call |
+  next |
+  break_loop |
+  continue_loop
 }
 
-block = { "{" ~ cmd+ ~ "}" }
+block = { "{" ~ cmd* ~ "}" }
 
 vic = { SOI ~ WHITESPACE* ~ prelude? ~ cmd+ ~ WHITESPACE* ~ EOI }

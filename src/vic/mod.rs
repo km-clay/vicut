@@ -5,12 +5,13 @@ use std::{fmt::Display, path::PathBuf};
 
 use pest::{iterators::Pair, Parser};
 use pest_derive::Parser;
-use crate::{exec::{Val, ViCut}, CondBlock, Opts};
+use crate::{complain_and_exit, exec::{Val, ViCut}, register::{read_register, RegisterContent}, CondBlock, ExecCtx, Opts};
 
 use super::Cmd;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum CmdArg {
+	Null,
 	Literal(Val),
 	Var(String),
 	Count(usize),
@@ -18,56 +19,34 @@ pub enum CmdArg {
 }
 
 impl CmdArg {
-	pub fn is_truthy(&self, vicut: &mut ViCut) -> bool {
+	pub fn is_truthy(&self, vicut: &mut ViCut, ctx: &mut ExecCtx) -> bool {
 		match self {
-			CmdArg::Literal(lit) => {
-				lit.is_truthy()
-			}
+			CmdArg::Null => false,
 			CmdArg::Var(var) => {
 				let Some(val) = vicut.get_var(var) else {
-					eprintln!("vicut: variable '{var}' not found");
-					std::process::exit(1)
+					return false
 				};
 				val.is_truthy()
 			}
-			CmdArg::Expr(expr) => {
-				match expr {
-					Expr::Var(var) => {
-						let Some(val) = vicut.get_var(var) else {
-							eprintln!("vicut: variable '{var}' not found");
-							std::process::exit(1)
-						};
-						val.is_truthy()
-					}
-					Expr::Return(cmd) => !cmd.is_empty(),
-					Expr::Literal(lit) => !lit.is_empty(),
-					Expr::Int(int) => {
-						Val::Num(*int as isize).is_truthy()
-					}
-					Expr::Bool(bool) => {
-						Val::Bool(*bool).is_truthy() // this is a bit redundant
-					}
-					Expr::BoolExp { op, left, right } => {
-						vicut.eval_bool_expr(op, left, right).unwrap_or_else(|e| {
-							eprintln!("vicut: {e}");
-							std::process::exit(1)
-						}).is_truthy()
-					}
-					Expr::BinExp { op, left, right } => {
-						vicut.eval_bin_expr(op, left, right).unwrap_or_else(|e| {
-							eprintln!("vicut: {e}");
-							std::process::exit(1)
-						}).is_truthy()
-					}
-				}
-			}
-			_ => unreachable!()
+			CmdArg::Literal(lit) => lit.is_truthy(),
+			CmdArg::Expr(expr) => expr.is_truthy(vicut,ctx),
+			CmdArg::Count(count) => *count > 0
+		}
+	}
+	pub fn display_type(&self) -> String {
+		match self {
+			CmdArg::Null => String::from("null"),
+			CmdArg::Literal(lit) => lit.display_type(),
+			CmdArg::Var(var) => format!("${var}"),
+			CmdArg::Count(count) => format!("{count}"),
+			CmdArg::Expr(expr) => expr.display_type(),
 		}
 	}
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BinOp {
+	Equals,
 	Add,
 	Sub,
 	Mult,
@@ -95,7 +74,7 @@ pub enum UnOp {
 	Neg,
 	Not,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone,PartialEq)]
 pub enum BoolOp {
 	And,
 	Or,
@@ -142,13 +121,26 @@ impl Display for BoolOp {
 	}
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
 	Var(String),
+	VarIndex(String,Box<Expr>), // for array indexing
+	Register(char),
 	Int(i64),
 	Bool(bool),
 	Literal(String),
+	Regex(String),
+	Range(Box<Expr>,Box<Expr>), // 1..10
+	RangeInclusive(Box<Expr>,Box<Expr>), // 1..=10
+	Null,
+	Array(Vec<Expr>), // for array literals
 	Return(String), // extract via vim command
+	FuncCall(String,Vec<Expr>), // function call with arguments
+	TernaryExp {
+		cond: (bool,Box<Expr>),
+		true_case: Box<Expr>,
+		false_case: Box<Expr>,
+	},
 	BoolExp {
 		op: BoolOp,
 		left: (bool,Box<Expr>), // (is negated, expr)
@@ -162,6 +154,93 @@ pub enum Expr {
 }
 
 impl Expr {
+	pub fn is_truthy(&self, vicut: &mut ViCut, ctx: &mut ExecCtx) -> bool {
+		match self {
+			Expr::Regex(_) => true,
+			Expr::RangeInclusive(start, end) |
+			Expr::Range(start, end) => {
+				let start = start.is_truthy(vicut,ctx);
+				let end = end.is_truthy(vicut,ctx);
+				start && end
+			}
+			Expr::Register(reg) => {
+				read_register(Some(*reg)).is_some_and(|val| !matches!(val, RegisterContent::Empty))
+			}
+			Expr::Null => {
+				false
+			}
+			Expr::VarIndex(var, index) => {
+				let val = vicut.eval_expr(index, ctx);
+				let Val::Num(index) = val.unwrap_or_else(complain_and_exit) else {
+					eprintln!("vicut: index must be an integer");
+					std::process::exit(1);
+				};
+				let index = index as usize;
+				let val = vicut.read_index_var(var.to_string(), index).unwrap_or_else(complain_and_exit);
+				val.is_truthy()
+			}
+			Expr::Var(var) => {
+				let Some(val) = vicut.get_var(var) else {
+					eprintln!("vicut: variable '{var}' not found");
+					std::process::exit(1)
+				};
+				val.is_truthy()
+			}
+			Expr::Array(arr) => {
+				!arr.is_empty() // an empty array is falsy
+			}
+			Expr::Int(int) => {
+				Val::Num(*int as isize).is_truthy()
+			}
+			Expr::Bool(bool) => {
+				Val::Bool(*bool).is_truthy()
+			}
+			Expr::Literal(lit) => {
+				!lit.is_empty()
+			}
+			Expr::FuncCall(name, args) => {
+				let args = args.iter()
+					.map(|arg| vicut.eval_expr(arg, ctx))
+					.collect::<Result<Vec<Val>, String>>();
+				let args = args.unwrap_or_else(complain_and_exit);
+				let ret = vicut.eval_function(name.to_string(), args, ctx);
+				let Ok(ret) = ret else {
+					// The function call failed
+					// so we return false.
+					return false;
+				};
+				if let Val::Null = ret {
+					// The function succeeded, but returned nothing
+					// We treat it as truthy based on the call succeeding
+					return true;
+				}
+				// If the function returns a value, we check if it is truthy
+				ret.is_truthy()
+			}
+			Expr::Return(cmd) => {
+				!cmd.is_empty()
+			}
+			Expr::TernaryExp { cond, true_case, false_case } => {
+				let (is_negated, cond) = cond;
+				let cond = if *is_negated {
+					!cond.is_truthy(vicut,ctx)
+				} else {
+					cond.is_truthy(vicut,ctx)
+				};
+				if cond {
+					true_case.is_truthy(vicut,ctx)
+				} else {
+					false_case.is_truthy(vicut,ctx)
+				}
+			}
+			Expr::BoolExp { op, left, right } => {
+				vicut.eval_bool_expr(op, left, right,ctx).unwrap_or_else(complain_and_exit).is_truthy()
+			}
+			Expr::BinExp { op, left, right } => {
+				vicut.eval_bin_expr(op, left, right).unwrap_or_else(complain_and_exit).is_truthy()
+			}
+		}
+	}
 	pub fn eval_atom(pair: Pair<Rule>) -> Self {
 		match pair.as_rule() {
 			Rule::bin_lit => {
@@ -191,12 +270,14 @@ impl Expr {
 			_ => unreachable!("Unexpected rule in bin_atom: {:?}", pair.as_rule()),
 		}
 	}
+
 	pub fn from_rule(pair: Pair<Rule>) -> Self {
 		// we do a little hacking
-		let inner = if matches!(pair.as_rule(), Rule::bool_expr_single | Rule::int) {
+		let inner = if matches!(pair.as_rule(), Rule::func_call | Rule::var_ident | Rule::range | Rule::range_inclusive | Rule::bin_expr | Rule::bool_expr_single | Rule::int | Rule::null) {
 			pair
 		} else {
-			pair.into_inner().next().unwrap()
+			let rule = format!("{:?}",pair.as_rule());
+			pair.into_inner().next().unwrap_or_else(|| panic!("Unwrapped nothing on rule: {rule}"))
 		};
 		match inner.as_rule() {
 			Rule::return_cmd => {
@@ -222,14 +303,55 @@ impl Expr {
 					.as_str().to_string();
 				Self::Literal(literal)
 			}
+			Rule::null => {
+				Self::Null
+			}
 			Rule::var => {
-				let var = inner.into_inner().next().unwrap()
-					.as_str().to_string();
-				Self::Var(var)
+				let var = inner.into_inner().next().unwrap();
+				Self::from_rule(var)
 			}
 			Rule::var_name => {
+				let var = inner.into_inner().next().unwrap();
+				Self::from_rule(var)
+			}
+			Rule::var_index => {
+				let mut inner = inner.into_inner();
+				let var_name = inner.next().unwrap()
+					.as_str().to_string();
+				let index = inner.next().unwrap();
+				let index = Self::from_rule(index);
+				Self::VarIndex(var_name,Box::new(index))
+			}
+			Rule::var_ident => {
 				let var = inner.as_str().to_string();
 				Self::Var(var)
+			}
+			Rule::range_inclusive |
+			Rule::range => {
+				let is_inclusive = matches!(inner.as_rule(), Rule::range_inclusive);
+				let mut inner = inner.into_inner();
+				let start = inner.next().unwrap();
+				let start = Self::from_rule(start);
+				let end = inner.next().unwrap();
+				let end = Self::from_rule(end);
+				if is_inclusive {
+					Self::RangeInclusive(Box::new(start),Box::new(end))
+				} else {
+					Self::Range(Box::new(start),Box::new(end))
+				}
+			}
+			Rule::register => {
+				let reg = inner.into_inner().next().unwrap()
+					.as_str().chars().next().unwrap();
+				Self::Register(reg)
+			}
+			Rule::array => {
+				let inner = inner.into_inner();
+				let mut elements = vec![];
+				for elem in inner {
+					elements.push(Self::from_rule(elem));
+				}
+				Self::Array(elements)
 			}
 			Rule::int => {
 				let int = inner.as_str().parse::<i64>().unwrap();
@@ -240,9 +362,52 @@ impl Expr {
 				let lit = inner.into_inner().next().unwrap();
 				Self::from_rule(lit)
 			}
+			Rule::true_lit => {
+				Self::Bool(true)
+			}
+			Rule::false_lit => {
+				Self::Bool(false)
+			}
+			Rule::bin_atom => {
+				let inner = inner.into_inner().next().unwrap();
+				Self::from_rule(inner)
+			}
 			Rule::bin_lit => {
 				let int = inner.as_str().parse::<i64>().unwrap();
 				Self::Int(int)
+			}
+			Rule::regex_lit => {
+				let regex = inner.into_inner().next().unwrap()
+					.as_str().to_string();
+				Self::Regex(regex)
+			}
+			Rule::func_call => {
+				let mut inner = inner.into_inner();
+				let func_name = inner.next().unwrap().as_str().to_string();
+				let mut args = vec![];
+				for arg in inner {
+					args.push(Self::from_rule(arg));
+				}
+				Self::FuncCall(func_name,args) // TODO: handle function calls properly
+			}
+			Rule::ternary => {
+				let mut inner = inner.into_inner();
+				let cond_pair = inner.next().unwrap()
+					.into_inner().next().unwrap();
+				let true_case_pair = inner.next().unwrap()
+					.into_inner().next().unwrap();
+				let false_case_pair = inner.next().unwrap()
+					.into_inner().next().unwrap();
+
+				let cond = Self::from_rule(cond_pair);
+				let true_case = Self::from_rule(true_case_pair);
+				let false_case = Self::from_rule(false_case_pair);
+
+				Self::TernaryExp {
+					cond: (false,Box::new(cond)),
+					true_case: Box::new(true_case),
+					false_case: Box::new(false_case),
+				}
 			}
 			Rule::bin_expr => {
 				let mut expr = inner.into_inner();
@@ -344,7 +509,33 @@ impl Expr {
 
 				left
 			}
+			Rule::expr => {
+				// We didn't unwrap this before getting here
+				// So let's descend further
+				let inner = inner.into_inner().next().unwrap();
+				Self::from_rule(inner)
+			}
 			_ => unreachable!("Unexpected rule in expr: {:?}", inner.as_rule()),
+		}
+	}
+	pub fn display_type(&self) -> String {
+		match self {
+			Expr::VarIndex(_,_) |
+			Expr::Var(_) => String::from("var"),
+			Expr::Regex(_) => String::from("regex"),
+			Expr::Range(_,_) => String::from("range"),
+			Expr::RangeInclusive(_,_) => String::from("range_inclusive"),
+			Expr::Null => String::from("null"),
+			Expr::Register(_) => String::from("register"),
+			Expr::Int(_) => String::from("int"),
+			Expr::Bool(_) => String::from("bool"),
+			Expr::Array(_) => String::from("array"),
+			Expr::Literal(_) => String::from("string"),
+			Expr::FuncCall(_, _) => String::from("function_call"),
+			Expr::Return(_) => String::from("return_cmd"),
+			Expr::TernaryExp {..} => String::from("ternary"),
+			Expr::BoolExp {..} => String::from("bool_expr"),
+			Expr::BinExp {..} => String::from("binary_expr"),
 		}
 	}
 }
@@ -352,6 +543,7 @@ impl Expr {
 impl Display for BinOp {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
+			BinOp::Equals => write!(f, "="),
 			BinOp::Add => write!(f, "+"),
 			BinOp::Sub => write!(f, "-"),
 			BinOp::Mult => write!(f, "*"),
@@ -365,11 +557,42 @@ impl Display for BinOp {
 impl Display for Expr {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
+			Expr::RangeInclusive(start, end) => {
+				write!(f, "{}..={}", start, end)
+			}
+			Expr::Regex(regex) => {
+				write!(f, "{regex}")
+			}
+			Expr::Range(start, end) => {
+				write!(f, "{}..{}", start, end)
+			}
+			Expr::Null => write!(f, "NULL"),
 			Expr::Var(var) => write!(f, "${var}"),
+			Expr::VarIndex(var, index) => {
+				write!(f, "${var}[{}]", index)
+			}
+			Expr::Register(reg) => write!(f, "@{reg}"),
 			Expr::Int(int) => write!(f, "{int}"),
 			Expr::Literal(lit) => write!(f, "{lit}"),
+			Expr::FuncCall(name, args) => {
+				let args_str: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+				write!(f, "{name}({})", args_str.join(", "))
+			}
 			Expr::Return(lit) => write!(f, "{lit}"),
 			Expr::Bool(bool) => write!(f, "{bool}"),
+			Expr::Array(arr) => {
+				let elements: Vec<String> = arr.iter().map(|e| e.to_string()).collect();
+				write!(f, "[{}]", elements.join(", "))
+			}
+			Expr::TernaryExp { cond, true_case, false_case } => {
+				let (is_negated, cond) = cond;
+				let cond_display = if *is_negated {
+					format!("!{cond}")
+				} else {
+					cond.to_string()
+				};
+				write!(f, "({cond_display} ? {true_case} : {false_case})")
+			}
 			Expr::BoolExp { op, left, right } => {
 				let (left_negated, left) = left;
 				let (right_negated, right) = right;
@@ -396,6 +619,7 @@ impl Display for CmdArg {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
 			CmdArg::Literal(lit) => write!(f, "{lit}"),
+			CmdArg::Null => write!(f, "NULL"),
 			CmdArg::Var(var) => write!(f, "${var}"),
 			CmdArg::Count(count) => write!(f, "{count}"),
 			CmdArg::Expr(expr) => expr.fmt(f),
@@ -531,8 +755,30 @@ fn parse_cmd(cmds: &mut Vec<Cmd>, pair: Pair<Rule>) {
 				let cmd = Cmd::Motion(move_cmd);
 				cmds.push(cmd);
 			}
+			Rule::return_cmd => {
+				let return_cmd = pair.into_inner().next().unwrap();
+				let return_cmd = Expr::from_rule(return_cmd);
+				let cmd = Cmd::Return(CmdArg::Expr(return_cmd));
+				cmds.push(cmd);
+			}
+			Rule::yank_cmd => {
+				let mut inner = pair.into_inner();
+				let register = inner.next().unwrap()
+					.into_inner().next().unwrap()
+					.as_str().chars().next().unwrap();
+				let expr = inner.next().unwrap();
+				let expr = Expr::from_rule(expr);
+				let cmd = Cmd::Yank(CmdArg::Expr(expr), register);
+				cmds.push(cmd);
+			}
 			Rule::next => {
 				cmds.push(Cmd::BreakGroup);
+			}
+			Rule::break_loop => {
+				cmds.push(Cmd::LoopBreak);
+			}
+			Rule::continue_loop => {
+				cmds.push(Cmd::LoopContinue);
 			}
 			Rule::echo_cmd => {
 				let inner = pair.into_inner();
@@ -542,6 +788,33 @@ fn parse_cmd(cmds: &mut Vec<Cmd>, pair: Pair<Rule>) {
 					echo_args.push(arg);
 				}
 				let cmd = Cmd::Echo(echo_args);
+				cmds.push(cmd);
+			}
+			Rule::func_def => {
+				let mut inner = pair.into_inner();
+				let mut args = vec![];
+				let mut name_and_args = inner.next().unwrap().into_inner();
+				let name = name_and_args.next().unwrap().as_str().to_string();
+				for arg in name_and_args {
+					let arg = arg.as_str().to_string();
+					args.push(arg);
+				}
+
+				let block = inner.next().unwrap();
+				let body = parse_block(block);
+				let cmd = Cmd::FuncDef { name, args, body };
+				cmds.push(cmd);
+			}
+			Rule::for_block => {
+				let mut inner = pair.into_inner();
+				let var_pair = inner.next().unwrap();
+				let var_name = var_pair.as_str().to_string();
+				let range_pair = inner.next().unwrap();
+				let iterable = Expr::from_rule(range_pair);
+				let iterable = CmdArg::Expr(iterable);
+				let block = inner.next().unwrap();
+				let body = parse_block(block);
+				let cmd = Cmd::ForBlock { var_name, iterable, body };
 				cmds.push(cmd);
 			}
 			Rule::until_block |
@@ -596,6 +869,7 @@ fn parse_cmd(cmds: &mut Vec<Cmd>, pair: Pair<Rule>) {
 			Rule::var_div |
 			Rule::var_mod |
 			Rule::var_pow |
+			Rule::var_mut |
 			Rule::var_declare => {
 				let cmd = parse_var_cmd(pair);
 				cmds.push(cmd);
@@ -620,8 +894,10 @@ fn parse_var_cmd(pair: Pair<Rule>) -> Cmd {
 		Rule::var_mult|
 		Rule::var_div |
 		Rule::var_mod |
+		Rule::var_mut |
 		Rule::var_pow => {
 			let op = match pair.as_rule() {
+				Rule::var_mut => BinOp::Equals,
 				Rule::var_add => BinOp::Add,
 				Rule::var_sub => BinOp::Sub,
 				Rule::var_mult => BinOp::Mult,
@@ -631,10 +907,26 @@ fn parse_var_cmd(pair: Pair<Rule>) -> Cmd {
 				_ => unreachable!("Unexpected rule in var_cmd: {:?}", pair.as_rule()),
 			};
 			let mut inner = pair.into_inner();
-			let name = inner.next().unwrap().as_str().to_string();
+			let mut name_parts = inner.next().unwrap().into_inner();
+			let first_part = name_parts.next().unwrap();
+			let (name, index) = match first_part.as_rule() {
+				Rule::var_ident => {
+					let name = first_part.as_str().to_string();
+					(name, None)
+				}
+				Rule::var_index => {
+					let mut inner = first_part.into_inner();
+					let name = inner.next().unwrap().as_str().to_string();
+					let index = inner.next().unwrap();
+					let index = Expr::from_rule(index);
+					(name, Some(CmdArg::Expr(index)))
+				}
+				_ => unreachable!("Unexpected rule in var_cmd: {:?}", first_part.as_rule()),
+
+			};
 			let expr_pair = inner.next().unwrap();
 			let exp = Expr::from_rule(expr_pair);
-			Cmd::MutateVar { name, op, value: CmdArg::Expr(exp) }
+			Cmd::MutateVar { name, index, op, value: CmdArg::Expr(exp) }
 		}
 		Rule::var_declare => {
 			let mut inner = pair.into_inner();
@@ -705,6 +997,10 @@ fn parse_argument(pair: Pair<Rule>) -> CmdArg {
 		Rule::literal => {
 			let literal = pair.into_inner().next().unwrap();
 			CmdArg::Literal(Val::Str(literal.as_str().to_string()))
+		}
+		Rule::expr => {
+			let expr = Expr::from_rule(pair);
+			CmdArg::Expr(expr)
 		}
 		_ => unreachable!("Unexpected rule in argument: {:?}", pair.as_rule()),
 	}

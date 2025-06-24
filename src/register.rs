@@ -1,7 +1,7 @@
 //! This module contains logic for emulation of Vim's registers feature.
 //!
 //! It contains the `Registers` struct, which is held in a thread local, global variable.
-use std::cell::RefCell;
+use std::{cell::RefCell, fmt::Display};
 
 thread_local! {
 	/// The global state for all registers.
@@ -195,6 +195,17 @@ impl RegisterContent {
 			Self::Line(s) => s.is_empty(),
 			Self::Block(v) => v.is_empty(),
 			Self::Empty => true
+		}
+	}
+}
+
+impl Display for RegisterContent {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::Span(s) => write!(f, "{}", s),
+			Self::Line(s) => write!(f, "{}", s),
+			Self::Block(v) => write!(f, "{}", v.join("\n")),
+			Self::Empty => write!(f, "")
 		}
 	}
 }

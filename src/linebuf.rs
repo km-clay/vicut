@@ -13,6 +13,7 @@ use regex::Regex;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::exec::Val;
 use crate::register::RegisterContent;
 use crate::{modes::ex::SubFlags, vicmd::{LineAddr, ReadSrc, WriteDest}};
 
@@ -932,6 +933,7 @@ impl LineBuf {
 	}
 	pub fn selected_content(&mut self) -> Option<String> {
 		let range = self.select_range()?.clone();
+		dbg!(&range);
 		match range {
 			SelectRange::OneDim((start,end)) => {
 				match self.select_mode.as_ref().unwrap() {
@@ -2377,28 +2379,30 @@ impl LineBuf {
 				};
 				let mut lines = vec![];
 				let line_range = start_line..end_line;
-				match Regex::new(pattern) {
-					Ok(regex) => {
-						for line_no in line_range {
-							let Some((start,end)) = self.line_bounds(line_no) else { continue };
-							let line = self.slice(start..end).unwrap_or_default();
-
-							match motion.1 {
-								Motion::NotGlobal(_,_) => {
-									let None = regex.find(line).map(|mat| (mat.start(),mat.end())) else { continue };
-								}
-								Motion::Global(_,_) => {
-									let Some(_) = regex.find(line).map(|mat| (mat.start(),mat.end())) else { continue };
-								}
-								_ => unreachable!()
-							}
-							lines.push(line_no);
+				let regex = match pattern {
+					Val::Regex(regex) => regex.clone(),
+					_ => match Regex::new(&pattern.to_string()) {
+						Ok(regex) => regex,
+						Err(e) => {
+							eprintln!("vicut: {e}");
+							std::process::exit(1);
 						}
 					}
-					Err(e) => {
-						eprintln!("vicut: {e}");
-						std::process::exit(1);
+				};
+				for line_no in line_range {
+					let Some((start,end)) = self.line_bounds(line_no) else { continue };
+					let line = self.slice(start..end).unwrap_or_default();
+
+					match motion.1 {
+						Motion::NotGlobal(_,_) => {
+							let None = regex.find(line).map(|mat| (mat.start(),mat.end())) else { continue };
+						}
+						Motion::Global(_,_) => {
+							let Some(_) = regex.find(line).map(|mat| (mat.start(),mat.end())) else { continue };
+						}
+						_ => unreachable!()
 					}
+					lines.push(line_no);
 				}
 				let reversed = lines.into_iter().rev().collect::<Vec<_>>();
 				MotionKind::Lines(reversed)
@@ -3992,6 +3996,14 @@ pub fn rot13(input: &str) -> String {
 /// This is useful for creating ranges where the start and end positions
 /// might be in any order, such as when dealing with cursor movements
 pub fn ordered(start: usize, end: usize) -> (usize,usize) {
+	if start > end {
+		(end,start)
+	} else {
+		(start,end)
+	}
+}
+
+pub fn ordered_signed(start: isize, end: isize) -> (isize,isize) {
 	if start > end {
 		(end,start)
 	} else {

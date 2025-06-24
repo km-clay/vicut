@@ -9,7 +9,7 @@
 //! 1. Arguments are parsed into a sequence of commands
 //! 2. A `ViCut` instance is created to manage editor state and buffer contents
 //! 3. The commands are applied to the input in sequence, modifying and/or extracting text
-use std::{collections::BTreeMap, env::Args, fmt::Write, fs, io::{self, BufRead, Write as IoWrite}, iter::{Peekable, Skip}, path::PathBuf};
+use std::{collections::BTreeMap, env::Args, fmt::{Display, Write}, fs, io::{self, BufRead, Write as IoWrite}, iter::{Peekable, Skip}, path::PathBuf};
 
 extern crate tikv_jemallocator;
 
@@ -18,8 +18,9 @@ extern crate tikv_jemallocator;
 /// For linux we use Jemalloc. It is ***significantly*** faster than the default allocator in this case, for some reason.
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use exec::{Val, ViCut};
+use exec::{CompoundVal, Val, ViCut};
 use log::trace;
+use register::{append_register, write_register, RegisterContent};
 use serde_json::{Map, Value};
 use rayon::prelude::*;
 use vic::{BinOp, CmdArg, Expr};
@@ -40,11 +41,38 @@ pub mod tests;
 /// The field name used in `Cmd::NamedField`
 pub type Name = String;
 
-#[derive(Clone,Debug)]
+/// Print the given error message and exit the program.
+///
+/// This function is marked as returning `T` to allow it to be used in contexts like `.unwrap_or_else(complain_and_exit)`, which is nice and concise
+/// but it never actually returns — it always terminates the process with `std::process::exit(1)`.
+///
+/// The error message will be prefixed with `vicut:` if it is not already.
+pub fn complain_and_exit<T>(err: impl Display) -> T {
+	let mut err = err.to_string();
+	if !err.starts_with("vicut: ") {
+		err = format!("vicut: {err}");
+	}
+	eprintln!("{err}");
+	std::process::exit(1)
+}
+
+pub struct ExecCtx {
+	args: Opts,
+	field_num: usize,
+	fields: Vec<(String,String)>, // (name, value)
+	fmt_lines: Vec<Vec<(String,String)>>, // Lines to format output from
+}
+
+#[derive(Clone,Debug, PartialEq)]
 pub enum Cmd {
+	BreakGroup,
+	LoopContinue,
+	LoopBreak,
 	Echo(Vec<CmdArg>),
 	Motion(CmdArg),
 	Field(CmdArg),
+	Return(CmdArg),
+	Yank(CmdArg,char), // The char is the register to yank into
 	NamedField(Name,CmdArg),
 	Repeat {
 		body: Vec<Cmd>,
@@ -56,15 +84,30 @@ pub enum Cmd {
 		else_cmds: Option<Vec<Cmd>>,
 		polarity: bool // Whether to execute on a match, or on no match
 	},
-	BreakGroup,
 	VarDec {
 		name: String,
 		value: CmdArg
 	},
 	MutateVar {
 		name: String,
+		index: Option<CmdArg>,
 		op: BinOp,
 		value: CmdArg
+	},
+	FuncCall {
+		name: String,
+		args: Vec<CmdArg>
+	},
+	FuncDef {
+		name: String,
+		args: Vec<String>, // Names of the arguments
+		body: Vec<Cmd>
+	},
+	ForBlock {
+		var_name: String,
+		iterable: CmdArg, // Must be a String or Array
+											// Strings iterate over characters
+		body: Vec<Cmd>
 	},
 	IfBlock {
 		cond_blocks: Vec<CondBlock>,
@@ -74,7 +117,7 @@ pub enum Cmd {
 	UntilBlock(CondBlock),
 }
 
-#[derive(Clone,Debug)]
+#[derive(Clone,Debug,PartialEq)]
 pub struct CondBlock {
 	cond: CmdArg, // Must be a CmdArg::Expr(Expr::BoolExp{..})
 	cmds: Vec<Cmd>,
@@ -258,18 +301,12 @@ impl Opts {
 						.next()
 						.unwrap_or("1".into())
 						.parse::<usize>()
-						.unwrap_or_else(|_| {
-							eprintln!("Expected a number after '{global_arg}'");
-							std::process::exit(1)
-						});
+						.unwrap_or_else(complain_and_exit);
 					let repeat_count = args
 						.next()
 						.unwrap_or("1".into())
 						.parse::<usize>()
-						.unwrap_or_else(|_| {
-							eprintln!("Expected a number after '{global_arg}'");
-							std::process::exit(1)
-						});
+						.unwrap_or_else(complain_and_exit);
 
 					if let Some(else_cmds) = else_cmds.as_mut() {
 						let mut body = vec![];
@@ -547,10 +584,7 @@ fn format_output(args: &Opts, lines: Vec<Vec<(String,String)>>) -> String {
 	} else {
 		let delimiter = args.delimiter.as_deref().unwrap_or(" ");
 		Ok(format_output_standard(delimiter, lines))
-	}.unwrap_or_else(|e| {
-		eprintln!("vicut: failed to format output: {e}");
-		std::process::exit(1)
-	})
+	}.unwrap_or_else(complain_and_exit)
 }
 
 /// Format the output as JSON
@@ -729,33 +763,36 @@ fn execute(args: &Opts, input: String, filename: Option<PathBuf>) -> Result<Vec<
 
 
 	let mut field_num = 0;
+	let mut ctx = ExecCtx {
+		args: args.clone(),
+		field_num,
+		fields,
+		fmt_lines
+	};
 	for cmd in &args.cmds {
 		exec_cmd(
 			cmd,
-			args,
 			&mut vicut,
-			&mut field_num,
-			&mut fields,
-			&mut fmt_lines
+			&mut ctx
 		);
 		vicut.update_builtins();
-		if !args.keep_mode {
+		if !ctx.args.keep_mode {
 			vicut.set_normal_mode();
 		}
 	}
 
-	if !fields.is_empty() {
-		fmt_lines.push(std::mem::take(&mut fields));
+	if !ctx.fields.is_empty() {
+		ctx.fmt_lines.push(std::mem::take(&mut ctx.fields));
 	}
 
-	if fmt_lines.is_empty() && args.silent {
+	if ctx.fmt_lines.is_empty() && args.silent {
 		return Ok(vec![]);
 	}
 
 	// Let's figure out if we want to print the whole buffer
-	let no_fields = fmt_lines.is_empty(); // No fields were extracted
-	let has_files = !args.files.is_empty(); // We have files to edit
-	let has_pattern_search = args.cmds.iter().any(|cmd| {
+	let no_fields = ctx.fmt_lines.is_empty(); // No fields were extracted
+	let has_files = !ctx.args.files.is_empty(); // We have files to edit
+	let has_pattern_search = ctx.args.cmds.iter().any(|cmd| {
 		if let Cmd::Global { then_cmds, .. } = cmd {
 			then_cmds.iter().any(|cmd| matches!(cmd, Cmd::Field(_) | Cmd::NamedField(_, _)))
 		} else {
@@ -774,14 +811,14 @@ fn execute(args: &Opts, input: String, filename: Option<PathBuf>) -> Result<Vec<
 
 	if should_print_entire_buffer {
 		let big_line = vicut.editor.buffer;
-		fmt_lines.push(vec![("0".into(),big_line)]);
+		ctx.fmt_lines.push(vec![("0".into(),big_line)]);
 	}
 
-	if args.trim_fields {
-		trim_fields(&mut fmt_lines);
+	if ctx.args.trim_fields {
+		trim_fields(&mut ctx.fmt_lines);
 	}
 
-	Ok(fmt_lines)
+	Ok(ctx.fmt_lines)
 }
 
 /// Trim the fields 🧑‍🌾
@@ -822,88 +859,53 @@ fn get_lines(value: &str) -> Vec<String> {
 /// Execute a single `Cmd`
 fn exec_cmd(
 	cmd: &Cmd,
-	args: &Opts,
 	vicut: &mut ViCut,
-	field_num: &mut usize,
-	fields: &mut Vec<(String,String)>,
-	fmt_lines: &mut Vec<Vec<(String,String)>>
-) {
+	ctx: &mut ExecCtx,
+) -> Option<Val>{
 	match cmd {
+		Cmd::LoopBreak |
+		Cmd::LoopContinue => {
+			// These are only checked for in loop contexts
+			// We can just return
+			return None
+		}
+		Cmd::Yank(arg,reg) => {
+			// Evaluate the arg and yank it into the given register
+			let value = vicut.eval_cmd_arg(arg, ctx).unwrap_or_else(complain_and_exit);
+
+			// Uppercase register name means "append to the register"
+			if reg.is_ascii_uppercase() {
+				append_register(Some(*reg), RegisterContent::Span(value.to_string()));
+			} else {
+				write_register(Some(*reg), RegisterContent::Span(value.to_string()));
+			}
+		}
+		Cmd::Return(arg) => {
+			// Evaluate the argument and return it
+			// This is the only branch that returns a value
+			let value = vicut.eval_cmd_arg(arg, ctx).unwrap_or_else(complain_and_exit);
+			return Some(value)
+		}
+		Cmd::FuncDef { name, args, body } => {
+			// Define a function
+			vicut.set_function(name.clone(), args.clone(), body.clone());
+		}
+		Cmd::FuncCall { name, args: call_args } => {
+			let func_args = call_args
+				.iter()
+				.map(|arg| vicut.eval_cmd_arg(arg, ctx).unwrap_or_else(complain_and_exit))
+				.collect::<Vec<_>>();
+			vicut.eval_function(name.to_string(), func_args, ctx).unwrap_or_else(complain_and_exit);
+		}
 		Cmd::Echo(args) => {
 			if args.is_empty() {
 				println!();
-				return
+				return None
 			}
 			let mut display_args = vec![];
 			for arg in args {
-				let value = match arg {
-					CmdArg::Literal(value) => {
-						let expanded = vicut.expand_literal(&value.to_string()).unwrap_or_else(|e| {
-							eprintln!("vicut: {e}");
-							std::process::exit(1)
-						});
-						Val::Str(expanded)
-					}
-					CmdArg::Var(var) => {
-						let Some(val) = vicut.get_var(var) else {
-							eprintln!("vicut: variable '{var}' not found");
-							std::process::exit(1)
-						};
-						val.clone()
-					}
-					CmdArg::Expr(expr) => {
-						match expr {
-							Expr::Return(cmd) => {
-								let expanded = vicut.expand_literal(&cmd.to_string()).unwrap_or_else(|e| {
-									eprintln!("vicut: {e}");
-									std::process::exit(1)
-								});
-								match vicut.read_field(&expanded) {
-									Ok(field) => {
-										Val::Str(field)
-									}
-									Err(e) => {
-										eprintln!("vicut: {e}");
-										Val::Str("".into())
-									}
-								}
-							}
-							Expr::Var(var) => {
-								let Some(val) = vicut.get_var(var) else {
-									eprintln!("vicut: variable '{var}' not found");
-									std::process::exit(1)
-								};
-								val.clone()
-							}
-							Expr::Int(int) => {
-								Val::Num(*int as isize)
-							}
-							Expr::Bool(bool) => {
-								Val::Bool(*bool)
-							}
-							Expr::Literal(lit) => {
-								let expanded = vicut.expand_literal(&lit.to_string()).unwrap_or_else(|e| {
-									eprintln!("vicut: {e}");
-									std::process::exit(1)
-								});
-								Val::Str(expanded)
-							}
-							Expr::BoolExp { op, left, right } => {
-								vicut.eval_bool_expr(op, left, right).unwrap_or_else(|e| {
-									eprintln!("vicut: {e}");
-									std::process::exit(1)
-								})
-							}
-							Expr::BinExp { op, left, right } => {
-								vicut.eval_bin_expr(op, left, right).unwrap_or_else(|e| {
-									eprintln!("vicut: {e}");
-									std::process::exit(1)
-								})
-							}
-						}
-					}
-					_ => unreachable!()
-				};
+				let value = vicut.eval_cmd_arg(arg,ctx).unwrap_or_else(complain_and_exit);
+
 				display_args.push(value.to_string());
 			}
 			let output = display_args.join(" ");
@@ -911,21 +913,7 @@ fn exec_cmd(
 		}
 		// -r <N> <R>
 		Cmd::Repeat{ body, count } => {
-			let n_repeats = match count {
-				CmdArg::Count(n) => *n,
-				CmdArg::Var(var) => {
-					let Some(val) = vicut.get_var(var) else {
-						eprintln!("vicut: variable '{var}' not found");
-						std::process::exit(1)
-					};
-					let Val::Num(n) = val else {
-						eprintln!("vicut: variable '{var}' is not a number");
-						std::process::exit(1)
-					};
-					*n as usize
-				}
-				_ => unreachable!()
-			};
+			let n_repeats = vicut.eval_count(count).unwrap_or_else(complain_and_exit);
 			vicut.descend(); // new scope
 			for _ in 0..n_repeats {
 
@@ -933,15 +921,12 @@ fn exec_cmd(
 					// We use recursion so that we can nest repeats easily
 					exec_cmd(
 						r_cmd,
-						args,
 						vicut,
-						field_num,
-						fields,
-						fmt_lines
+						ctx
 					);
 				}
 				vicut.update_builtins();
-				if !args.keep_mode {
+				if !ctx.args.keep_mode {
 					vicut.set_normal_mode();
 				}
 			}
@@ -950,19 +935,22 @@ fn exec_cmd(
 		// -g/-v <PATTERN> <COMMANDS> [--else <COMMANDS>]
 		Cmd::Global { pattern, then_cmds, else_cmds, polarity } => {
 			let pattern = match pattern {
-				CmdArg::Literal(pattern) => pattern,
+				CmdArg::Literal(pattern) => pattern.clone(),
 				CmdArg::Var(var) => {
 					let Some(val) = vicut.get_var(var) else {
 						eprintln!("vicut: variable '{var}' not found");
 						std::process::exit(1)
 					};
-					val
+					val.clone()
+				}
+				CmdArg::Expr(exp) => {
+					vicut.eval_expr(exp, ctx).unwrap_or_else(complain_and_exit)
 				}
 				_ => unreachable!()
 			};
 			let motion = match polarity {
-				false  => Motion::NotGlobal(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pattern.to_string()),
-				true => Motion::Global(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pattern.to_string())
+				false  => Motion::NotGlobal(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pattern),
+				true => Motion::Global(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pattern)
 			};
 
 			// Here we ask ViCut's editor directly to evaluate the Global motion for us.
@@ -972,11 +960,11 @@ fn exec_cmd(
 				// Positive branch
 				for line in lines {
 					let mut line_no = line;
-					let field_num = if args.global_uses_line_numbers {
+					let field_num = if ctx.args.global_uses_line_numbers {
 						// If we are using line numbers, we need to set the field number to the line number
 						&mut line_no
 					} else {
-						&mut field_num.clone()
+						&mut ctx.field_num.clone()
 					};
 					let Some((start,_)) = vicut.editor.line_bounds(line) else { continue };
 					// Set the cursor on the start of the line
@@ -988,14 +976,11 @@ fn exec_cmd(
 					for cmd in then_cmds {
 						exec_cmd(
 							cmd,
-							args,
 							vicut,
-							field_num,
-							fields,
-							fmt_lines
+							ctx
 						);
 						vicut.update_builtins();
-						if !args.keep_mode {
+						if !ctx.args.keep_mode {
 							vicut.set_normal_mode();
 						}
 					}
@@ -1007,14 +992,11 @@ fn exec_cmd(
 				for cmd in else_cmds {
 					exec_cmd(
 						cmd,
-						args,
 						vicut,
-						field_num,
-						fields,
-						fmt_lines
+						ctx,
 					);
 					vicut.update_builtins();
-					if !args.keep_mode {
+					if !ctx.args.keep_mode {
 						vicut.set_normal_mode();
 					}
 				}
@@ -1023,65 +1005,19 @@ fn exec_cmd(
 		}
 		// -m <VIM_CMDS>
 		Cmd::Motion(motion) => {
-			match motion {
-				CmdArg::Literal(motion) => {
-					let Val::Str(motion) = motion else {
-						eprintln!("vicut: expected a string");
-						std::process::exit(1)
-					};
-					if let Err(e) = vicut.move_cursor(motion) {
-						eprintln!("vicut: {e}");
-					}
-				}
-				CmdArg::Var(var) => {
-					let Some(val) = vicut.get_var(var) else {
-						eprintln!("vicut: variable '{var}' not found");
-						std::process::exit(1)
-					};
-					let Val::Str(motion) = val else {
-						eprintln!("vicut: variable '{var}' is not a string");
-						std::process::exit(1)
-					};
-					let motion = motion.clone();
-					if let Err(e) = vicut.move_cursor(&motion) {
-						eprintln!("vicut: {e}");
-					}
-				}
-				_ => unreachable!()
-			};
+			let motion = vicut.eval_cmd_arg(motion,ctx).unwrap_or_else(complain_and_exit).to_string();
+			if let Err(e) = vicut.move_cursor(&motion) {
+				eprintln!("vicut: {e}");
+			}
 		}
 		// -c <VIM_CMDS>
 		Cmd::Field(motion) => {
-			let motion = match motion {
-				CmdArg::Literal(motion) => {
-					let Val::Str(motion) = motion else {
-						eprintln!("vicut: expected a string");
-						std::process::exit(1)
-					};
-
-					vicut.expand_literal(motion).unwrap_or_else(|e| {
-						eprintln!("vicut: {e}");
-						std::process::exit(1)
-					})
-				}
-				CmdArg::Var(var) => {
-					let Some(val) = vicut.get_var(var) else {
-						eprintln!("vicut: variable '{var}' not found");
-						std::process::exit(1)
-					};
-					let Val::Str(motion) = val else {
-						eprintln!("vicut: variable '{var}' is not a string");
-						std::process::exit(1)
-					};
-					motion.clone()
-				}
-				_ => unreachable!()
-			};
-			*field_num += 1;
+			let motion = vicut.eval_cmd_arg(motion,ctx).unwrap_or_else(complain_and_exit).to_string();
+			ctx.field_num += 1;
 			match vicut.read_field(&motion) {
 				Ok(field) => {
-					let name = format!("{field_num}");
-					fields.push((name,field))
+					let name = format!("{}",ctx.field_num);
+					ctx.fields.push((name,field))
 				}
 				Err(e) => {
 					eprintln!("vicut: {e}");
@@ -1091,33 +1027,10 @@ fn exec_cmd(
 		// -c name=<NAME> <VIM_CMDS>
 		Cmd::NamedField(name, motion) => {
 			trace!("Executing capturing command with name '{name}': {motion}");
-			let motion = match motion {
-				CmdArg::Literal(motion) => {
-					let Val::Str(motion) = motion else {
-						eprintln!("vicut: expected a string");
-						std::process::exit(1)
-					};
-					vicut.expand_literal(motion).unwrap_or_else(|e| {
-						eprintln!("vicut: {e}");
-						std::process::exit(1)
-					})
-				}
-				CmdArg::Var(var) => {
-					let Some(val) = vicut.get_var(var) else {
-						eprintln!("vicut: variable '{var}' not found");
-						std::process::exit(1)
-					};
-					let Val::Str(motion) = val else {
-						eprintln!("vicut: variable '{var}' is not a string");
-						std::process::exit(1)
-					};
-					motion.clone()
-				}
-				_ => unreachable!()
-			};
-			*field_num += 1;
+			let motion = vicut.eval_cmd_arg(motion,ctx).unwrap_or_else(complain_and_exit).to_string();
+			ctx.field_num += 1;
 			match vicut.read_field(&motion) {
-				Ok(field) => fields.push((name.clone(),field)),
+				Ok(field) => ctx.fields.push((name.clone(),field)),
 				Err(e) => {
 					eprintln!("vicut: {e}");
 				}
@@ -1125,184 +1038,53 @@ fn exec_cmd(
 		}
 		// -n
 		Cmd::BreakGroup => {
-			if args.trace {
+			if ctx.args.trace {
 				trace!("Breaking field group with fields: ");
-				for field in &mut *fields {
+				for field in &mut ctx.fields {
 					let name = &field.0;
 					let content = &field.1;
 					trace!("\t{name}: {content}");
 				}
 			}
-			*field_num = 0;
-			if !fields.is_empty() {
-				fmt_lines.push(std::mem::take(fields));
+			ctx.field_num = 0;
+			if !ctx.fields.is_empty() {
+				ctx.fmt_lines.push(std::mem::take(&mut ctx.fields));
 			}
 		}
 		Cmd::VarDec { name, value } => {
-			let value = match value {
-				CmdArg::Literal(value) => {
-					let expanded = vicut.expand_literal(&value.to_string()).unwrap_or_else(|e| {
-						eprintln!("vicut: {e}");
-						std::process::exit(1)
-					});
-					Val::Str(expanded)
-				}
-				CmdArg::Var(var) => {
-					let Some(val) = vicut.get_var(var) else {
-						eprintln!("vicut: variable '{var}' not found");
-						std::process::exit(1)
-					};
-					val.clone()
-				}
-				CmdArg::Expr(expr) => {
-					match expr {
-						Expr::Return(cmd) => {
-							let expanded = vicut.expand_literal(&cmd.to_string()).unwrap_or_else(|e| {
-								eprintln!("vicut: {e}");
-								std::process::exit(1)
-							});
-
-							match vicut.read_field(&expanded) {
-								Ok(field) => {
-									Val::Str(field)
-								}
-								Err(e) => {
-									eprintln!("vicut: {e}");
-									Val::Str("".into())
-								}
-							}
-						}
-						Expr::Var(var) => {
-							let Some(val) = vicut.get_var(var) else {
-								eprintln!("vicut: variable '{var}' not found");
-								std::process::exit(1)
-							};
-							val.clone()
-						}
-						Expr::Int(int) => {
-							Val::Num(*int as isize)
-						}
-						Expr::Bool(bool) => {
-							Val::Bool(*bool)
-						}
-						Expr::Literal(lit) => {
-							let expanded = vicut.expand_literal(&lit.to_string()).unwrap_or_else(|e| {
-								eprintln!("vicut: {e}");
-								std::process::exit(1)
-							});
-							Val::Str(expanded)
-						}
-						Expr::BoolExp { op, left, right } => {
-							vicut.eval_bool_expr(op, left, right).unwrap_or_else(|e| {
-								eprintln!("vicut: {e}");
-								std::process::exit(1)
-							})
-						}
-						Expr::BinExp { op, left, right } => {
-							vicut.eval_bin_expr(op, left, right).unwrap_or_else(|e| {
-								eprintln!("vicut: {e}");
-								std::process::exit(1)
-							})
-						}
-					}
-				}
-				_ => unreachable!("vicut: expected a literal or variable, found {value:?}")
-			};
+			let value = vicut.eval_cmd_arg(value,ctx).unwrap_or_else(complain_and_exit);
 			vicut.set_var(name.clone(), value.clone());
 		}
-		Cmd::MutateVar { name, op, value } => {
-			let value = match value {
-				CmdArg::Literal(value) => {
-					let expanded = vicut.expand_literal(&value.to_string()).unwrap_or_else(|e| {
-						eprintln!("vicut: {e}");
-						std::process::exit(1)
-					});
-					Val::Str(expanded)
-				}
-				CmdArg::Expr(expr) => {
-					match expr {
-						Expr::Return(cmd) => {
-							let expanded = vicut.expand_literal(&cmd.to_string()).unwrap_or_else(|e| {
-								eprintln!("vicut: {e}");
-								std::process::exit(1)
-							});
-							match vicut.read_field(&expanded) {
-								Ok(field) => {
-									Val::Str(field)
-								}
-								Err(e) => {
-									eprintln!("vicut: {e}");
-									Val::Str("".into())
-								}
-							}
-						}
-						Expr::Var(var) => {
-							let Some(val) = vicut.get_var(var) else {
-								eprintln!("vicut: variable '{var}' not found");
-								std::process::exit(1)
-							};
-							val.clone()
-						}
-						Expr::Literal(lit) => {
-							let expanded = vicut.expand_literal(&lit.to_string()).unwrap_or_else(|e| {
-								eprintln!("vicut: {e}");
-								std::process::exit(1)
-							});
-							Val::Str(expanded)
-						}
-						Expr::Int(int) => {
-							Val::Num(*int as isize)
-						}
-						Expr::Bool(bool) => {
-							Val::Bool(*bool)
-						}
-						Expr::BoolExp { op, left, right } => {
-							vicut.eval_bool_expr(op, left, right).unwrap_or_else(|e| {
-								eprintln!("vicut: {e}");
-								std::process::exit(1)
-							})
-						}
-						Expr::BinExp { op, left, right } => {
-							vicut.eval_bin_expr(op, left, right).unwrap_or_else(|e| {
-								eprintln!("vicut: {e}");
-								std::process::exit(1)
-							})
-						}
-					}
-				}
-				CmdArg::Var(var) => {
-					let Some(val) = vicut.get_var(var) else {
-						eprintln!("vicut: variable '{var}' not found");
-						std::process::exit(1)
-					};
-					val.clone()
-				}
-				_ => unreachable!()
-			};
-			vicut.mutate_var(name.clone(), op.clone(), value.clone()).unwrap_or_else(|e| {
-				eprintln!("vicut: {e}");
-				std::process::exit(1)
-			});
+		Cmd::MutateVar { name, index, op, value } => {
+			let value = vicut.eval_cmd_arg(value,ctx).unwrap_or_else(complain_and_exit);
+			if let Some(index) = index {
+				let index = vicut.eval_cmd_arg(index,ctx).unwrap_or_else(complain_and_exit);
+				let Val::Num(index) =  index else {
+					eprintln!("vicut: expected number for index");
+					std::process::exit(1);
+				};
+				let index = index as usize;
+				vicut.set_index_var(name.to_string(), index, value);
+			} else {
+				vicut.mutate_var(name.clone(), op.clone(), value.clone()).unwrap_or_else(complain_and_exit);
+			}
 		}
 		Cmd::IfBlock { cond_blocks, else_block } => {
 			let mut executed = false;
 			for block in cond_blocks {
 				let CondBlock { cond, cmds } = block;
-				let result = cond.is_truthy(vicut);
+				let result = cond.is_truthy(vicut,ctx);
 				if result {
 					executed = true;
 					vicut.descend(); // new scope
 					for cmd in cmds {
 						exec_cmd(
 							cmd,
-							args,
 							vicut,
-							field_num,
-							fields,
-							fmt_lines
+							ctx
 						);
 						vicut.update_builtins();
-						if !args.keep_mode {
+						if !ctx.args.keep_mode {
 							vicut.set_normal_mode();
 						}
 					}
@@ -1317,14 +1099,11 @@ fn exec_cmd(
 					for cmd in else_block {
 						exec_cmd(
 							cmd,
-							args,
 							vicut,
-							field_num,
-							fields,
-							fmt_lines
+							ctx
 						);
 						vicut.update_builtins();
-						if !args.keep_mode {
+						if !ctx.args.keep_mode {
 							vicut.set_normal_mode();
 						}
 					}
@@ -1332,21 +1111,60 @@ fn exec_cmd(
 				}
 			}
 		}
-		Cmd::WhileBlock(cond_block) => {
-			let CondBlock { cond, cmds } = cond_block;
-			while cond.is_truthy(vicut) {
+		Cmd::ForBlock { var_name, iterable, body } => {
+			let val = vicut.eval_cmd_arg(iterable,ctx).unwrap_or_else(complain_and_exit);
+			let val_iter = CompoundVal::try_from(val).unwrap_or_else(complain_and_exit);
+			let iter = val_iter.into_iter().collect::<Vec<_>>();
+			if iter.is_empty() {
+				return None;
+			}
+			'main: for item in iter {
+				if cmd == &Cmd::LoopBreak {
+					break;
+				}
+				if cmd == &Cmd::LoopContinue {
+					continue;
+				}
 				vicut.descend(); // new scope
-				for cmd in cmds {
+				vicut.set_var(var_name.clone(), item);
+				for cmd in body {
+					if cmd == &Cmd::LoopBreak {
+						break 'main;
+					}
+					if cmd == &Cmd::LoopContinue {
+						continue 'main;
+					}
 					exec_cmd(
 						cmd,
-						args,
 						vicut,
-						field_num,
-						fields,
-						fmt_lines
+						ctx
 					);
 					vicut.update_builtins();
-					if !args.keep_mode {
+					if !ctx.args.keep_mode {
+						vicut.set_normal_mode();
+					}
+				}
+				vicut.ascend(); // leave scope
+			}
+		}
+		Cmd::WhileBlock(cond_block) => {
+			let CondBlock { cond, cmds } = cond_block;
+			'main: while cond.is_truthy(vicut,ctx) {
+				vicut.descend(); // new scope
+				for cmd in cmds {
+					if cmd == &Cmd::LoopBreak {
+						break 'main;
+					}
+					if cmd == &Cmd::LoopContinue {
+						continue 'main;
+					}
+					exec_cmd(
+						cmd,
+						vicut,
+						ctx
+					);
+					vicut.update_builtins();
+					if !ctx.args.keep_mode {
 						vicut.set_normal_mode();
 					}
 				}
@@ -1355,19 +1173,22 @@ fn exec_cmd(
 		}
 		Cmd::UntilBlock(cond_block) => {
 			let CondBlock { cond, cmds } = cond_block;
-			while !cond.is_truthy(vicut) {
+			'main: while !cond.is_truthy(vicut,ctx) {
 				vicut.descend(); // new scope
 				for cmd in cmds {
+					if cmd == &Cmd::LoopBreak {
+						break 'main;
+					}
+					if cmd == &Cmd::LoopContinue {
+						continue 'main;
+					}
 					exec_cmd(
 						cmd,
-						args,
 						vicut,
-						field_num,
-						fields,
-						fmt_lines
+						ctx
 					);
 					vicut.update_builtins();
-					if !args.keep_mode {
+					if !ctx.args.keep_mode {
 						vicut.set_normal_mode();
 					}
 				}
@@ -1375,6 +1196,7 @@ fn exec_cmd(
 			}
 		}
 	}
+	None
 }
 
 /// Multi-thread the execution of file input.
@@ -1386,10 +1208,7 @@ fn exec_cmd(
 fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Opts) {
 	let work: Vec<(PathBuf, String)> = args.files.par_iter()
 		.fold(Vec::new, |mut acc,file| {
-			let contents = fs::read_to_string(file).unwrap_or_else(|e| {
-				eprintln!("vicut: failed to read file '{}': {e}",file.display());
-				std::process::exit(1);
-			});
+			let contents = fs::read_to_string(file).unwrap_or_else(complain_and_exit);
 			acc.push((file.clone(), contents.to_string()));
 			acc
 		}).reduce(Vec::new, |mut a, mut b| {
@@ -1429,15 +1248,9 @@ fn execute_multi_thread_files(mut stdout: io::StdoutLock, args: &Opts) {
 						.unwrap_or("")
 				));
 
-				fs::copy(&path, &backup_path).unwrap_or_else(|e| {
-					eprintln!("vicut: failed to back up file '{}': {e}", path.display());
-					std::process::exit(1)
-				});
+				fs::copy(&path, &backup_path).unwrap_or_else(complain_and_exit);
 			}
-			fs::write(&path, output).unwrap_or_else(|e| {
-				eprintln!("vicut: failed to write to file '{}': {e}",path.display());
-				std::process::exit(1)
-			});
+			fs::write(&path, output).unwrap_or_else(complain_and_exit);
 		} else if args.files.len() > 1 {
 			if !output.is_empty() {
 				writeln!(stdout, "--- {}\n{}",path.display(), output).ok();
@@ -1471,10 +1284,7 @@ fn execute_multi_thread_files_linewise(mut stdout: io::StdoutLock, args: &Opts) 
 
 	let work: Vec<(PathBuf, usize, String)> = args.files.par_iter()
 		.fold(Vec::new, |mut acc,file| {
-			let contents = fs::read_to_string(file).unwrap_or_else(|e| {
-				eprintln!("vicut: failed to read file '{}': {e}",file.display());
-				std::process::exit(1);
-			});
+			let contents = fs::read_to_string(file).unwrap_or_else(complain_and_exit);
 			for (line_no,line) in get_lines(&contents).into_iter().enumerate() {
 				acc.push((file.clone(), line_no, line.to_string()));
 			}
@@ -1533,15 +1343,9 @@ fn execute_multi_thread_files_linewise(mut stdout: io::StdoutLock, args: &Opts) 
 						.unwrap_or("")
 				));
 
-				fs::copy(&path, &backup_path).unwrap_or_else(|e| {
-					eprintln!("vicut: failed to back up file '{}': {e}", path.display());
-					std::process::exit(1)
-				});
+				fs::copy(&path, &backup_path).unwrap_or_else(complain_and_exit);
 			}
-			fs::write(&path, output_final).unwrap_or_else(|e| {
-				eprintln!("vicut: failed to write to file '{}': {e}",path.display());
-				std::process::exit(1)
-			});
+			fs::write(&path, output_final).unwrap_or_else(complain_and_exit);
 		} else if args.files.len() > 1 {
 			if !output_final.is_empty() {
 				writeln!(stdout, "--- {}\n{}",path.display(), output_final).ok();
@@ -1558,10 +1362,7 @@ fn execute_multi_thread_files_linewise(mut stdout: io::StdoutLock, args: &Opts) 
 /// Reads the complete input from stdin and then splits it into its lines for execution.
 fn execute_linewise(mut stream: Box<dyn BufRead>, args: &Opts) -> String {
 	let mut input = String::new();
-	stream.read_to_string(&mut input).unwrap_or_else(|e| {
-		eprintln!("vicut: failed to read input: {e}");
-		std::process::exit(1)
-	});
+	stream.read_to_string(&mut input).unwrap_or_else(complain_and_exit);
 	let lines = get_lines(&input);
 	// Pair each line with its original index
 	let mut lines: Vec<_> = lines
@@ -1599,10 +1400,7 @@ fn exec_linewise(args: &Opts) {
 		let mut json_data = vec![];
 		if !args.files.is_empty() {
 			for path in &args.files {
-				let input = fs::read_to_string(path).unwrap_or_else(|e| {
-					eprintln!("vicut: failed to read file '{}': {e}",path.display());
-					std::process::exit(1)
-				});
+				let input = fs::read_to_string(path).unwrap_or_else(complain_and_exit);
 				for line in get_lines(&input) {
 					match execute(args,line, Some(path.clone())) {
 						Ok(mut new_line) => {
@@ -1629,15 +1427,9 @@ fn exec_linewise(args: &Opts) {
 								.unwrap_or("")
 						));
 
-						fs::copy(path, &backup_path).unwrap_or_else(|e| {
-							eprintln!("vicut: failed to back up file '{}': {e}", path.display());
-							std::process::exit(1)
-						});
+						fs::copy(path, &backup_path).unwrap_or_else(complain_and_exit);
 					}
-					fs::write(path, std::mem::take(&mut output)).unwrap_or_else(|e| {
-						eprintln!("vicut: failed to write to file '{}': {e}",path.display());
-						std::process::exit(1)
-					});
+					fs::write(path, std::mem::take(&mut output)).unwrap_or_else(complain_and_exit);
 				} else {
 					if args.files.len() > 1 {
 						writeln!(stdout,"--- {}", path.display()).ok();
@@ -1654,10 +1446,7 @@ fn exec_linewise(args: &Opts) {
 		} else {
 			let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
 			let mut input = String::new();
-			stream.read_to_string(&mut input).unwrap_or_else(|e| {
-				eprintln!("vicut: failed to read input: {e}");
-				std::process::exit(1)
-			});
+			stream.read_to_string(&mut input).unwrap_or_else(complain_and_exit);
 			for line in get_lines(&input) {
 				match execute(args,line, None) {
 					Ok(mut new_line) => {
@@ -1677,10 +1466,7 @@ fn exec_linewise(args: &Opts) {
 		let pool = rayon::ThreadPoolBuilder::new()
 			.num_threads(num as usize)
 			.build()
-			.unwrap_or_else(|e| {
-				eprintln!("vicut: Failed to build thread pool: {e}");
-				std::process::exit(1)
-			});
+			.unwrap_or_else(complain_and_exit);
 		pool.install(|| {
 			let mut stdout = io::stdout().lock();
 			let output = if !args.files.is_empty() {
@@ -1716,10 +1502,7 @@ fn exec_files(args: &Opts) {
 	if args.single_thread {
 		let mut stdout = io::stdout().lock();
 		for path in &args.files {
-			let content = fs::read_to_string(path).unwrap_or_else(|e| {
-				eprintln!("vicut: failed to read file '{}': {e}",path.display());
-				std::process::exit(1)
-			});
+			let content = fs::read_to_string(path).unwrap_or_else(complain_and_exit);
 			match execute(args,content, Some(path.clone())) {
 				Ok(output) => {
 					if args.json {
@@ -1737,15 +1520,9 @@ fn exec_files(args: &Opts) {
 									.unwrap_or("")
 							));
 
-							fs::copy(path, &backup_path).unwrap_or_else(|e| {
-								eprintln!("vicut: failed to back up file '{}': {e}", path.display());
-								std::process::exit(1)
-							});
+							fs::copy(path, &backup_path).unwrap_or_else(complain_and_exit);
 						}
-						fs::write(path, std::mem::take(&mut output)).unwrap_or_else(|e| {
-							eprintln!("vicut: failed to write to file '{}': {e}",path.display());
-							std::process::exit(1)
-						});
+						fs::write(path, std::mem::take(&mut output)).unwrap_or_else(complain_and_exit);
 					} else {
 						if args.files.len() > 1 {
 							writeln!(stdout,"--- {}", path.display()).ok();
@@ -1764,10 +1541,7 @@ fn exec_files(args: &Opts) {
 		let pool = rayon::ThreadPoolBuilder::new()
 			.num_threads(num as usize)
 			.build()
-			.unwrap_or_else(|e| {
-				eprintln!("vicut: Failed to build thread pool: {e}");
-				std::process::exit(1)
-			});
+			.unwrap_or_else(complain_and_exit);
 		pool.install(|| {
 			let stdout = io::stdout().lock();
 			execute_multi_thread_files(stdout, args);
@@ -1848,17 +1622,11 @@ fn main_script() {
 	let opts = if Opts::validate_filename(&maybe_script).is_err() {
 		// It's not a file...
 		// Let's see if it's a valid in-line script
-		Opts::from_raw(&maybe_script).unwrap_or_else(|e| {
-			eprintln!("{e}");
-			std::process::exit(1)
-		})
+		Opts::from_raw(&maybe_script).unwrap_or_else(complain_and_exit)
 	} else {
 		// It's a file, let's see if it's a valid script
 		let script_path = PathBuf::from(maybe_script);
-		Opts::from_script(script_path).unwrap_or_else(|e| {
-			eprintln!("{e}");
-			std::process::exit(1)
-		})
+		Opts::from_script(script_path).unwrap_or_else(complain_and_exit)
 	};
 
 
@@ -1875,8 +1643,8 @@ fn main_script() {
 
 #[allow(unreachable_code)]
 fn main() {
-	#[cfg(all(test,debug_assertions))]
-	do_test_stuff();
+	//#[cfg(all(test,debug_assertions))]
+	//do_test_stuff();
 
 	print_help_or_version();
 
@@ -1891,10 +1659,7 @@ fn main() {
 
 	let opts = if let Some(script) = script {
 		let script = PathBuf::from(script);
-		Opts::from_script(script).unwrap_or_else(|e| {
-			eprintln!("{e}");
-			std::process::exit(1)
-		})
+		Opts::from_script(script).unwrap_or_else(complain_and_exit)
 	} else {
 		// Let's see if we got a literal in-line script instead then
 		let mut flags = std::env::args().take_while(|arg| arg != "--");
@@ -1907,17 +1672,11 @@ fn main() {
 			let mut opts = if Opts::validate_filename(&maybe_script).is_err() {
 				// It's not a file...
 				// Let's see if it's a valid in-line script
-				Opts::from_raw(&maybe_script).unwrap_or_else(|e| {
-					eprintln!("{e}");
-					std::process::exit(1)
-				})
+				Opts::from_raw(&maybe_script).unwrap_or_else(complain_and_exit)
 			} else {
 				// It's a file, let's see if it's a valid script
 				let script_path = PathBuf::from(maybe_script);
-				Opts::from_script(script_path).unwrap_or_else(|e| {
-					eprintln!("{e}");
-					std::process::exit(1)
-				})
+				Opts::from_script(script_path).unwrap_or_else(complain_and_exit)
 			};
 			// Now let's grab the file names
 			for arg in args {
@@ -1931,10 +1690,7 @@ fn main() {
 		} else {
 			// We're using command line arguments
 			// boo
-			Opts::parse().unwrap_or_else(|e| {
-				eprintln!("vicut: {e}");
-				std::process::exit(1)
-			})
+			Opts::parse().unwrap_or_else(complain_and_exit)
 		}
 	};
 

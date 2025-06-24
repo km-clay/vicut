@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use bitflags::bitflags;
 
-use crate::{linebuf::SelectRange, modes::ex::SubFlags, register::{RegisterContent, REGISTERS}};
+use crate::{exec::Val, linebuf::SelectRange, modes::ex::SubFlags, register::{RegisterContent, REGISTERS}};
 
 use super::register::{append_register, read_register, write_register};
 
@@ -333,7 +333,7 @@ impl Verb {
 /// Vim motions
 ///
 /// This enum contains all of the currently supported Vim motions. These are parsed in `modes`, and executed in `linebuf`
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Motion {
 	WholeLine,
 	WholeLineExclusive,
@@ -349,9 +349,9 @@ pub enum Motion {
 	PatternSearch(String),
 	PatternSearchRev(String),
 	/// The first field should *always* be `Line(_)` or `LineRange(_,_)`
-	Global(Box<Motion>,String),
+	Global(Box<Motion>,Val),
 	/// The first field should *always* be `Line(_)` or `LineRange(_,_)`
-	NotGlobal(Box<Motion>,String),
+	NotGlobal(Box<Motion>,Val),
 	NextMatch,
 	PrevMatch,
 	BackwardChar,
