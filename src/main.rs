@@ -69,6 +69,8 @@ pub enum Cmd {
 	BreakGroup,
 	LoopContinue,
 	LoopBreak,
+	GetBufId,
+	SwitchBuf(CmdArg), // Switch to a different buffer
 	Echo(Vec<CmdArg>),
 	Motion(CmdArg),
 	Field(CmdArg),
@@ -143,6 +145,7 @@ pub struct Opts {
 	backup_files: bool,
 	single_thread: bool,
 	global_uses_line_numbers: bool,
+	no_input: bool,
 	silent: bool,
 
 	pipe_in: Option<String>,
@@ -752,19 +755,19 @@ fn format_output_template(template: &str, lines: Vec<Vec<(String,String)>>) -> R
 /// Here we are going to initialize a new instance of `ViCut` to manage state for editing this input
 /// Next we loop over `args.cmds` and execute each one in sequence.
 fn execute(args: &Opts, input: String, filename: Option<PathBuf>) -> Result<Vec<Vec<(String,String)>>,String> {
-	let mut fields: Vec<(String,String)> = vec![];
-	let mut fmt_lines: Vec<Vec<(String,String)>> = vec![];
+	let fields: Vec<(String,String)> = vec![];
+	let fmt_lines: Vec<Vec<(String,String)>> = vec![];
 
 	let mut vicut = ViCut::new(input, 0)?;
 	let basename = filename.clone()
 		.map(|s| s.file_name().unwrap_or_default().to_string_lossy().to_string())
 		.unwrap_or_else(|| String::from("stdin"));
 	let filepath = filename.map(|s| s.to_string_lossy().to_string()).unwrap_or(String::from("stdin"));
-	vicut.set_var("filename".into(), Val::Str(basename));
-	vicut.set_var("filepath".into(), Val::Str(filepath));
+	vicut.set_var("filename".into(), Val::Str(basename))?;
+	vicut.set_var("filepath".into(), Val::Str(filepath))?;
 
 
-	let mut field_num = 0;
+	let field_num = 0;
 	let mut ctx = ExecCtx {
 		args: args.clone(),
 		field_num,
@@ -811,7 +814,7 @@ fn execute(args: &Opts, input: String, filename: Option<PathBuf>) -> Result<Vec<
 	let should_print_entire_buffer = (!has_pattern_search && (!editing_inplace || !has_files)) && no_fields;
 
 	if should_print_entire_buffer {
-		let big_line = vicut.editor.buffer;
+		let big_line = vicut.current_buffer().buffer.clone();
 		ctx.fmt_lines.push(vec![("0".into(),big_line)]);
 	}
 
@@ -864,6 +867,18 @@ fn exec_cmd(
 	ctx: &mut ExecCtx,
 ) -> Option<Val>{
 	match cmd {
+		Cmd::SwitchBuf(id) => {
+			let Val::Num(id) = vicut.eval_cmd_arg(id,ctx).unwrap_or_else(complain_and_exit) else {
+				eprintln!("vicut: expected a number for buffer ID, found {id}");
+				std::process::exit(1);
+			};
+			vicut.editor.set(id as usize);
+		}
+		Cmd::GetBufId => {
+			// Get the current buffer's ID
+			let buf_id = vicut.editor.get();
+			return Some(Val::Num(buf_id as isize));
+		}
 		Cmd::Push(stack_var, arg) => {
 			let stack_var = match stack_var {
 				CmdArg::Null => return None,
@@ -873,6 +888,12 @@ fn exec_cmd(
 				CmdArg::Expr(expr) => vicut.eval_expr(expr, ctx).unwrap_or_else(complain_and_exit).to_string(),
 			};
 			let value = vicut.eval_cmd_arg(arg, ctx).unwrap_or_else(complain_and_exit).clone();
+			if stack_var == "buffers" {
+				// the 'buffers' variable is a built-in which holds all of the currently open buffers
+				// so now we push the given data onto it as a new LineBuf
+				vicut.push_buffer(value);
+				return None
+			}
 			let stack = vicut.get_var_mut(&stack_var)
 				.ok_or_else(|| format!("vicut: variable '{stack_var}' not found"))
 				.unwrap_or_else(complain_and_exit);
@@ -893,7 +914,20 @@ fn exec_cmd(
 			*stack = new_val.clone();
 		}
 		Cmd::Pop(stack_var) => {
-			let stack_var = stack_var.to_string();
+			let stack_var = match stack_var {
+				CmdArg::Null => return None,
+				CmdArg::Literal(val) => val.to_string(),
+				CmdArg::Var(var) => var.to_string(),
+				CmdArg::Count(_) => return None,
+				CmdArg::Expr(expr) => vicut.eval_expr(expr, ctx).unwrap_or_else(complain_and_exit).to_string(),
+			};
+			if stack_var == "buffers" {
+				// the 'buffers' variable is a built-in which holds all of the currently open buffers
+				// so now we pop the last buffer off of it
+				// we are in a command context, so we can ignore the return value
+				vicut.pop_buffer();
+				return None
+			}
 			let Some(stack_val) = vicut.get_var_mut(&stack_var) else {
 				eprintln!("vicut: variable '{stack_var}' not found");
 				std::process::exit(1);
@@ -1007,7 +1041,7 @@ fn exec_cmd(
 
 			// Here we ask ViCut's editor directly to evaluate the Global motion for us.
 			// LineBuf::eval_motion() *always* returns MotionKind::Lines() for Motion::Global/NotGlobal.
-			let MotionKind::Lines(lines) = vicut.editor.eval_motion(None, MotionCmd(1,motion)) else { unreachable!() };
+			let MotionKind::Lines(lines) = vicut.current_buffer().eval_motion(None, MotionCmd(1,motion)) else { unreachable!() };
 			if !lines.is_empty() {
 				// Positive branch
 				for line in lines {
@@ -1018,9 +1052,9 @@ fn exec_cmd(
 					} else {
 						&mut ctx.field_num.clone()
 					};
-					let Some((start,_)) = vicut.editor.line_bounds(line) else { continue };
+					let Some((start,_)) = vicut.current_buffer().line_bounds(line) else { continue };
 					// Set the cursor on the start of the line
-					vicut.editor.cursor.set(start);
+					vicut.current_buffer().cursor.set(start);
 					// Execute our commands
 
 					vicut.descend(); // new scope
@@ -1102,7 +1136,7 @@ fn exec_cmd(
 		}
 		Cmd::VarDec { name, value } => {
 			let value = vicut.eval_cmd_arg(value,ctx).unwrap_or_else(complain_and_exit);
-			vicut.set_var(name.clone(), value.clone());
+			vicut.set_var(name.clone(), value.clone()).unwrap_or_else(complain_and_exit);
 		}
 		Cmd::MutateVar { name, index, op, value } => {
 			let value = vicut.eval_cmd_arg(value,ctx).unwrap_or_else(complain_and_exit);
@@ -1173,7 +1207,7 @@ fn exec_cmd(
 					continue;
 				}
 				vicut.descend(); // new scope
-				vicut.set_var(var_name.clone(), item);
+				vicut.set_var(var_name.clone(), item).unwrap_or_else(complain_and_exit);
 				for cmd in body {
 					if cmd == &Cmd::LoopBreak {
 						break 'main;
@@ -1676,7 +1710,12 @@ fn main_script() {
 
 	init_logger(opts.trace);
 
-	if opts.linewise {
+	if opts.no_input {
+		let output = execute(&opts, String::new(), None).unwrap_or_else(complain_and_exit);
+		let mut stdout = io::stdout().lock();
+		let output = format_output(&opts, output);
+		write!(stdout, "{output}").ok();
+	} else if opts.linewise {
 		exec_linewise(&opts);
 	} else if !opts.files.is_empty() {
 		exec_files(&opts);
@@ -1740,7 +1779,12 @@ fn main() {
 
 	init_logger(opts.trace);
 
-	if opts.linewise {
+	if opts.no_input {
+		let output = execute(&opts, String::new(), None).unwrap_or_else(complain_and_exit);
+		let mut stdout = io::stdout().lock();
+		let output = format_output(&opts, output);
+		write!(stdout, "{output}").ok();
+	} else if opts.linewise {
 		exec_linewise(&opts);
 	} else if !opts.files.is_empty() {
 		exec_files(&opts);

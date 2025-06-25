@@ -374,9 +374,12 @@ impl ClampedUsize {
 		self.sub(1);
 		true
 	}
-	pub fn set(&mut self, value: usize) {
+	pub fn set(&mut self, value: usize) -> bool {
 		let max = self.upper_bound();
+		let before = self.value;
 		self.value = value.clamp(0,max);
+		let after = self.value;
+		before != after
 	}
 	pub fn set_max(&mut self, max: usize) {
 		self.max = max;
@@ -548,7 +551,7 @@ impl ClampedIsize {
 /// Slicing, motion, and indexing are always performed using grapheme indices,
 /// with utility methods handling conversion to/from byte offsets internally.
 /// This design ensures high-level methods remain boundary-safe and Unicode-aware.
-#[derive(Default,Debug)]
+#[derive(Default,Clone,Debug)]
 pub struct LineBuf {
 	pub buffer: String,
 	pub grapheme_indices: Option<Vec<usize>>, // Used to slice the buffer
@@ -1187,7 +1190,7 @@ impl LineBuf {
 	/// Check if a character is a word boundary
 	pub fn is_word_bound(&mut self, pos: usize, word: Word, dir: Direction) -> bool {
 		let clamped_pos = ClampedUsize::new(pos, self.cursor.max, true);
-		let cur_char = self.grapheme_at(clamped_pos.get()).map(|c| c.to_string()).unwrap();
+		let Some(cur_char) = self.grapheme_at(clamped_pos.get()).map(|c| c.to_string()) else { return false };
 		let other_pos = match dir {
 			Direction::Forward => clamped_pos.ret_add(1),
 			Direction::Backward => clamped_pos.ret_sub(1)
@@ -2643,7 +2646,7 @@ impl LineBuf {
 							}) else {
 								return MotionKind::Null
 							};
-							pos.set(ch_pos)
+							pos.set(ch_pos);
 						}
 						Direction::Backward => {
 							let before = pos.ret_sub(1);
@@ -2995,7 +2998,7 @@ impl LineBuf {
 	pub fn move_cursor(&mut self, motion: MotionKind) {
 		match motion {
 			MotionKind::Onto(pos) | // Onto follows On's behavior for cursor movements
-			MotionKind::On(pos) => self.cursor.set(pos),
+			MotionKind::On(pos) => { self.cursor.set(pos); },
 			MotionKind::To(pos) => {
 				self.cursor.set(pos);
 
@@ -3016,7 +3019,7 @@ impl LineBuf {
 			MotionKind::LineRange(n,_) |
 			MotionKind::Line(n) => {
 				let Some((start,_)) = self.line_bounds(n) else { return };
-				self.cursor.set(start)
+				self.cursor.set(start);
 			}
 			MotionKind::LineOffset(offset) => {
 				let cursor_line = self.cursor_line_number();
@@ -3028,18 +3031,18 @@ impl LineBuf {
 					if let Some(col) = self.saved_col {
 						target_pos += col;
 					}
-					self.cursor.set(target_pos)
+					self.cursor.set(target_pos);
 				}
 			}
 			MotionKind::ExclusiveWithTargetCol((_,_),col) |
 				MotionKind::InclusiveWithTargetCol((_,_),col) => {
 					let (start,end) = self.this_line();
 					let end = end.min(col);
-					self.cursor.set(start + end)
+					self.cursor.set(start + end);
 				}
 			MotionKind::Inclusive((start,mut end)) => {
 				if self.select_range().is_none() {
-					self.cursor.set(start)
+					self.cursor.set(start);
 				} else {
 					if start < self.cursor.get() {
 						self.cursor.set(start);
@@ -3058,7 +3061,7 @@ impl LineBuf {
 			}
 			MotionKind::Exclusive((start,end)) => {
 				if self.select_range().is_none() {
-					self.cursor.set(start)
+					self.cursor.set(start);
 				} else {
 					if start < self.cursor.get() {
 						let start = start + 1;
@@ -3409,7 +3412,7 @@ impl LineBuf {
 					let in_insert_mode = !self.cursor.exclusive;
 
 					if in_insert_mode {
-						self.cursor.set(cursor_pos)
+						self.cursor.set(cursor_pos);
 					}
 					let new_edit = Edit {
 						pos,
@@ -3576,7 +3579,7 @@ impl LineBuf {
 						let end = self.end_of_line();
 						self.cursor.add(end.min(pos));
 					}
-					_ => self.cursor.set(start),
+					_ => { self.cursor.set(start); },
 				}
 			}
 			Verb::Dedent => {

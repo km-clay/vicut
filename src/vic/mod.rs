@@ -134,6 +134,8 @@ pub enum Expr {
 	Bool(bool),
 	Literal(String),
 	Regex(String),
+	SwitchBuf(Box<Expr>),
+	GetBufId,
 	Pop(String), // pop a value from a stack
 	Range(Box<Expr>,Box<Expr>), // 1..10
 	RangeInclusive(Box<Expr>,Box<Expr>), // 1..=10
@@ -162,6 +164,21 @@ impl Expr {
 	pub fn is_truthy(&self, vicut: &mut ViCut, ctx: &mut ExecCtx) -> bool {
 		match self {
 			Expr::Regex(_) => true,
+			Expr::GetBufId => {
+				let num_bufs = vicut.editor.cap();
+				// If the number of buffers is greater than 0, we consider it truthy
+				num_bufs > 0
+			}
+			Expr::SwitchBuf(expr) => {
+				let num_bufs = vicut.editor.cap();
+				vicut.eval_expr(expr, ctx).is_ok_and(|val| {
+					if let Val::Num(id) = val {
+						id >= 0 && id < num_bufs as isize
+					} else {
+						false
+					}
+				})
+			}
 			Expr::Pop(stack_name) => {
 				let Some(val) = vicut.get_var(stack_name) else {
 					eprintln!("vicut: stack '{stack_name}' not found for pop command");
@@ -432,6 +449,21 @@ impl Expr {
 					false_case: Box::new(false_case),
 				}
 			}
+			Rule::buf_cmd => {
+				let mut inner = inner.into_inner();
+				let cmd = inner.next().unwrap();
+				match cmd.as_rule() {
+					Rule::buf_switch => {
+						let buf_id = cmd.into_inner().next().unwrap();
+						let buf_id = Self::from_rule(buf_id);
+						Self::SwitchBuf(Box::new(buf_id))
+					}
+					Rule::buf_id => {
+						Self::GetBufId
+					}
+					_ => unreachable!("Unexpected rule in buf_cmd: {:?}", cmd.as_rule()),
+				}
+			}
 			Rule::bin_expr => {
 				let mut expr = inner.into_inner();
 				let mut left_pair = expr.next().unwrap().into_inner().next().unwrap();
@@ -553,6 +585,8 @@ impl Expr {
 		match self {
 			Expr::VarIndex(_,_) |
 			Expr::Var(_) => String::from("var"),
+			Expr::SwitchBuf(_) => String::from("buf_switch"),
+			Expr::GetBufId => String::from("buf_id"),
 			Expr::Pop(_) => String::from("pop"),
 			Expr::Regex(_) => String::from("regex"),
 			Expr::Range(_,_) => String::from("range"),
@@ -591,6 +625,12 @@ impl Display for Expr {
 		match self {
 			Expr::Pop(stack_name) => {
 				write!(f, "pop {stack_name}")
+			}
+			Expr::SwitchBuf(expr) => {
+				write!(f, "buf switch {}", expr)
+			}
+			Expr::GetBufId => {
+				write!(f, "buf id")
 			}
 			Expr::RangeInclusive(start, end) => {
 				write!(f, "{}..={}", start, end)
@@ -695,6 +735,7 @@ pub fn parse_vic(input: &str) -> Result<Opts, String> {
 						Rule::edit_inplace => opts.edit_inplace = true,
 						Rule::trace => opts.trace = true,
 						Rule::silent => opts.silent = true,
+						Rule::no_input => opts.no_input = true,
 						Rule::max_jobs => {
 							let max_jobs = pair.into_inner().next().unwrap();
 							opts.max_jobs = Some(max_jobs.as_str().parse::<u32>().unwrap());
@@ -914,6 +955,23 @@ fn parse_cmd(cmds: &mut Vec<Cmd>, pair: Pair<Rule>) {
 				};
 				cmds.push(cmd);
 			}
+			Rule::buf_cmd => {
+				let mut inner = pair.into_inner();
+				let buf_cmd_kind = inner.next().unwrap();
+				match buf_cmd_kind.as_rule() {
+					Rule::buf_switch => {
+						let expr = buf_cmd_kind.into_inner().next().unwrap();
+						let expr = Expr::from_rule(expr);
+						let cmd = Cmd::SwitchBuf(CmdArg::Expr(expr));
+						cmds.push(cmd);
+					}
+					Rule::buf_id => {
+						let cmd = Cmd::GetBufId;
+						cmds.push(cmd);
+					}
+					_ => unreachable!()
+				}
+			}
 			Rule::if_block => {
 				let mut inner = pair.into_inner();
 				let expr_pair = inner.next().unwrap();
@@ -1058,8 +1116,7 @@ fn parse_repeat(pair: Pair<Rule>) -> Cmd {
 fn parse_count(pair: Pair<Rule>) -> CmdArg {
 	match pair.as_rule() {
 		Rule::int => {
-			let count = pair.into_inner().next().unwrap();
-			CmdArg::Count(count.as_str().parse::<usize>().unwrap())
+			CmdArg::Count(pair.as_str().parse::<usize>().unwrap())
 		}
 		Rule::var => {
 			let var = pair.into_inner().next().unwrap();
