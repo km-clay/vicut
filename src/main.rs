@@ -9,7 +9,7 @@
 //! 1. Arguments are parsed into a sequence of commands
 //! 2. A `ViCut` instance is created to manage editor state and buffer contents
 //! 3. The commands are applied to the input in sequence, modifying and/or extracting text
-use std::{collections::BTreeMap, env::Args, fmt::{Display, Write}, fs, io::{self, BufRead, Write as IoWrite}, iter::{Peekable, Skip}, path::PathBuf};
+use std::{collections::BTreeMap, env::Args, fmt::{Display, Write}, fs, io::{self, BufRead, Write as IoWrite}, iter::{Peekable, Skip}, path::{Path, PathBuf}};
 
 extern crate tikv_jemallocator;
 
@@ -18,14 +18,15 @@ extern crate tikv_jemallocator;
 /// For linux we use Jemalloc. It is ***significantly*** faster than the default allocator in this case, for some reason.
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use exec::{CompoundVal, Val, ViCut};
+use unicode_segmentation::UnicodeSegmentation;
+use vic::parse::Val;
+use exec::ViCut;
 use log::trace;
 use register::{append_register, write_register, RegisterContent};
-use serde_json::{map, Map, Value};
+use serde_json::{Map, Value};
 use rayon::prelude::*;
-use vic::{BinOp, CmdArg, Expr};
 
-use crate::{linebuf::MotionKind, vicmd::{LineAddr, Motion, MotionCmd}};
+use crate::{linebuf::MotionKind, vic::parse::{expr_error, Command, Expr, ExprKind, RcSpan}, vicmd::{LineAddr, Motion, MotionCmd}};
 
 pub mod vicmd;
 pub mod modes;
@@ -57,398 +58,45 @@ pub fn complain_and_exit<T>(err: impl Display) -> T {
 	std::process::exit(1)
 }
 
+pub fn blame_span(span: RcSpan, err: impl Display) -> ! {
+	let mut err = err.to_string();
+	if !err.starts_with("vicut: ") {
+		err = format!("vicut: {err}");
+	}
+	let output = expr_error(err, span.clone());
+	eprintln!("{output}");
+	std::process::exit(1)
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct ExecCtx {
-	args: Opts,
 	field_num: usize,
 	fields: Vec<(String,String)>, // (name, value)
 	fmt_lines: Vec<Vec<(String,String)>>, // Lines to format output from
 }
 
-#[derive(Clone,Debug, PartialEq)]
-pub enum Cmd {
-	BreakGroup,
-	LoopContinue,
-	LoopBreak,
-	GetBufId,
-	SwitchBuf(CmdArg), // Switch to a different buffer
-	Echo(Vec<CmdArg>),
-	Motion(CmdArg),
-	Field(CmdArg),
-	Return(CmdArg),
-	Push(CmdArg,CmdArg), // Push a value onto an array or string
-	Pop(CmdArg), 				 // Pop a value from an array or string
-	Yank(CmdArg,char), // The char is the register to yank into
-	NamedField(Name,CmdArg),
-	Repeat {
-		body: Vec<Cmd>,
-		count: CmdArg
-	},
-	Global{
-		pattern: CmdArg,
-		then_cmds: Vec<Cmd>,
-		else_cmds: Option<Vec<Cmd>>,
-		polarity: bool // Whether to execute on a match, or on no match
-	},
-	VarDec {
-		name: String,
-		value: CmdArg
-	},
-	MutateVar {
-		name: String,
-		index: Option<CmdArg>,
-		op: BinOp,
-		value: CmdArg
-	},
-	FuncCall {
-		name: String,
-		args: Vec<CmdArg>
-	},
-	FuncDef {
-		name: String,
-		args: Vec<String>, // Names of the arguments
-		body: Vec<Cmd>
-	},
-	ForBlock {
-		var_name: String,
-		iterable: CmdArg, // Must be a String or Array
-											// Strings iterate over characters
-		body: Vec<Cmd>
-	},
-	IfBlock {
-		cond_blocks: Vec<CondBlock>,
-		else_block: Option<Vec<Cmd>>
-	},
-	WhileBlock(CondBlock),
-	UntilBlock(CondBlock),
-}
-
-#[derive(Clone,Debug,PartialEq)]
-pub struct CondBlock {
-	cond: CmdArg, // Must be a CmdArg::Expr(Expr::BoolExp{..})
-	cmds: Vec<Cmd>,
-}
-
-/// The arguments passed to the program by the user
-#[derive(Default,Clone,Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Opts {
-	delimiter: Option<String>,
-	template: Option<String>,
-	max_jobs: Option<u32>,
-	backup_extension: Option<String>,
-
-	edit_inplace: bool,
-	json: bool,
-	trace: bool,
-	linewise: bool,
-	trim_fields: bool,
-	keep_mode: bool,
-	backup_files: bool,
-	single_thread: bool,
-	global_uses_line_numbers: bool,
-	no_input: bool,
-	silent: bool,
-
-	pipe_in: Option<String>,
-	pipe_out: Option<String>,
-	out_file: Option<PathBuf>,
-
-	cmds: Vec<Cmd>,
-	files: Vec<PathBuf>
-}
-
-impl Opts {
-	/// Parse the user's arguments
-	pub fn parse() -> Result<Self,String> {
-		let mut new = Self::default();
-		let mut args = std::env::args().skip(1).peekable();
-		while let Some(arg) = args.next() {
-			match arg.as_str() {
-				"--json" | "-j" => {
-					new.json = true;
-				}
-				"--trace" => {
-					new.trace = true;
-				}
-				"--linewise" => {
-					new.linewise = true;
-				}
-				"--serial" => {
-					new.single_thread = true;
-				}
-				"--trim-fields" => {
-					new.trim_fields = true;
-				}
-				"--keep-mode" => {
-					new.keep_mode = true;
-				}
-				"--backup" => {
-					new.backup_files = true;
-				}
-				"--global-uses-line-numbers" => {
-					new.global_uses_line_numbers = true;
-				}
-				"--silent" => {
-					new.silent = true;
-				}
-				"-i" => {
-					new.edit_inplace = true;
-				}
-				"--template" | "-t" => {
-					let Some(next_arg) = args.next() else {
-						return Err(format!("Expected a format string after '{arg}'"))
-					};
-					if next_arg.starts_with('-') {
-						return Err(format!("Expected a format string after '{arg}', found {next_arg}"))
-					}
-					new.template = Some(next_arg)
-				}
-				"--delimiter" | "-d" => {
-					let Some(next_arg) = args.next() else { continue };
-					if next_arg.starts_with('-') {
-						return Err(format!("Expected a delimiter after '{arg}', found {next_arg}"))
-					}
-					new.delimiter = Some(next_arg)
-				}
-				"-n" | "--next" => new.cmds.push(Cmd::BreakGroup),
-				"-r" | "--repeat" => {
-					let cmd_count = args
-						.next()
-						.unwrap_or("1".into())
-						.parse::<usize>()
-						.map_err(|_| format!("Expected a number after '{arg}'"))?;
-					let repeat_count = args
-						.next()
-						.unwrap_or("1".into())
-						.parse::<usize>()
-						.map_err(|_| format!("Expected a number after '{arg}'"))?;
-
-					let mut body = vec![];
-					let drain_count = new.cmds.len() - cmd_count;
-					body.extend(new.cmds.drain(drain_count..));
-					new.cmds.push(Cmd::Repeat{ body, count: CmdArg::Count(repeat_count + 1) });
-				}
-				"-m" | "--move" => {
-					let Some(arg) = args.next() else { continue };
-					if arg.starts_with('-') {
-						return Err(format!("Expected a motion command after '-m', found {arg}"))
-					}
-					new.cmds.push(Cmd::Motion(CmdArg::Literal(Val::Str(arg))));
-				}
-				"-c" | "--cut" => {
-					let Some(arg) = args.next() else { continue };
-					if arg.starts_with("name=") {
-						let name = arg.strip_prefix("name=").unwrap().to_string();
-						if name == "0" {
-							// We use '0' as a sentinel value to say "We didn't slice any fields, so this field is the entire buffer"
-							// So we can't let people use it arbitrarily, or weird shit starts happening
-							return Err("Field name '0' is a reserved field name.".into())
-						}
-						let Some(arg) = args.next() else { continue };
-						if arg.starts_with('-') {
-							return Err(format!("Expected a selection command after '-c', found {arg}"))
-						}
-						new.cmds.push(Cmd::NamedField(name,CmdArg::Literal(Val::Str(arg))));
-					} else {
-						if arg.starts_with('-') {
-							return Err(format!("Expected a selection command after '-c', found {arg}"))
-						}
-						new.cmds.push(Cmd::Field(CmdArg::Literal(Val::Str(arg))));
-					}
-				}
-				"-v" | "--not-global" |
-				"-g" | "--global" => {
-					let global = Self::handle_global_arg(arg.as_str(), &mut args);
-					new.cmds.push(global);
-				}
-				_ => new.handle_filename(arg)
-			}
-		}
-		Ok(new)
-	}
-	/// Handles `-g` and `-v` global conditionals.
-	///
-	/// `-g` and `-v` are special cases: each introduces a scoped block of commands
-	/// that will only execute if a pattern match (or non-match) succeeds. These blocks
-	/// can contain other nested `-g` or `-v` invocations, as well as `--else` branches
-	/// and `-r` repeats.
-	///
-	/// Because of this recursive structure, we use a recursive descent parser to
-	/// build a nested command execution tree from the input. This allows arbitrarily
-	/// deep combinations of conditionals and scopes, like:
-	///
-	/// ```bash
-	/// vicut -g 'foo' -g 'bar' -c 'd' --else -v 'baz' -c 'y' --end --end
-	/// ```
-	fn handle_global_arg(arg: &str, args: &mut Peekable<Skip<impl Iterator<Item = String>>>) -> Cmd {
-		let polarity = match arg {
-			"-v" | "--not-global" => false,
-			"-g" | "--global" => true,
-			_ => unreachable!("found arg: {arg}")
-		};
-		let mut then_cmds = vec![];
-		let mut else_cmds = None;
-		let Some(arg) = args.next() else {
-			return Cmd::Global {
-				pattern: CmdArg::Literal(Val::Str(arg.into())),
-				then_cmds,
-				else_cmds,
-				polarity
-			};
-		};
-		if arg.starts_with('-') {
-			eprintln!("Expected a selection command after '-c', found {arg}");
-			std::process::exit(1)
-		}
-		while let Some(global_arg) = args.next() {
-			match global_arg.as_str() {
-				"-n" | "--next" => then_cmds.push(Cmd::BreakGroup),
-				"-r" | "--repeat" => {
-					let cmd_count = args
-						.next()
-						.unwrap_or("1".into())
-						.parse::<usize>()
-						.unwrap_or_else(complain_and_exit);
-					let repeat_count = args
-						.next()
-						.unwrap_or("1".into())
-						.parse::<usize>()
-						.unwrap_or_else(complain_and_exit);
-
-					if let Some(else_cmds) = else_cmds.as_mut() {
-						let mut body = vec![];
-						for _ in 0..cmd_count {
-							let Some(cmd) = else_cmds.pop() else { break };
-							body.push(cmd);
-						}
-						else_cmds.push(Cmd::Repeat{ body, count: CmdArg::Count(repeat_count) });
-					} else {
-						let mut body = vec![];
-						for _ in 0..cmd_count {
-							let Some(cmd) = then_cmds.pop() else { break };
-							body.push(cmd);
-						}
-						then_cmds.push(Cmd::Repeat{ body, count: CmdArg::Count(repeat_count) });
-					}
-				}
-				"-m" | "--move" => {
-					let Some(arg) = args.next() else { continue };
-					if arg.starts_with('-') {
-						eprintln!("Expected a motion command after '-m', found {arg}");
-						std::process::exit(1);
-					}
-					if let Some(else_cmds) = else_cmds.as_mut() {
-						else_cmds.push(Cmd::Motion(CmdArg::Literal(Val::Str(arg))));
-					} else {
-						then_cmds.push(Cmd::Motion(CmdArg::Literal(Val::Str(arg))));
-					}
-				}
-				"-c" | "--cut" => {
-					let Some(arg) = args.next() else { continue };
-					if arg.starts_with("name=") {
-						let name = arg.strip_prefix("name=").unwrap().to_string();
-						let Some(arg) = args.next() else { continue };
-						if arg.starts_with('-') {
-							eprintln!("Expected a selection command after '-c', found {arg}");
-							std::process::exit(1);
-						}
-						if let Some(cmds) = else_cmds.as_mut() {
-							cmds.push(Cmd::NamedField(name,CmdArg::Literal(Val::Str(arg))));
-						} else {
-							then_cmds.push(Cmd::NamedField(name,CmdArg::Literal(Val::Str(arg))));
-						}
-					} else {
-						if arg.starts_with('-') {
-							eprintln!("Expected a selection command after '-c', found {arg}");
-							std::process::exit(1);
-						}
-						if let Some(cmds) = else_cmds.as_mut() {
-							cmds.push(Cmd::Field(CmdArg::Literal(Val::Str(arg))));
-						} else {
-							then_cmds.push(Cmd::Field(CmdArg::Literal(Val::Str(arg))));
-						}
-					}
-				}
-				"-g" | "--global" |
-				"-v" | "--not-global" => {
-					let nested = Self::handle_global_arg(&global_arg, args);
-					if let Some(cmds) = else_cmds.as_mut() {
-						cmds.push(nested);
-					} else {
-						then_cmds.push(nested);
-					}
-				}
-				"--else" => {
-					// Now we start working on this
-					else_cmds = Some(vec![]);
-				}
-				"--end" => {
-					// We're done here
-					return Cmd::Global {
-						pattern: CmdArg::Literal(Val::Str(arg)),
-						then_cmds,
-						else_cmds,
-						polarity
-					};
-				}
-				_ => {
-					eprintln!("Expected command flag in '-g' scope\nDid you forget to close '-g' with '--end'?");
-					std::process::exit(1);
-				}
-			}
-			if args.peek().is_some_and(|arg| !arg.starts_with('-')) { break }
-		}
-
-		// If we got here, we have run out of arguments
-		// Let's just submit the current -g commands.
-		// no need to be pressed about a missing '--end' when nothing would come after it
-		Cmd::Global {
-			pattern: CmdArg::Literal(Val::Str(arg)),
-			then_cmds,
-			else_cmds,
-			polarity
-		}
-	}
-	pub fn from_script(script: PathBuf) -> Result<Self,String> {
-		let script_content = fs::read_to_string(&script)
-			.map_err(|_| format!("vicut: failed to read script file '{}'",script.display()))?;
-		vic::parse_vic(&script_content)
-			.map_err(|e| format!("vicut: failed to parse script file '{}': {e}",script.display()))
-	}
-	pub fn from_raw(script: &str) -> Result<Self,String> {
-		vic::parse_vic(script)
-			.map_err(|e| format!("vicut: failed to parse script: {e}"))
-	}
-	fn validate_filename(filename: &str) -> Result<(),String> {
-		let path = PathBuf::from(filename.trim().to_string());
-		if !path.exists() {
-			return Err(format!("vicut: file not found '{}'",path.display()));
-		}
-		if !path.is_file() {
-			return Err(format!("vicut: '{}' is not a file",path.display()));
-		}
-		if fs::File::open(&path).is_err() {
-			return Err(format!("vicut: failed to read file '{}'",path.display()));
-		}
-		Ok(())
-	}
-	/// Handle a filename passed as an argument.
-	///
-	/// Checks to make sure the following invariants are met:
-	/// 1. The path given exists.
-	/// 2. The path given refers to a file.
-	/// 3. The path given refers to a file that we are allowed to read.
-	///
-	/// We check all three separately instead of just the last one, so that we can give better error messages
-	fn handle_filename(&mut self, filename: String) {
-		if let Err(e) = Self::validate_filename(&filename) {
-			eprintln!("{e}");
-			std::process::exit(1);
-		}
-		let path = PathBuf::from(filename.trim().to_string());
-		if !self.files.contains(&path) {
-			self.files.push(path)
-		}
-	}
+    pub delimiter: Option<String>,
+    pub template: Option<String>,
+    pub max_jobs: Option<u32>,
+    pub backup_extension: Option<String>,
+    pub edit_inplace: Option<bool>,
+    pub json: Option<bool>,
+    pub trace: Option<bool>,
+    pub linewise: Option<bool>,
+    pub trim_fields: Option<bool>,
+    pub keep_mode: Option<bool>,
+    pub backup_files: Option<bool>,
+    pub single_thread: Option<bool>,
+    pub global_uses_line_numbers: Option<bool>,
+    pub no_input: Option<bool>,
+    pub silent: Option<bool>,
+    pub pipe_in: Option<String>,
+    pub pipe_out: Option<String>,
+    pub out_file: Option<PathBuf>,
+    pub vic: Option<String>,
+    pub files: Option<Vec<PathBuf>>,
 }
 
 /// "Get some help" - Michael Jordan
@@ -774,7 +422,7 @@ fn execute(args: &Opts, input: String, filename: Option<PathBuf>) -> Result<Vec<
 		fields,
 		fmt_lines
 	};
-	for cmd in &args.cmds {
+	for cmd in &args.vic {
 		exec_cmd(
 			cmd,
 			&mut vicut,
@@ -796,13 +444,6 @@ fn execute(args: &Opts, input: String, filename: Option<PathBuf>) -> Result<Vec<
 	// Let's figure out if we want to print the whole buffer
 	let no_fields = ctx.fmt_lines.is_empty(); // No fields were extracted
 	let has_files = !ctx.args.files.is_empty(); // We have files to edit
-	let has_pattern_search = ctx.args.cmds.iter().any(|cmd| {
-		if let Cmd::Global { then_cmds, .. } = cmd {
-			then_cmds.iter().any(|cmd| matches!(cmd, Cmd::Field(_) | Cmd::NamedField(_, _)))
-		} else {
-			false
-		}
-	});
 	let editing_inplace = args.edit_inplace; // We are not editing in place
 
 	// If we have not extracted any fields, and the following conditions are true:
@@ -811,7 +452,7 @@ fn execute(args: &Opts, input: String, filename: Option<PathBuf>) -> Result<Vec<
 	// * We have a pattern search with at least one field extraction
 	//
 	// then we print the entire buffer
-	let should_print_entire_buffer = (!has_pattern_search && (!editing_inplace || !has_files)) && no_fields;
+	let should_print_entire_buffer = (!editing_inplace || !has_files) && no_fields;
 
 	if should_print_entire_buffer {
 		let big_line = vicut.current_buffer().buffer.clone();
@@ -862,66 +503,56 @@ fn get_lines(value: &str) -> Vec<String> {
 
 /// Execute a single `Cmd`
 fn exec_cmd(
-	cmd: &Cmd,
+	cmd: &Expr,
 	vicut: &mut ViCut,
 	ctx: &mut ExecCtx,
 ) -> Option<Val>{
+	let Expr { value: cmd, index, span } = cmd;
 	match cmd {
-		Cmd::SwitchBuf(id) => {
-			let Val::Num(id) = vicut.eval_cmd_arg(id,ctx).unwrap_or_else(complain_and_exit) else {
-				eprintln!("vicut: expected a number for buffer ID, found {id}");
-				std::process::exit(1);
-			};
+    ExprKind::Command(Command::ShellCmd { cmd }) => {
+			// Evaluate the shell command and execute it
+			let _ = vicut.eval_cmd_arg(cmd, ctx).unwrap_or_else(complain_and_exit);
+		}
+    ExprKind::Command(Command::BufSwitch { id }) => {
+			let Val::Num(id) = vicut.eval_cmd_arg(id,ctx).unwrap_or_else(|err| blame_span(*span, err)) else {
+				blame_span(*span, "vicut: expected a number for buffer ID")
+			}; 
 			vicut.editor.set(id as usize);
 		}
-		Cmd::GetBufId => {
+		ExprKind::Command(Command::Include { path }) => {
+			todo!()
+		}
+    ExprKind::Command(Command::BufId) => {
 			// Get the current buffer's ID
 			let buf_id = vicut.editor.get();
 			return Some(Val::Num(buf_id as isize));
 		}
-		Cmd::Push(stack_var, arg) => {
-			let stack_var = match stack_var {
-				CmdArg::Null => return None,
-				CmdArg::Literal(val) => val.to_string(),
-				CmdArg::Var(var) => var.to_string(),
-				CmdArg::Count(_) => return None,
-				CmdArg::Expr(expr) => vicut.eval_expr(expr, ctx).unwrap_or_else(complain_and_exit).to_string(),
-			};
-			let value = vicut.eval_cmd_arg(arg, ctx).unwrap_or_else(complain_and_exit).clone();
-			if stack_var == "buffers" {
+    ExprKind::Command(Command::Push { stack, value }) => {
+			let stack_var = vicut.eval_expr(stack).unwrap_or_else(|| blame_span(span,err));
+			let value = vicut.eval_cmd_arg(value, ctx).unwrap_or_else(complain_and_exit).clone();
+			if &stack_var.to_string() == "buffers" {
 				// the 'buffers' variable is a built-in which holds all of the currently open buffers
 				// so now we push the given data onto it as a new LineBuf
 				vicut.push_buffer(value);
 				return None
 			}
-			let stack = vicut.get_var_mut(&stack_var)
+
+			let stack = vicut.get_var_mut(&stack_var.to_string())
 				.ok_or_else(|| format!("vicut: variable '{stack_var}' not found"))
 				.unwrap_or_else(complain_and_exit);
-			let Ok(iterable) = CompoundVal::try_from(stack.clone()) else {
-				eprintln!("vicut: expected an array or string for variable '{stack_var}', found {value}");
-				std::process::exit(1);
-			};
-			let new_val = match iterable {
-				CompoundVal::Str(mut str) => {
+			match stack {
+				Val::Str(str) => {
 					str.push_str(&value.to_string());
-					Val::Str(str)
 				}
-				CompoundVal::Arr(mut vals) => {
-					vals.push(value);
-					Val::Arr(vals)
+				Val::Arr(arr) => {
+					arr.push(value);
 				}
-			};
-			*stack = new_val.clone();
+				_ => blame_span(span, format!("vicut: expected a list or string for variable '{stack_var}', found {stack}"))
+			}
 		}
-		Cmd::Pop(stack_var) => {
-			let stack_var = match stack_var {
-				CmdArg::Null => return None,
-				CmdArg::Literal(val) => val.to_string(),
-				CmdArg::Var(var) => var.to_string(),
-				CmdArg::Count(_) => return None,
-				CmdArg::Expr(expr) => vicut.eval_expr(expr, ctx).unwrap_or_else(complain_and_exit).to_string(),
-			};
-			if stack_var == "buffers" {
+    ExprKind::Command(Command::Pop { stack }) => {
+			let stack_var = vicut.eval_expr(stack, ctx).unwrap_or_else(|err| blame_span(span,err)).to_string();
+			if &stack_var == "buffers" {
 				// the 'buffers' variable is a built-in which holds all of the currently open buffers
 				// so now we pop the last buffer off of it
 				// we are in a command context, so we can ignore the return value
@@ -929,82 +560,73 @@ fn exec_cmd(
 				return None
 			}
 			let Some(stack_val) = vicut.get_var_mut(&stack_var) else {
-				eprintln!("vicut: variable '{stack_var}' not found");
-				std::process::exit(1);
+				blame_span(span, format!("vicut: variable '{stack_var}' not found"))
 			};
-			let iterable = CompoundVal::try_from(stack_val.clone()).unwrap_or_else(|_| {
-				eprintln!("vicut: expected a list or map for variable '{stack_var}', found {stack_val}");
-				std::process::exit(1);
-			});
-			let popped_value = match iterable {
-				CompoundVal::Str(mut str) => {
-					let last_char = str.pop()?;
-					*stack_val = Val::Str(str);
-					Val::Str(last_char.to_string())
+
+			let popped_value = match stack_val {
+				Val::Str(str) => {
+					let mut graphemes = str.graphemes(true);
+					let popped = graphemes.next_back();
+					*str = graphemes.collect::<String>();
+					popped.map(|gr| Val::Str(gr.into()))
 				}
-				CompoundVal::Arr(mut vals) => {
-					let popped_value = vals.pop()?;
-					*stack_val = Val::Arr(vals);
-					popped_value
+				Val::Arr(arr) => {
+					arr.pop()
 				}
+				_ => blame_span(span, format!("vicut: expected a list or string for variable '{stack_var}', found {stack_val}"))
 			};
-			return Some(popped_value)
+			return popped_value
 		}
-		Cmd::LoopBreak |
-		Cmd::LoopContinue => {
+    ExprKind::Command(Command::Break) |
+		ExprKind::Command(Command::Continue) => {
 			// These are only checked for in loop contexts
 			// We can just return
 			return None
 		}
-		Cmd::Yank(arg,reg) => {
+    ExprKind::Command(Command::Yank { register, motion }) => {
 			// Evaluate the arg and yank it into the given register
-			let value = vicut.eval_cmd_arg(arg, ctx).unwrap_or_else(complain_and_exit);
+			let reg = vicut.eval_expr(register, ctx).unwrap_or_else(|err| blame_span(span, err)).to_string()
+				.chars().next().unwrap_or_else(|| blame_span(span, format!("vicut: expected a register name, found empty string")));
+			let motion = vicut.eval_expr(motion, ctx).unwrap_or_else(|err| blame_span(span, err)).to_string();
+
+			let value = vicut.read_field(&motion).unwrap_or_else(|err| blame_span(span, err));
 
 			// Uppercase register name means "append to the register"
 			if reg.is_ascii_uppercase() {
-				append_register(Some(*reg), RegisterContent::Span(value.to_string()));
+				append_register(Some(reg), RegisterContent::Span(value.to_string()));
 			} else {
-				write_register(Some(*reg), RegisterContent::Span(value.to_string()));
+				write_register(Some(reg), RegisterContent::Span(value.to_string()));
 			}
 		}
-		Cmd::Return(arg) => {
+    ExprKind::Command(Command::Return { ret }) => {
+			let Some(ret) = ret else {
+				return Some(Val::Null)
+			};
 			// Evaluate the argument and return it
 			// This is the only branch that returns a value
-			let value = vicut.eval_cmd_arg(arg, ctx).unwrap_or_else(complain_and_exit);
+			let value = vicut.eval_expr(ret, ctx).unwrap_or_else(|err| blame_span(span, err));
 			return Some(value)
 		}
-		Cmd::FuncDef { name, args, body } => {
-			// Define a function
-			vicut.set_function(name.clone(), args.clone(), body.clone());
-		}
-		Cmd::FuncCall { name, args: call_args } => {
-			let func_args = call_args
-				.iter()
-				.map(|arg| vicut.eval_cmd_arg(arg, ctx).unwrap_or_else(complain_and_exit))
-				.collect::<Vec<_>>();
-			vicut.eval_function(name.to_string(), func_args, ctx).unwrap_or_else(complain_and_exit);
-		}
-		Cmd::Echo(args) => {
+    ExprKind::Command(Command::Echo { args }) => {
 			if args.is_empty() {
 				println!();
 				return None
 			}
 			let mut display_args = vec![];
 			for arg in args {
-				let value = vicut.eval_cmd_arg(arg,ctx).unwrap_or_else(complain_and_exit);
+				let value = vicut.eval_expr(arg, ctx).unwrap_or_else(|err| blame_span(span, err));
 
 				display_args.push(value.to_string());
 			}
 			let output = display_args.join(" ");
 			println!("{output}");
 		}
-		// -r <N> <R>
-		Cmd::Repeat{ body, count } => {
+    ExprKind::Command(Command::Repeat { count, block }) => {
 			let n_repeats = vicut.eval_count(count).unwrap_or_else(complain_and_exit);
 			vicut.descend(); // new scope
 			for _ in 0..n_repeats {
 
-				for r_cmd in body {
+				for r_cmd in block {
 					// We use recursion so that we can nest repeats easily
 					exec_cmd(
 						r_cmd,
@@ -1018,22 +640,10 @@ fn exec_cmd(
 			}
 			vicut.ascend(); // leave scope
 		}
-		// -g/-v <PATTERN> <COMMANDS> [--else <COMMANDS>]
-		Cmd::Global { pattern, then_cmds, else_cmds, polarity } => {
-			let pattern = match pattern {
-				CmdArg::Literal(pattern) => pattern.clone(),
-				CmdArg::Var(var) => {
-					let Some(val) = vicut.get_var(var) else {
-						eprintln!("vicut: variable '{var}' not found");
-						std::process::exit(1)
-					};
-					val.clone()
-				}
-				CmdArg::Expr(exp) => {
-					vicut.eval_expr(exp, ctx).unwrap_or_else(complain_and_exit)
-				}
-				_ => unreachable!()
-			};
+    ExprKind::Command(Command::NotGlobal { pattern, block }) |
+		ExprKind::Command(Command::Global { pattern, block }) => {
+			let polarity = matches!(cmd, ExprKind::Command(Command::Global { .. }));
+			let pattern = vicut.eval_expr(pattern, ctx).unwrap_or_else(|err| blame_span(span, err)).to_string();
 			let motion = match polarity {
 				false  => Motion::NotGlobal(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pattern),
 				true => Motion::Global(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pattern)
@@ -1058,7 +668,7 @@ fn exec_cmd(
 					// Execute our commands
 
 					vicut.descend(); // new scope
-					for cmd in then_cmds {
+					for cmd in block {
 						exec_cmd(
 							cmd,
 							vicut,
@@ -1070,31 +680,15 @@ fn exec_cmd(
 					}
 					vicut.ascend(); // leave scope
 				}
-			} else if let Some(else_cmds) = else_cmds {
-				// Negative branch
-				vicut.descend();
-				for cmd in else_cmds {
-					exec_cmd(
-						cmd,
-						vicut,
-						ctx,
-					);
-					if !ctx.args.keep_mode {
-						vicut.set_normal_mode();
-					}
-				}
-				vicut.ascend();
-			}
+			} 	
 		}
-		// -m <VIM_CMDS>
-		Cmd::Motion(motion) => {
-			let motion = vicut.eval_cmd_arg(motion,ctx).unwrap_or_else(complain_and_exit).to_string();
+    ExprKind::Command(Command::Move { motion }) => {
+			let motion = vicut.eval_expr(motion, ctx).unwrap_or_else(|err| blame_span(span, err)).to_string();
 			if let Err(e) = vicut.move_cursor(&motion) {
-				eprintln!("vicut: {e}");
+				blame_span(span, e);
 			}
 		}
-		// -c <VIM_CMDS>
-		Cmd::Field(motion) => {
+    ExprKind::Command(Command::Cut { motion }) => {
 			let motion = vicut.eval_cmd_arg(motion,ctx).unwrap_or_else(complain_and_exit).to_string();
 			ctx.field_num += 1;
 			match vicut.read_field(&motion) {
@@ -1107,20 +701,7 @@ fn exec_cmd(
 				}
 			}
 		}
-		// -c name=<NAME> <VIM_CMDS>
-		Cmd::NamedField(name, motion) => {
-			trace!("Executing capturing command with name '{name}': {motion}");
-			let motion = vicut.eval_cmd_arg(motion,ctx).unwrap_or_else(complain_and_exit).to_string();
-			ctx.field_num += 1;
-			match vicut.read_field(&motion) {
-				Ok(field) => ctx.fields.push((name.clone(),field)),
-				Err(e) => {
-					eprintln!("vicut: {e}");
-				}
-			}
-		}
-		// -n
-		Cmd::BreakGroup => {
+    ExprKind::Command(Command::Next) => {
 			if ctx.args.trace {
 				trace!("Breaking field group with fields: ");
 				for field in &mut ctx.fields {
@@ -1134,14 +715,27 @@ fn exec_cmd(
 				ctx.fmt_lines.push(std::mem::take(&mut ctx.fields));
 			}
 		}
-		Cmd::VarDec { name, value } => {
-			let value = vicut.eval_cmd_arg(value,ctx).unwrap_or_else(complain_and_exit);
-			vicut.set_var(name.clone(), value.clone()).unwrap_or_else(complain_and_exit);
+    ExprKind::FuncDef { name, params, body } => {
+			// Define a function
+			vicut.set_function(name.clone(), params.clone(), body.clone());
 		}
-		Cmd::MutateVar { name, index, op, value } => {
-			let value = vicut.eval_cmd_arg(value,ctx).unwrap_or_else(complain_and_exit);
+    ExprKind::FuncCall { name, args } => {
+			// Func calls use evaluated names, so that stuff like func_ptr_array[0](arg1,arg2) is valid
+			let name = vicut.eval_expr(name, ctx).unwrap_or_else(|err| blame_span(span, err)).to_string();
+			let func_args = args
+				.iter()
+				.map(|arg| vicut.eval_expr(arg, ctx).unwrap_or_else(|err| blame_span(span, err)))
+				.collect::<Vec<_>>();
+			vicut.eval_function(name, func_args, ctx).unwrap_or_else(complain_and_exit);
+		}
+    ExprKind::VarDec { name, value } => {
+			let value = vicut.eval_expr(name, ctx).unwrap_or_else(|err| blame_span(span, err));
+			vicut.set_var(name.clone(), value.clone()).unwrap_or_else(|err| blame_span(span, err));
+		}
+    ExprKind::VarMut { name, op, value } => {
+			let value = vicut.eval_expr(name, ctx).unwrap_or_else(|err| blame_span(span, err));
 			if let Some(index) = index {
-				let index = vicut.eval_cmd_arg(index,ctx).unwrap_or_else(complain_and_exit);
+				let index = vicut.eval_expr(index,ctx).unwrap_or_else(complain_and_exit);
 				let Val::Num(index) =  index else {
 					eprintln!("vicut: expected number for index");
 					std::process::exit(1);
@@ -1152,15 +746,17 @@ fn exec_cmd(
 				vicut.mutate_var(name.clone(), op.clone(), value.clone()).unwrap_or_else(complain_and_exit);
 			}
 		}
-		Cmd::IfBlock { cond_blocks, else_block } => {
+    ExprKind::IfBlock { cond_blocks, else_block } => {
 			let mut executed = false;
 			for block in cond_blocks {
-				let CondBlock { cond, cmds } = block;
-				let result = cond.is_truthy(vicut,ctx);
+				let Expr { value, .. } = block;
+				let ExprKind::CondBlock { cond, body } = value else { unreachable!() };
+				let cond_value = vicut.eval_expr(cond, ctx).unwrap_or_else(|err| blame_span(span, err));
+				let result = cond_value.is_truthy(vicut);
 				if result {
 					executed = true;
 					vicut.descend(); // new scope
-					for cmd in cmds {
+					for cmd in body {
 						exec_cmd(
 							cmd,
 							vicut,
@@ -1192,27 +788,19 @@ fn exec_cmd(
 				}
 			}
 		}
-		Cmd::ForBlock { var_name, iterable, body } => {
-			let val = vicut.eval_cmd_arg(iterable,ctx).unwrap_or_else(complain_and_exit);
-			let val_iter = CompoundVal::try_from(val).unwrap_or_else(complain_and_exit);
-			let iter = val_iter.into_iter().collect::<Vec<_>>();
-			if iter.is_empty() {
-				return None;
-			}
-			'main: for item in iter {
-				if cmd == &Cmd::LoopBreak {
-					break;
-				}
-				if cmd == &Cmd::LoopContinue {
-					continue;
-				}
+    ExprKind::ForBlock { var_name, list, body } => {
+			let val = vicut.eval_expr(var_name,ctx).unwrap_or_else(|err| blame_span(span, err));
+			let val_iter = val.try_into_iter().unwrap_or_else(|err| blame_span(span, err));
+
+			'main: for item in val_iter {
 				vicut.descend(); // new scope
 				vicut.set_var(var_name.clone(), item).unwrap_or_else(complain_and_exit);
 				for cmd in body {
-					if cmd == &Cmd::LoopBreak {
+
+					if cmd.is_break() {
 						break 'main;
 					}
-					if cmd == &Cmd::LoopContinue {
+					if cmd.is_continue() {
 						continue 'main;
 					}
 					exec_cmd(
@@ -1227,39 +815,26 @@ fn exec_cmd(
 				vicut.ascend(); // leave scope
 			}
 		}
-		Cmd::WhileBlock(cond_block) => {
-			let CondBlock { cond, cmds } = cond_block;
-			'main: while cond.is_truthy(vicut,ctx) {
+    ExprKind::UntilBlock { cond, body } |
+		ExprKind::WhileBlock { cond, body } => {
+			// This is the function we will use to see if we are still running
+			let running = |vicut: &mut ViCut, ctx: &mut ExecCtx<'_>| {
+				let result = vicut.eval_expr(cond, ctx).unwrap_or_else(|err| blame_span(span, err)).is_truthy(vicut); 
+				if matches!(cmd, ExprKind::WhileBlock { .. }) {
+					result
+				} else {
+					!result
+				}
+			};
+
+			while running(vicut,ctx) {
 				vicut.descend(); // new scope
-				for cmd in cmds {
-					if cmd == &Cmd::LoopBreak {
-						break 'main;
+				for cmd in body {
+					if cmd.is_break() {
+						break;
 					}
-					if cmd == &Cmd::LoopContinue {
-						continue 'main;
-					}
-					exec_cmd(
-						cmd,
-						vicut,
-						ctx
-					);
-					if !ctx.args.keep_mode {
-						vicut.set_normal_mode();
-					}
-				}
-				vicut.ascend(); // leave scope
-			}
-		}
-		Cmd::UntilBlock(cond_block) => {
-			let CondBlock { cond, cmds } = cond_block;
-			'main: while !cond.is_truthy(vicut,ctx) {
-				vicut.descend(); // new scope
-				for cmd in cmds {
-					if cmd == &Cmd::LoopBreak {
-						break 'main;
-					}
-					if cmd == &Cmd::LoopContinue {
-						continue 'main;
+					if cmd.is_continue() {
+						continue;
 					}
 					exec_cmd(
 						cmd,
@@ -1273,7 +848,17 @@ fn exec_cmd(
 				vicut.ascend(); // leave scope
 			}
 		}
-	}
+    ExprKind::Vic(exprs) => todo!(),
+    ExprKind::TopLevel(expr) => todo!(),
+    ExprKind::Block(exprs) => todo!(),
+    ExprKind::Value(val) => todo!(),
+    ExprKind::Opts(exprs) => todo!(),
+    ExprKind::Opt { name, arg } => todo!(),
+    ExprKind::CondBlock { cond, body } => todo!(),
+    ExprKind::Range { start, end } => todo!(),
+    ExprKind::BinaryExpr { left, op, right } => todo!(),
+    ExprKind::BoolExpr { left, op, right } => todo!(),
+}
 	None
 }
 
@@ -1697,15 +1282,17 @@ fn print_help_or_version() {
 fn main_script() {
 	// Is it a script file? or an in-line script?
 	let maybe_script = std::env::args().nth(1).unwrap();
-	let opts = if Opts::validate_filename(&maybe_script).is_err() {
-		// It's not a file...
-		// Let's see if it's a valid in-line script
-		Opts::from_raw(&maybe_script).unwrap_or_else(complain_and_exit)
+	let mut opts = Opts::default();
+	let script_content = if Path::new(&maybe_script).is_file() {
+		// It's a file?
+		// Let's read it and see if it parses
+		fs::read_to_string(&maybe_script).unwrap()
 	} else {
-		// It's a file, let's see if it's a valid script
-		let script_path = PathBuf::from(maybe_script);
-		Opts::from_script(script_path).unwrap_or_else(complain_and_exit)
+		// It's a raw script as an argument
+		// Let's just parse it
+		maybe_script
 	};
+	opts.parse_vic(&script_content);
 
 
 	init_logger(opts.trace);
@@ -1739,10 +1326,11 @@ fn main() {
 	let mut args = std::env::args();
 	args.find(|arg| arg == "--script"); // let's find the --script flag
 	let script = args.next(); // If we found it, the next arg is the script name
+	let mut vicut = ViCut::empty();
 
-	let opts = if let Some(script) = script {
+	let script_src = if let Some(script) = script {
 		let script = PathBuf::from(script);
-		Opts::from_script(script).unwrap_or_else(complain_and_exit)
+		fs::read_to_string(script).unwrap_or_else(complain_and_exit)
 	} else {
 		// Let's see if we got a literal in-line script instead then
 		let mut flags = std::env::args().take_while(|arg| arg != "--");
@@ -1752,43 +1340,59 @@ fn main() {
 			// We know that there's at least one argument, so we can safely unwrap
 			let mut args = std::env::args().skip(1);
 			let maybe_script = args.next().unwrap();
-			let mut opts = if Opts::validate_filename(&maybe_script).is_err() {
+			let script_src = if Opts::validate_filename(&maybe_script).is_err() {
 				// It's not a file...
 				// Let's see if it's a valid in-line script
-				Opts::from_raw(&maybe_script).unwrap_or_else(complain_and_exit)
+				maybe_script
 			} else {
 				// It's a file, let's see if it's a valid script
 				let script_path = PathBuf::from(maybe_script);
-				Opts::from_script(script_path).unwrap_or_else(complain_and_exit)
+				fs::read_to_string(script_path).unwrap_or_else(complain_and_exit)
 			};
 			// Now let's grab the file names
 			for arg in args {
-				if let Err(e) = Opts::validate_filename(&arg) {
+				if let Err(e) = validate_filename(&arg) {
 					eprintln!("vicut: {e}");
 					std::process::exit(1);
 				}
-				opts.files.push(PathBuf::from(arg));
+				vicut.push_file(PathBuf::from(arg));
 			}
-			opts
+			script_src
 		} else {
 			// We're using command line arguments
 			// boo
-			Opts::parse().unwrap_or_else(complain_and_exit)
+			complain_and_exit("Did not find a vic script to parse")
 		}
 	};
 
-	init_logger(opts.trace);
+	vicut.parse_vic(&script_src).unwrap_or_else(complain_and_exit);
 
-	if opts.no_input {
+	init_logger(vicut.find_opt(|opts| opts.trace).unwrap_or_default());
+
+	if vicut.find_opt(|opts| opts.no_input).unwrap_or_default() {
 		let output = execute(&opts, String::new(), None).unwrap_or_else(complain_and_exit);
 		let mut stdout = io::stdout().lock();
 		let output = format_output(&opts, output);
 		write!(stdout, "{output}").ok();
-	} else if opts.linewise {
+	} else if vicut.find_opt(|o| o.linewise).unwrap_or_default() {
 		exec_linewise(&opts);
-	} else if !opts.files.is_empty() {
+	} else if vicut.find_opt(|o| o.files).is_some_and(|f| !f.is_empty()) {
 		exec_files(&opts);
 	} else {
 		exec_stdin(&opts);
 	}
+}
+
+pub fn validate_filename(filename: &str) -> Result<(),String> {
+	let path = PathBuf::from(filename.trim().to_string());
+	if !path.exists() {
+		return Err(format!("vicut: file not found '{}'",path.display()));
+	}
+	if !path.is_file() {
+		return Err(format!("vicut: '{}' is not a file",path.display()));
+	}
+	if fs::File::open(&path).is_err() {
+		return Err(format!("vicut: failed to read file '{}'",path.display()));
+	}
+	Ok(())
 }

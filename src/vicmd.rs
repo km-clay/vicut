@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use bitflags::bitflags;
 
-use crate::{exec::Val, linebuf::SelectRange, modes::ex::SubFlags, register::{RegisterContent, REGISTERS}};
+use crate::{vic::parse::Val, linebuf::SelectRange, modes::ex::SubFlags, register::{RegisterContent, REGISTERS}};
 
 use super::register::{append_register, read_register, write_register};
 
@@ -556,3 +556,5 @@ pub enum To {
 	Start,
 	End
 }
+
+

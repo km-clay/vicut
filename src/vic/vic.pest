@@ -3,15 +3,15 @@ COMMENT    = _{ !"\\" ~ "#" ~ (!NEWLINE ~ ANY)+ ~ NEWLINE? }
 
 // Prelude options
 
-backup_ext               = { "backup_ext" ~ "=" ~ atomic_string }
-template                 = { "template" ~ "=" ~ atomic_string }
-delimiter                = { "delimiter" ~ "=" ~ atomic_string }
-file                     = { "file" ~ "=" ~ "\"" ~ inner ~ "\"" }
-files                    = { "files" ~ "=" ~ "[" ~ (("\"" ~ inner ~ "\"" ~ ",")* ~ ("\"" ~ inner ~ "\"")?)? ~ "]" }
-pipe_in                  = { "pipe_in" ~ "=" ~ atomic_string }
-pipe_out                 = { "pipe_out" ~ "=" ~ atomic_string }
-write                    = { "write" ~ "=" ~ "\"" ~ inner ~ "\"" }
-max_jobs                 = { "max_jobs" ~ "=" ~ "\"" ~ int ~ "\"" }
+backup_ext               = { "backup_ext" ~ "=" ~ expr }
+template                 = { "template" ~ "=" ~ expr }
+delimiter                = { "delimiter" ~ "=" ~ expr }
+file                     = { "file" ~ "=" ~ expr }
+files                    = { "files" ~ "=" ~ expr }
+pipe_in                  = { "pipe_in" ~ "=" ~ expr }
+pipe_out                 = { "pipe_out" ~ "=" ~ expr }
+write                    = { "write" ~ "=" ~ expr }
+max_jobs                 = { "max_jobs" ~ "=" ~ expr }
 trace                    = { "trace" }
 json                     = { "json" }
 linewise                 = { "linewise" }
@@ -24,7 +24,7 @@ silent                   = { "silent" }
 no_input                 = { "no_input" }
 global_uses_line_numbers = { "global_uses_line_numbers" }
 
-opt        = {
+opt    = {
     json
   | pipe_in
   | pipe_out
@@ -46,171 +46,193 @@ opt        = {
   | write
   | files
 }
-opts_block = { "{" ~ ((opt ~ ",")* ~ opt?)? ~ "}" }
-prelude    = { "opts" ~ opts_block }
+opts = { "opt" ~ "{" ~ ((opt ~ ",")* ~ opt?)? ~ "}" }
 
-// Commands
+// Script Commands
+// Whitespace positioning needs to be enforced strictly here
 
-global        = _{ "global" | "g" }
-not_global    = _{ "v" | "not_global" | "!global" }
-move          = _{ "move" | "m" }
-cut           = _{ "cut" | "c" }
-next          =  { "next" | "n" }
-echo          = _{ "echo" }
-repeat        = _{ "repeat" | "r" }
-yank          = _{ "yank" | "y" }
-break_loop    = _{ "break" }
-push          = _{ "push" }
-pop           = _{ "pop" }
-continue_loop = _{ "continue" }
-return        = _{ "return" | "ret" }
+global        = ${ ("global" | "g") ~ " "+ ~ expr ~ WHITESPACE* ~ block ~ WHITESPACE* }
+not_global    = ${ ("v" | "not_global" | "!global") ~ " "+ ~ expr ~ WHITESPACE* ~ block ~ WHITESPACE* }
+move          = ${ ("move" | "m") ~ " "+ ~ expr ~ WHITESPACE* }
+cut           = ${ ("cut" | "c") ~ " "+ ~ expr ~ WHITESPACE* }
+next          = ${ "next" | "n" ~ WHITESPACE* }
+echo          = ${ ("echo") ~ (" "+ ~ expr)* }
+repeat        = ${ ("repeat" | "r") ~ " "+ ~ expr ~ " "+ ~ block }
+yank          = ${ ("yank" | "y") ~ " "+ ~ expr ~ " "+ ~ expr ~ WHITESPACE* }
+break_loop    = ${ ("break") ~ WHITESPACE* }
+shell_cmd     = ${ ("command" | "cmd") ~ " "+ ~ expr ~ WHITESPACE* }
+push          = ${ ("push") ~ " "+ ~ expr ~ " "+ ~ expr ~ WHITESPACE* }
+pop           = ${ ("pop") ~ " "+ ~ expr ~ WHITESPACE* }
+buf_cmd       = ${ "buf" ~ " "+ ~ buf_cmd_arg ~ WHITESPACE* }
+buf_cmd_arg   = ${ (buf_switch ~ WHITESPACE+ ~ expr) | buf_id }
+buf_switch    = ${ "switch" }
+buf_id        = ${ "id" }
+continue_loop = ${ ("continue") ~ WHITESPACE* }
+return        = ${ ("return" | "ret") ~ " "+ ~ expr ~ WHITESPACE* }
+include       = ${ ("include") ~ " "+ ~ expr ~ WHITESPACE* }
 
-include        =  { "include" ~ atomic_string }
-alias          =  { "alias" ~ var_name ~ block }
-repeat_cmd     = ${ repeat ~ WHITESPACE+ ~ (int | var) ~ WHITESPACE+ ~ block }
-global_cmd     = ${ global ~ WHITESPACE+ ~ pattern ~ WHITESPACE+ ~ block ~ WHITESPACE+ ~ ("else" ~ WHITESPACE+ ~ block)? }
-move_cmd       = ${ move ~ WHITESPACE+ ~ vim_cmd }
-buf_cmd        = ${ buf_switch | buf_id }
-buf_switch     = ${ "buf" ~ WHITESPACE+ ~ "switch" ~ WHITESPACE+ ~ expr }
-buf_id         = ${ "buf" ~ WHITESPACE+ ~ "id" }
-echo_cmd       = ${ echo ~ (" "+ ~ expr)* }
-cut_cmd        = ${ cut ~ (WHITESPACE+ ~ name_def)? ~ WHITESPACE+ ~ vim_cmd }
-return_cmd     = ${ return ~ (WHITESPACE+ ~ vim_cmd)? }
-push_cmd       = ${ push ~ WHITESPACE+ ~ var ~ WHITESPACE+ ~ expr }
-pop_cmd        = ${ pop ~ WHITESPACE+ ~ var }
-yank_cmd       = ${ yank ~ (WHITESPACE+ ~ register)? ~ WHITESPACE+ ~ expr }
-not_global_cmd = ${ not_global ~ WHITESPACE+ ~ pattern ~ block ~ ("else" ~ block)? }
+command = {
+    global
+  | not_global
+  | move
+  | cut
+  | next
+  | echo
+  | repeat
+  | yank
+  | break_loop
+  | shell_cmd
+  | push
+  | pop
+  | buf_cmd
+  | continue_loop
+  | return
+  | include
+}
 
-// Control flow
+// Control Flow
 
-for_block   = { "for" ~ var_name ~ "in" ~ (range_inclusive | range | array | var) ~ block }
-while_block = { "while" ~ (bool_expr | bool_expr_single | var | bool) ~ block }
-until_block = { "until" ~ (bool_expr | bool_expr_single | var | bool) ~ block }
-if_block    = { "if" ~ (bool_expr | bool_expr_single | var | bool) ~ block ~ elif_block* ~ else_block? }
-elif_block  = { "elif" ~ (bool_expr | bool_expr_single | var | bool) ~ block }
-else_block  = { "else" ~ block }
+range           = { expr ~ ".." ~ expr }
+range_inclusive = { expr ~ "..=" ~ expr }
 
-// Register interaction
+for_block          = { "for" ~ var ~ "in" ~ (range_inclusive | range | expr) ~ block }
+while_block        = { "while" ~ expr_bool_priority ~ block }
+until_block        = { "until" ~ expr_bool_priority ~ block }
+if_block           = { "if" ~ expr_bool_priority ~ block ~ elif_block* ~ else_block? }
+elif_block         = { "elif" ~ expr_bool_priority ~ block }
+else_block         = { "else" ~ block }
+expr_bool_priority = { bool_expr | expr }
+
+// Expressions
+// We will just allow indexes on these
+// And check at run time if it's a valid spot for one
+bin_expr = { bin_atom ~ (bin_op ~ bin_atom)+ }
+bin_atom = { bin_lit | ("(" ~ bin_expr ~ ")") }
+bin_lit  = { negative? ~ expr_not_recursive }
+bin_op   = { add | sub | mult | div | modulo | pow }
+add      = { "+" }
+sub      = { "-" }
+mult     = { "*" }
+div      = { "/" }
+modulo   = { "%" }
+pow      = { "**" }
+negative = { "-" }
+
+bool_expr = { bool_atom ~ (bool_op ~ bool_atom)+ }
+bool_atom = { bool_lit | ("(" ~ bool_expr ~ ")") }
+bool_lit  = { not? ~ (expr_not_recursive | ("(" ~ bin_expr ~ ")")) }
+
+bool_op = { eq | ne | lt | le | ge | gt | and | or }
+eq      = { "==" }
+ne      = { "!=" }
+lt      = { "<" }
+le      = { "<=" }
+gt      = { ">" }
+ge      = { ">=" }
+and     = { "&&" }
+or      = { "||" }
+not     = { "!" }
+
+// I'm not sure why I need to nest these rules like this
+// but it didn't work right until I did
+expr               = {
+    (func_call | (bool_expr | bin_expr | (command | value))) ~ index*
+}
+expr_not_recursive = {
+    (command | func_call | value) ~ index*
+}
+
+index        = {
+    "[" ~ (index_to | index_to_inc | slice | slice_inc | index_from | index_sng) ~ "]"
+}
+index_to     = { ".." ~ expr }
+index_to_inc = { "..=" ~ expr }
+slice        = { expr ~ ".." ~ expr }
+slice_inc    = { expr ~ "..=" ~ expr }
+index_from   = { expr ~ ".." }
+index_sng    = { expr }
+
+// Variable Operations
+var         = @{ (ASCII_ALPHANUMERIC | "_")+ }
+var_declare =  { "let" ~ var ~ "=" ~ expr }
+var_mut     =  { var ~ "=" ~ expr }
+var_add     =  { var ~ "+=" ~ expr }
+var_sub     =  { var ~ "-=" ~ expr }
+var_mult    =  { var ~ "*=" ~ expr }
+var_div     =  { var ~ "/=" ~ expr }
+var_pow     =  { var ~ "^=" ~ expr }
+var_mod     =  { var ~ "%=" ~ expr }
+
+// Function stuff
+
+var_list = { (var ~ ",")* ~ var? }
+
+closure_def_args = { "|" ~ var_list ~ "|" }
+
+func_def_args = { "(" ~ var_list ~ ")" }
+func_name     = { var ~ func_def_args }
+func_def      = { "def" ~ func_name ~ block }
+
+func_call_args = { "(" ~ expr_list ~ ")" }
+func_call      = { var ~ func_call_args }
+
+// Primitives
+
+str_inner     = ${ ("\\\\" | ("\\" ~ "\"") | (!"\"" ~ ANY))* }
+raw_inner     =  ${ (!PEEK_ALL ~ ANY)* }
+str_literal   =  ${ raw_literal | ("\"" ~ str_inner ~ "\"") }
+raw_literal   =  _{ "r" ~ PUSH("-") ~ (&PEEK ~ PUSH("-"))* ~ PUSH("\"") ~ raw_inner ~ POP_ALL }
+closure       =  { closure_def_args ~ block }
+
+true  = { "true" }
+false = { "false" }
+bool  = { true | false }
+
+int = @{ ASCII_DIGIT+ }
+
+array = { "[" ~ expr_list ~ "]" }
+
+expr_list = { ((expr ~ ",")* ~ expr?)? }
+
+null = { "null" }
+
+regex_delim = _{ !(ASCII_ALPHANUMERIC | "'" | "}" | "{" | "(" | ")" | "[" | "]") ~ ANY }
+regex       =  { PUSH(regex_delim) ~ (&PEEK ~ PUSH(regex_delim))* ~ raw_inner ~ POP_ALL }
 
 register = { "@" ~ reg_name }
 reg_name = { ASCII_ALPHA }
 
-// Variable operations
+value = {
+    array
+  | null
+  | int
+  | str_literal
+  | var
+  | closure
+  | bool
+  | register
+  | regex
+}
 
-var_ident   = @{ (ASCII_ALPHANUMERIC | "_")+ }
-index       =  { expr }
-var_index   =  { var_ident ~ "[" ~ index ~ "]" }
-var_name    =  { var_index | var_ident }
-var         =  { "$" ~ var_name }
-var_declare =  { "let" ~ var_name ~ "=" ~ expr }
-var_mut     =  { var_name ~ "=" ~ expr }
-var_add     =  { var_name ~ "+=" ~ (bin_expr | int | var) }
-var_sub     =  { var_name ~ "-=" ~ (bin_expr | int | var) }
-var_mult    =  { var_name ~ "*=" ~ (bin_expr | int | var) }
-var_div     =  { var_name ~ "/=" ~ (bin_expr | int | var) }
-var_pow     =  { var_name ~ "^=" ~ (bin_expr | int | var) }
-var_mod     =  { var_name ~ "%=" ~ (bin_expr | int | var) }
-
-// Function stuff
-
-func_def_args = { "(" ~ (var_name ~ ",")* ~ var_name? ~ ")" }
-func_name     = { var_ident ~ func_def_args }
-func_def      = { "def" ~ func_name ~ block }
-
-func_call_args = { "(" ~ ((expr) ~ ",")* ~ (expr)? ~ ")" }
-func_call      = { var_ident ~ func_call_args }
-
-// Binary and Boolean expressions
-
-add             =  { "+" }
-sub             =  { "-" }
-mult            =  { "*" }
-div             =  { "/" }
-modulo          =  { "%" }
-pow             =  { "**" }
-range           =  { expr ~ ".." ~ expr }
-range_inclusive =  { expr ~ "..=" ~ expr }
-unary_minus     =  { "-" }
-bin_op          = _{ add | sub | mult | div | modulo | pow }
-bin_lit         =  { unary_minus? ~ (var | int) }
-bin_atom        =  { bin_lit | ("(" ~ bin_expr ~ ")") }
-bin_expr        =  { bin_atom ~ (bin_op ~ bin_atom)* }
-
-eq               =  { "==" }
-ne               =  { "!=" }
-lt               =  { "<" }
-le               =  { "<=" }
-gt               =  { ">" }
-ge               =  { ">=" }
-and              =  { "&&" }
-or               =  { "||" }
-not              =  { "!" }
-true_lit         =  { "true" }
-false_lit        =  { "false" }
-bool_conjunction =  { and | or }
-bool_op          = _{ eq | ne | lt | le | ge | gt }
-bool_lit         =  { not? ~ ("(" ~ bool_expr_single ~ ")" | value | pop_cmd | return_cmd | buf_cmd | func_call) }
-bool_expr_single =  { (bool_lit ~ bool_op ~ bool_lit) | (not ~ bool_lit) | bool | "(" ~ bool_expr ~ ")" }
-bool_expr        =  { bool_expr_single ~ (bool_conjunction ~ (bool_expr_single | bool_lit))* }
-
-ternary          = { expr_not_ternary ~ "?" ~ expr ~ ":" ~ expr }
-num_expr         = { bin_expr | ternary | var | int }
-expr_not_ternary = { return_cmd | bin_expr | bool_expr | value }
-expr             = { pop_cmd | return_cmd | buf_cmd | ternary | bool_expr | bin_expr | value | func_call | null }
-
-// Primitives
-
-inner         = ${ (("\\\\") | ("\\" ~ "\"") | (!"\"" ~ ANY))* }
-atomic_string = @{ "\"" ~ inner ~ "\"" }
-literal       =  { ("\"" ~ inner ~ "\"") }
-bool          =  { true_lit | false_lit }
-int           = @{ ASCII_DIGIT+ }
-array         =  { "[" ~ ((expr ~ ",")* ~ expr?)? ~ "]" }
-null          =  { "null" }
-regex_lit     =  { PUSH(regex_delim) ~ (&PEEK ~ PUSH(regex_delim))* ~ regex ~ POP_ALL }
-regex_delim   = _{ !(ASCII_ALPHANUMERIC | "'" | "}" | "{" | "(" | ")" | "[" | "]") ~ ANY }
-regex         =  { (!PEEK_ALL ~ ANY)* }
-value         =  { array | null | var | int | literal | bool | register | regex_lit }
-
-vim_cmd  = { expr }
-pattern  = { literal | regex_lit | var }
-name_def = { "name" ~ "=" ~ "\"" ~ inner ~ "\"" }
-
-
-
-cmd = {
+top_level_cmd = {
     var_declare
+  | opts
   | var_add
-  | for_block
-  | if_block
-  | while_block
-  | until_block
   | var_sub
   | var_mut
   | var_mult
   | var_div
   | var_pow
   | var_mod
-  | include
-  | alias
-  | not_global_cmd
-  | global_cmd
-  | repeat_cmd
-  | move_cmd
-  | cut_cmd
-  | yank_cmd
-  | echo_cmd
-  | push_cmd
-  | pop_cmd
-  | buf_cmd
-  | return_cmd
+  | for_block
+  | if_block
+  | while_block
+  | until_block
+  | command
   | func_def
   | func_call
-  | next
-  | break_loop
-  | continue_loop
 }
 
-block = !{ "{" ~ cmd* ~ "}" }
+block = !{ "{" ~ top_level_cmd* ~ "}" }
 
-vic = { SOI ~ WHITESPACE* ~ prelude? ~ cmd* ~ WHITESPACE* ~ EOI }
+vic = { SOI ~ WHITESPACE* ~ top_level_cmd* ~ WHITESPACE* ~ EOI }

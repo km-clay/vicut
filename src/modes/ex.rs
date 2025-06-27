@@ -3,7 +3,7 @@ use std::{iter::Peekable, path::PathBuf, str::Chars};
 use bitflags::bitflags;
 use itertools::Itertools;
 
-use crate::{exec::Val, modes::{common_cmds, ModeReport, ViMode}, vicmd::{Anchor, CmdFlags, LineAddr, Motion, MotionCmd, ReadSrc, RegisterName, Verb, VerbCmd, ViCmd, WriteDest}};
+use crate::{vic::parse::Val, modes::{common_cmds, ModeReport, ViMode}, vicmd::{Anchor, CmdFlags, LineAddr, Motion, MotionCmd, ReadSrc, RegisterName, Verb, VerbCmd, ViCmd, WriteDest}};
 
 bitflags! {
 	#[derive(Debug,Clone,Copy,PartialEq,Eq)]
@@ -415,3 +415,5 @@ fn parse_pattern(chars: &mut Peekable<Chars<'_>>, delimiter: char) -> Result<Str
 		Ok(pat)
 	}
 }
+
+

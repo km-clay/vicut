@@ -13,7 +13,7 @@ use regex::Regex;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::exec::Val;
+use crate::vic::parse::Val;
 use crate::register::RegisterContent;
 use crate::{modes::ex::SubFlags, vicmd::{LineAddr, ReadSrc, WriteDest}};
 
@@ -2152,10 +2152,17 @@ impl LineBuf {
 	pub fn cursor_at_max(&mut self) -> bool {
 		// hack
 		let cursor_pos = self.cursor.get();
+		dbg!(cursor_pos);
+		dbg!(self.cursor.exclusive);
 		if self.cursor.exclusive {
-			cursor_pos == self.cursor.max.saturating_sub(2)
+			dbg!(self.cursor.max.saturating_sub(2));
 		} else {
-			cursor_pos == self.cursor.max.saturating_sub(1)
+			dbg!(self.cursor.max.saturating_sub(1));
+		}
+		if self.cursor.exclusive {
+			cursor_pos >= self.cursor.max.saturating_sub(2)
+		} else {
+			cursor_pos >= self.cursor.max.saturating_sub(1)
 		}
 	}
 	pub fn cursor_at_eol(&mut self) -> bool {
@@ -4026,3 +4033,5 @@ pub fn ordered_signed(start: isize, end: isize) -> (isize,isize) {
 		(start,end)
 	}
 }
+
+

@@ -1,7 +1,7 @@
 use std::iter::{Peekable, Skip};
 use std::fmt::Write;
 
-use crate::exec::Val;
+use crate::vic::parse::Val;
 use crate::vic::CmdArg;
 use crate::{linebuf::LineBuf, modes::{normal::ViNormal, ViMode}, Opts, Cmd};
 use pretty_assertions::assert_eq;
@@ -414,3 +414,5 @@ impl Opts {
 		}
 	}
 }
+
+
