@@ -1,12 +1,16 @@
 //! This module contains the `ViCut` struct, which is the central container for state in the program.
 //!
 //! Everything that moves through this program passes through the `ViCut` struct at some point.
+use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt::Display;
+use std::fs;
 use std::io::{self, BufRead, Write as IoWrite};
 use std::fmt::Write;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use log::{debug, trace};
 use regex::Regex;
@@ -18,9 +22,10 @@ use crate::modes::ex::ViEx;
 use crate::modes::search::ViSearch;
 use crate::reader::{KeyReader, RawReader};
 use crate::register::{append_register, read_register, write_register, RegisterContent};
-use crate::vic::parse::{BinOp, Command, Expr, ExprKind, Val};
+use crate::vic::error::{VicErr, VicErrResult};
+use crate::vic::parse::{Accessor, BinOp, BoolOp, Command, Expr, ExprKind, Index, RpnItem, Val};
 use crate::vicmd::{Bound, LineAddr, Word};
-use crate::{blame_span, complain_and_exit, ExecCtx, Opts};
+use crate::{complain_and_exit, ExecCtx, Opts};
 
 use super::linebuf::{LineBuf, SelectAnchor, SelectMode};
 use super::vicmd::{CmdFlags, Motion, MotionCmd, RegisterName, Verb, VerbCmd, ViCmd};
@@ -38,18 +43,13 @@ pub struct ViCut {
 	pub mode: Box<dyn ViMode>,
 	pub repeat_action: Option<CmdReplay>,
 	pub repeat_motion: Option<MotionCmd>,
-	pub buffers: Vec<LineBuf>, // This is a vector of buffers, so we can have multiple buffers open at once
 	pub editor: ClampedUsize, // This is the index of the current buffer in the `buffers` vector
 
-	/// We use a vector of hashmaps here
-	/// Each hashmap represents a "stack frame" of variables
-	/// So you can shadow variables in vic
-	/// The outer-most hashmap always contains the built-in variables
+	/// We use a vector as a stack here. Each entry is a scope.
+	/// It starts with two hashmaps: one contains built-in variables
+	/// and the other is the global scope accessible to the user
+	/// This stack should never dip below length 2.
 	pub variables: Vec<HashMap<String, Val>>,
-	/// We do the same stack frame thing for functions
-	/// we want all of our user definitions, variable or otherwise, to be scoped
-	/// This way we can get away with having built-in functions *and* not reserving the function names
-	pub functions: Vec<HashMap<String, VicFunc>>,
 
 	/// We also scope the runtime options
 	/// This allows for scoped 'opts' blocks, e.g.
@@ -61,50 +61,71 @@ pub struct ViCut {
 	/// ```
 	pub opts: Vec<Opts>,
 	pub cmds: Vec<Expr>,
-	exec_ctx: ExecCtx,
+	pub exec_ctx: ExecCtx,
 }
 
 
 impl ViCut {
-	const BUILTINS: [&str;12] = [
-		"col",
-		"line",
-		"lines",
-		"pos",
-		"buf_len",
-		"selection",
-		"word",
-		"WORD",
-		"is_eof",
-		"is_eol",
-		"is_bof",
-		"char"
+	const BUILTINS: [&str;14] = [
+		"_col",
+		"_line",
+		"_lines",
+		"_pos",
+		"_byte",
+		"_buf_len",
+		"_selection",
+		"_buffer",
+		"_word",
+		"_WORD",
+		"_is_eof",
+		"_is_eol",
+		"_is_bof",
+		"_char"
 	];
-	pub fn new(input: String, cursor: usize) -> Result<Self,String> {
-		Ok(Self {
+	pub fn new(opts: Opts, input: String, cursor: usize) -> Result<Self,VicErr> {
+		let vic_src = if let Some(ref raw) = opts.vic_raw {
+			raw.to_string()
+		} else if let Some(ref file) = opts.vic_file {
+			fs::read_to_string(file).unwrap_or_else(complain_and_exit)
+		} else {
+			return Err("No vic source provided".into())
+		};
+		let ExprKind::Vic(cmds) = Expr::parse_vic(Arc::new(vic_src))?.into_value() else { unreachable!() };
+		// i am hacker man
+		let mut builtins = HashMap::new();
+		builtins.insert(
+			String::from("_buffers"),
+			Val::Arr(
+				vec![
+					Val::Buffer(Box::new(LineBuf::new().with_initial(input, cursor)))
+				]
+			)
+		);
+
+		let mut new = Self {
 			reader: RawReader::new(),
 			mode: Box::new(ViNormal::new()),
 			repeat_action: None,
 			repeat_motion: None,
-			buffers: vec![LineBuf::new().with_initial(input, cursor)], // We start with only the main buffer open
 			editor: ClampedUsize::new(0, 1, true), // Index of the currently active buffer
 																						 // ClampedUsize is used to ensure that the index is always within bounds
 
-			// Initialize the stack frames
-			// The first is the "built-in" scope, which includes built-in variables
-			// and standard library functions from "prelude.vic"
-			// The second is the "global" scope, which is where user-defined variables and functions go
-			// User definitions can shadow built-ins this way.
-			// Never allow these vectors to dip below length 2.
-			variables: vec![HashMap::new(),HashMap::new()],
-			functions: vec![HashMap::new(),HashMap::new()],
-			opts: vec![Opts::default()],
+																						 // Initialize the stack frames
+																						 // The first is the "built-in" scope, which includes built-in variables
+																						 // and standard library functions from "prelude.vic"
+																						 // The second is the "global" scope, which is where user-defined variables and functions go
+																						 // User definitions can shadow built-ins this way.
+																						 // Never allow these vectors to dip below length 2.
+			variables: vec![builtins,HashMap::new()],
+			opts: vec![opts],
 			exec_ctx: ExecCtx::default(),
-			cmds: vec![],
-		})
+			cmds,
+		};
+		new.eval_prelude()?; // Evaluate prelude options/imports
+		Ok(new)
 	}
 	pub fn empty() -> Self {
-		Self::new(String::new(),0).unwrap()
+		Self::new(Opts::default(),String::new(),0).unwrap()
 	}
 	pub fn opts(&self) -> &Opts {
 		self.opts.last().expect("There is always at least one opts frame")
@@ -112,7 +133,7 @@ impl ViCut {
 	pub fn opts_mut(&mut self) -> &mut Opts {
 		self.opts.last_mut().expect("There is always at least one opts frame")
 	}
-	pub fn exec_loop(&mut self) -> Result<(),String> {
+	pub fn exec_loop(&mut self) -> Result<(),VicErr> {
 		loop {
 			let Some(key) = self.reader.read_key() else {
 				break
@@ -149,16 +170,38 @@ impl ViCut {
 		Ok(())
 	}
 
+	pub fn buffers_mut(&mut self) -> &mut Val {
+		let frame = self.variables.first_mut().expect("expected built-in var frame");
+		let buffers = frame.get_mut("_buffers").expect("expected 'buffers' builtin var");
+		buffers
+	}
+	
+	pub fn buffers(&self) -> &Val {
+		let frame = self.variables.first().expect("expected built-in var frame");
+		let buffers = frame.get("_buffers").expect("expected 'buffers' builtin var");
+		buffers
+	}
+
 	pub fn current_buffer(&mut self) -> &mut LineBuf {
-		self.buffers.get_mut(self.editor.get())
-			.expect("There should always be at least one buffer")
+		let editor = self.editor.get();
+		let Val::Arr(buffers) = self.buffers_mut() else { unreachable!() };
+		let Val::Buffer(buf) = buffers.get_mut(editor).unwrap() else { unreachable!() };
+		buf
+	}
+
+	pub fn num_buffers(&self) -> usize {
+		let Val::Arr(bufs) = self.buffers() else { unreachable!() };
+		bufs.len()
 	}
 
 	pub fn push_buffer(&mut self, buffer: impl ToString) {
 		let buf = buffer.to_string();
-		let new_buffer = LineBuf::new().with_initial(buf, 0);
-		self.buffers.push(new_buffer);
-		self.editor.set_max(self.buffers.len());
+		let new_buffer = Val::Buffer(Box::new(LineBuf::new().with_initial(buf, 0)));
+		let Val::Arr(buffers) = self.buffers_mut() else { unreachable!() };
+		buffers.push(new_buffer);
+		let len = buffers.len();
+		let _ = buffers; // Banish this reference so we can mutate our state again
+		self.editor.set_max(len);
 	}
 
 	pub fn current_buffer_index(&self) -> usize {
@@ -166,16 +209,20 @@ impl ViCut {
 	}
 
 	pub fn pop_buffer(&mut self) -> String {
-		let mut popped = self.buffers.pop().unwrap_or_default(); // Should never be empty, but just in case
-		if self.buffers.is_empty() {
-			self.buffers.push(LineBuf::new()); // Always keep at least one buffer
+		let Val::Arr(buffers) = self.buffers_mut() else { unreachable!() };
+		let popped = buffers.pop().unwrap_or_default(); // Should never be empty, but just in case
+		if buffers.is_empty() {
+			buffers.push(Val::Buffer(Box::new(LineBuf::new()))); // Always keep at least one buffer
 																				 // Similar to how Vim works interactively
 		}
-		self.editor.set_max(self.buffers.len());
-		popped.take_buf()
+		let len = buffers.len();
+		let _ = buffers; // Banish this reference so we can mutate our state again
+		self.editor.set_max(len);
+		let Val::Buffer(mut buf) = popped else { unreachable!() };
+		buf.take_buf()
 	}
 
-	pub fn read_field(&mut self, cmd: &str) -> Result<String,String> {
+	pub fn read_field(&mut self, cmd: &str) -> Result<String,VicErr> {
 		self.load_input(cmd);
 		let mut start = self.current_buffer().cursor.get();
 		let mut end;
@@ -205,7 +252,7 @@ impl ViCut {
 			let slice = self.current_buffer()
 				.slice_inclusive(start_pos..=end_pos)
 				.map(|slice| slice.to_string())
-				.ok_or("Failed to slice buffer".to_string());
+				.ok_or("Failed to slice buffer".into());
 			if let Ok(slice) = slice.as_ref() {
 				trace!("Cutting from start position to cursor: '{slice}'");
 			} else {
@@ -215,7 +262,7 @@ impl ViCut {
 		}
 	}
 
-	pub fn move_cursor(&mut self, cmd: &str) -> Result<(),String> {
+	pub fn move_cursor(&mut self, cmd: &str) -> Result<(),VicErr> {
 		self.read_field(cmd).map(|_| ()) // Same logic, just ignore the returned range
 	}
 
@@ -240,7 +287,7 @@ impl ViCut {
 		}
 	}
 
-	fn handle_mode_transition(&mut self, cmd: ViCmd) -> Result<(),String> {
+	fn handle_mode_transition(&mut self, cmd: ViCmd) -> Result<(),VicErr> {
 		let mut select_mode = None;
 		let mut is_insert_mode = false;
 		let count = cmd.verb_count();
@@ -337,7 +384,7 @@ impl ViCut {
 		Ok(())
 	}
 
-	fn handle_cmd_repeat(&mut self, cmd: ViCmd) -> Result<(),String> {
+	fn handle_cmd_repeat(&mut self, cmd: ViCmd) -> Result<(),VicErr> {
 		let Some(replay) = self.repeat_action.clone() else {
 			return Ok(())
 		};
@@ -376,7 +423,7 @@ impl ViCut {
 		Ok(())
 	}
 
-	fn handle_motion_repeat(&mut self, cmd: ViCmd) -> Result<(),String> {
+	fn handle_motion_repeat(&mut self, cmd: ViCmd) -> Result<(),VicErr> {
 		match cmd.motion.as_ref().unwrap() {
 			MotionCmd(count,Motion::RepeatMotion) => {
 				let Some(motion) = self.repeat_motion.clone() else {
@@ -410,7 +457,7 @@ impl ViCut {
 		}
 	}
 
-	pub fn exec_cmd(&mut self, mut cmd: ViCmd) -> Result<(),String> {
+	pub fn exec_cmd(&mut self, mut cmd: ViCmd) -> Result<(),VicErr> {
 		if cmd.is_mode_transition() {
 			return self.handle_mode_transition(cmd)
 
@@ -460,7 +507,7 @@ impl ViCut {
 	}
 
 	// Easier to handle these out here
-	fn exec_ex_global(&mut self, cmd: ViCmd) -> Result<(),String> {
+	fn exec_ex_global(&mut self, cmd: ViCmd) -> Result<(),VicErr> {
 		let ViCmd { register, verb, motion, raw_seq, flags } = cmd;
 		let MotionKind::Lines(lines) = self.current_buffer().eval_motion(verb.as_ref().map(|vcmd| &vcmd.1), motion.unwrap()) else { unreachable!() };
 		for line in lines {
@@ -478,7 +525,7 @@ impl ViCut {
 
 		Ok(())
 	}
-	fn exec_ex_normal(&mut self, cmd: ViCmd) -> Result<(),String> {
+	fn exec_ex_normal(&mut self, cmd: ViCmd) -> Result<(),VicErr> {
 		let ViCmd { register: _, verb, motion, raw_seq: _, flags: _ } = cmd;
 		let VerbCmd(_,Verb::Normal(seq)) = verb.unwrap() else { unreachable!() };
 		let mut mode: Box<dyn ViMode> = Box::new(ViNormal::new());
@@ -520,7 +567,6 @@ impl ViCut {
 	}
 	pub fn descend(&mut self) {
 		self.variables.push(HashMap::new());
-		self.functions.push(HashMap::new());
 		self.opts.push(Opts::default());
 	}
 	pub fn ascend(&mut self) {
@@ -528,12 +574,33 @@ impl ViCut {
 		if self.variables.len() > 2 {
 			self.variables.pop();
 		}
-		if self.functions.len() > 2 {
-			self.functions.pop();
-		}
 		if self.opts.len() > 1 {
 			self.opts.pop();
 		}
+	}
+	pub fn expr_targets_buffers(&self, expr: &Expr) -> bool {
+		match expr.value() {
+			ExprKind::Value(Val::Var(var)) => var.as_str() == "_buffers",
+			_ => false
+		}
+	}
+	pub fn var_from_expr(&mut self, expr: &Expr) -> Result<Val, VicErr> {
+		let ExprKind::Value(Val::Var(var)) = expr.value() else {
+			return Err(VicErr::Full(expr.span(), format!("Expected a variable, got {}", expr.span().as_str())))
+		};
+		let Some(var_val) = self.get_var(var) else {
+			return Err(VicErr::Full(expr.span(), format!("Variable '{var}' not found")))
+		};
+		Ok(var_val.clone())
+	}
+	pub fn var_from_expr_mut(&mut self, expr: &Expr) -> Result<&mut Val,VicErr> {
+		let ExprKind::Value(Val::Var(var)) = expr.value() else {
+			return Err(VicErr::Full(expr.span(), format!("Expected a variable, got {}", expr.span().as_str())))
+		};
+		let Some(var_mut) = self.get_var_mut(var) else {
+			return Err(VicErr::Full(expr.span(), format!("Variable '{var}' not found")))
+		};
+		Ok(var_mut)
 	}
 	pub fn get_var_mut(&mut self, name: &str) -> Option<&mut Val> {
 		// We have special handling for the "buffers" variable
@@ -546,10 +613,6 @@ impl ViCut {
 		None
 	}
 	pub fn read_var(&self, name: &str) -> Option<Val> {
-		if name == "buffers" {
-			// This is a reserved variable name, so we return it as a Val::Arr
-			return Some(Val::Arr(self.buffers.iter().map(|buf| Val::Str(buf.buffer.clone())).collect()))
-		}
 		// Search the stack frames for the variable
 		// We do this in reverse order, so that we get the most local variable
 		for frame in self.variables.iter().rev() {
@@ -560,10 +623,6 @@ impl ViCut {
 		None
 	}
 	pub fn get_var(&mut self, name: &str) -> Option<Val> {
-		if name == "buffers" {
-			// This is a reserved variable name, so we return it as a Val::Arr
-			return Some(Val::Arr(self.buffers.iter().map(|buf| Val::Str(buf.buffer.clone())).collect()))
-		}
 		// Search the stack frames for the variable
 		// We do this in reverse order, so that we get the most local variable
 		for frame in self.variables.iter().rev() {
@@ -583,30 +642,33 @@ impl ViCut {
 			return None // Not a built-in variable
 		}
 		Some(match name {
-			"col" => Val::Num((self.current_buffer().cursor_col() + 1) as isize),
-			"line" => Val::Num((self.current_buffer().cursor_line_number() + 1) as isize),
-			"lines" => Val::Num(self.current_buffer().total_lines() as isize),
-			"pos" => Val::Num(self.current_buffer().cursor_byte_pos() as isize),
-			"buf_len" => Val::Num(self.current_buffer().buffer.len() as isize),
-			"selection" => Val::Str(self.current_buffer().selected_content().unwrap_or_default()),
-			"word" => {
+			"_col" => Val::Num((self.current_buffer().cursor_col() + 1) as isize),
+			"_line" => Val::Num((self.current_buffer().cursor_line_number() + 1) as isize),
+			"_lines" => Val::Num(self.current_buffer().total_lines() as isize),
+			"_pos" => Val::Num(self.current_buffer().cursor.get() as isize),
+			"_byte" => Val::Num(self.current_buffer().cursor_byte_pos() as isize),
+			"_buf_len" => Val::Num(self.current_buffer().buffer.len() as isize),
+			"_selection" => Val::Str(self.current_buffer().selected_content().unwrap_or_default()),
+			"_buffer" => Val::Str(self.current_buffer().buffer.clone()),
+			"_word" => {
 				let (word_start,word_end) = self.current_buffer().text_obj_word(1, Bound::Inside, Word::Normal).unwrap_or_default();
 				let word_end = ClampedUsize::new(word_end, self.current_buffer().cursor.cap(), false).ret_add(1);
 				self.current_buffer().slice_inclusive(word_start..=word_end)
 					.map(|slice| Val::Str(slice.to_string()))
 					.unwrap_or(Val::Str(String::new()))
 			}
-			"WORD" => {
+			"_WORD" => {
 				let (big_word_start,big_word_end) = self.current_buffer().text_obj_word(1, Bound::Inside, Word::Big).unwrap_or_default();
 				let big_word_end = ClampedUsize::new(big_word_end, self.current_buffer().cursor.cap(), false).ret_add(1);
 				self.current_buffer().slice_inclusive(big_word_start..=big_word_end)
 					.map(|slice| Val::Str(slice.to_string()))
 					.unwrap_or(Val::Str(String::new()))
 			}
-			"is_eof" => Val::Bool(self.current_buffer().cursor_at_max()),
-			"is_eol" => Val::Bool(self.current_buffer().cursor_at_eol()),
-			"is_bof" => Val::Bool(self.current_buffer().cursor.get() == 0),
-			"char" => {
+			"_is_eof" => Val::Bool(self.current_buffer().cursor_at_max()),
+			"_is_eol" => Val::Bool(self.current_buffer().cursor_at_eol()),
+			"_is_sof" => Val::Bool(self.current_buffer().cursor.get() == 0),
+			"_is_sol" => Val::Bool(self.current_buffer().cursor.get() == 0),
+			"_char" => {
 				self.current_buffer().grapheme_at_cursor()
 					.map(|gr| Val::Str(gr.to_string()))
 					.unwrap_or(Val::Str(String::new()))
@@ -614,43 +676,57 @@ impl ViCut {
 			_ => unreachable!()
 		})
 	}
-	pub fn set_var(&mut self, name: String, value: Val) -> Result<(),String> {
-		if &name == "buffers" {
-			return Err("'buffers' is a reserved variable name and cannot be set".to_string())
-		}
+	pub fn set_var(&mut self, name: String, value: Val) -> Result<(),VicErr> {
 		let Some(frame) = self.variables.last_mut() else {
 			panic!("There is supposed to be a stack frame here")
 		};
 		frame.insert(name, value);
 		Ok(())
 	}
-	pub fn mutate_var(&mut self, name: &str, op: Option<BinOp>, value: Val) -> Result<(),String> {
-		if name == "buffers" {
+	pub fn mutate_var(&mut self, name: &str, op: Option<BinOp>, accessor: Option<&Accessor>, value: Val) -> Result<(),VicErr> {
+		if name == "_buffers" {
 			let None = op else {
-				return Err("'buffers' cannot be used in math expressions".to_string())
+				return Err(VicErr::Simple("'buffers' cannot be used in math expressions".to_string()))
 			};
+			let Val::Arr(_) = value else {
+				return Err(VicErr::Simple("'buffers' can only be set using an array".to_string()))
+			};
+			*self.buffers_mut() = value;
+			return Ok(())
 		}
-		let Some(frame) = self.variables.last_mut() else {
-			panic!("There is supposed to be a stack frame here")
-		};
-		let var = frame.entry(name.to_string()).or_insert(Val::Num(0));
-		if let Some(op) = op {
-			match (var, value) {
-				(Val::Num(n), Val::Num(v)) => {
-					match op {
-						BinOp::Add => *n += v,
-						BinOp::Sub => *n -= v,
-						BinOp::Mult => *n *= v,
-						BinOp::Div => *n /= v,
-						BinOp::Mod => *n %= v,
-						BinOp::Pow => *n = n.pow(v as u32),
-						BinOp::Equals => *n = v
-					};
+		let mut found = false;
+		for frame in self.variables.iter_mut().rev() {
+			let Some(var) = frame.get_mut(&name.to_string()) else { continue };
+			found = true;
+			if let Some(op) = op {
+				let value = match op {
+					BinOp::Add => var.add(value),
+					BinOp::Sub => var.sub(value),
+					BinOp::Mult => var.mult(value),
+					BinOp::Div => var.div(value),
+					BinOp::Mod => var.modulo(value),
+					BinOp::Pow => var.pow(value),
+					BinOp::Equals => Ok(value)
+				}?;
+				if let Some(accessor) = accessor {
+					// Here we will be telling the compiler to fuck off, respectfully
+					// and use some pointer voodoo to force this to work
+					todo!()
+				} else {
+					*var = value;
 				}
-				_ => return Err(format!("Cannot apply operation {:?} to variable {}", op, name)),
+			} else if let Some(accessor) = accessor {
+				dbg!(accessor);
+				dbg!(name);
+				dbg!(self.read_var(name));
+				todo!()
+			} else {
+				*var = value;
 			}
-		} else {
-			*var = value;
+			break
+		}
+		if !found {
+			return Err(VicErr::Simple(format!("Variable '{name}' not found")))
 		}
 		Ok(())
 	}
@@ -660,62 +736,38 @@ impl ViCut {
 		};
 		frame.remove(name);
 	}
-	pub fn set_function(&mut self, name: String, args: Vec<String>, body: Vec<Expr>) {
-		let Some(frame) = self.functions.last_mut() else {
-			panic!("There is supposed to be a stack frame here")
-		};
-		let func = VicFunc {
-			args,
-			body,
-		};
-		frame.insert(name, func);
-	}
-	pub fn get_function(&self, name: &str) -> Option<&VicFunc> {
-		for frame in self.functions.iter().rev() {
-			if frame.contains_key(name) {
-				return frame.get(name)
-			}
-		}
-		None
-	}
-	pub fn clear_function(&mut self, name: &str) {
-		let Some(frame) = self.functions.last_mut() else {
-			panic!("There is supposed to be a stack frame here")
-		};
-		frame.remove(name);
-	}
-	pub fn eval_count(&mut self, count: &Expr) -> Result<usize,String> {
-		let val = self.eval_expr(count).ok_or("Expected a number".to_string())?;
+	pub fn eval_count(&mut self, count: &Expr) -> Result<usize,VicErr> {
+		let val = self.eval_expr(false,count).try_blame(count.span())?;
 		let Val::Num(n) = val else {
-			return Err(format!("Expected a number, got {}", val.display_type()))
+			return Err(VicErr::Full(count.span(), format!("Expected a number, got {}", val.display_type())))
 		};
 		Ok(n as usize)
 	}
-	pub fn try_builtin_function(&mut self, name: &str, args: Vec<Val>) -> Result<Val,String> {
+	pub fn try_builtin_function(&mut self, name: &str, args: Vec<Val>) -> Result<Val,VicErr> {
 		match name {
 			"type_of" => {
 				if args.len() != 1 {
-					return Err("type_of expects exactly one argument".to_string())
+					return Err(VicErr::Simple("type_of expects exactly one argument".to_string()))
 				}
 				let arg = &args[0];
 				Ok(Val::Str(arg.display_type()))
 			}
 			"env" => {
 				if args.len() != 1 {
-					return Err("env expects exactly one argument".to_string())
+					return Err(VicErr::Simple("env expects exactly one argument".to_string()))
 				}
 				let arg = &args[0];
 				let Val::Str(var_name) = arg else {
-					return Err(format!("Expected string in env(), got {}",arg.display_type()))
+					return Err(VicErr::Simple(format!("Expected string in env(), got {}", arg.display_type())))
 				};
 				let var_name = var_name.trim();
 				let env_value = std::env::var(var_name).unwrap_or_default();
 				Ok(Val::Str(env_value))
 			}
-			_ => Err(format!("Function {name} not found"))
+			_ => Err(VicErr::Simple(format!("Unknown built-in function: {name}")))
 		}
 	}
-	pub fn run_shell_cmd(&mut self, cmd: &str) -> Result<Val,String> {
+	pub fn run_shell_cmd(&mut self, cmd: &str) -> Result<Val,VicErr> {
 		let mut outputs = vec![];
 		let output = std::process::Command::new("sh")
 			.arg("-c")
@@ -723,7 +775,7 @@ impl ViCut {
 			.output()
 			.map_err(|e| format!("Failed to run shell command: {e}"))?;
 		if !output.status.success() {
-			return Err(format!("Shell command failed with status: {}", output.status))
+			return Err(VicErr::Simple(format!("Shell command failed with status: {}", output.status)))
 		}
 		// Shell commands return an array containing stdout as index 0 and stderr as index 1
 		let stdout = String::from_utf8_lossy(&output.stdout).trim_end().to_string();
@@ -732,7 +784,7 @@ impl ViCut {
 		outputs.push(stderr);
 		Ok(Val::Arr(outputs.into_iter().map(Val::Str).collect()))
 	}
-	pub fn expand_literal(&mut self, literal: &str) -> Result<String,String> {
+	pub fn expand_literal(&mut self, literal: &str) -> Result<String,VicErr> {
 		let mut expanded = String::new();
 		let mut var_name = String::new();
 		let mut chars = literal.chars().peekable();
@@ -746,6 +798,19 @@ impl ViCut {
 							'"' => {
 								// Dollar sign and double quotes are special cases
 								// These are control characters in 'vic' strings, so we remove a layer of escaping
+							}
+							// Now we handle escape sequences
+							'n' => {
+								expanded.push('\n');
+								continue
+							}
+							't' => {
+								expanded.push('\t'); 
+								continue
+							}
+							'r' => {
+								expanded.push('\r');
+								continue
 							}
 							_ => {
 								expanded.push('\\');
@@ -774,7 +839,7 @@ impl ViCut {
 								}
 							}
 							if !closed {
-								return Err("Unmatched ${{".to_string())
+								return Err(VicErr::Simple("Unmatched ${{".to_string()))
 							}
 							if let Some(var) = self.get_var(&std::mem::take(&mut var_name)) {
 								expanded.push_str(&var.to_string());
@@ -864,12 +929,8 @@ impl ViCut {
 		}
 		None
 	}
-	pub fn parse_vic(&mut self, vic: Rc<String>) -> Result<(),String> {
-		let result = Expr::parse_vic(vic)
-			.map_err(|e| format!("vicut: {e}"))?;
-		let ExprKind::Vic(cmds) = result.value else { unreachable!() };
-		self.cmds = cmds;
-		Ok(())
+	pub fn load_commands(&mut self, cmds: Vec<Expr>) {
+		self.cmds = cmds
 	}
 	pub fn format_output(&self) -> String {
 		if self.find_opt_or_default(|o| o.json) {
@@ -944,8 +1005,8 @@ impl ViCut {
 	///
 	/// We use a state machine here to interpolate the fields
 	/// The loop looks for patterns like {{1}} or {{foo}} to interpolate on
-	pub fn format_output_template(&self) -> Result<String,String> {
-		let mut lines = self.exec_ctx.fmt_lines.clone();
+	pub fn format_output_template(&self) -> Result<String,VicErr> {
+		let lines = self.exec_ctx.fmt_lines.clone();
 		let template = self.find_opt(|o| o.template.clone()).expect("We already checked for this, right?");
 		let mut field_name = String::new();
 		let mut output = String::new();
@@ -992,7 +1053,7 @@ impl ViCut {
 								for (name,_) in line {
 									writeln!(e,"\t{name}").ok();
 								}
-								return Err(e)
+								return Err(VicErr::Simple(e))
 							}
 						} else {
 							cur_line.extend(field_name.drain(..));
@@ -1008,67 +1069,80 @@ impl ViCut {
 		}
 		Ok(output)
 	}
-	fn exec_stdin(&mut self, input: Rc<String>) {
-		let mut stdout = io::stdout().lock();
-		let mut lines = vec![];
-		self.parse_vic(input);
-		match self.execute(None) {
-			Ok(mut output) => {
-				lines.append(&mut output);
-			}
-			Err(e) => eprintln!("vicut: {e}"),
-		};
-		let output = self.format_output();
-		writeln!(stdout,"{output}").ok();
-
-	}
-	pub fn eval_function(&mut self, name: &str, given_args: Vec<Val>) -> Result<Option<Val>,String> {
-		// First we need to search for variables in this scope, the user might be trying to execute a closure
-		let VicFunc { args, body } = if let Some(closure) = self.read_var(name) {
-			if let Val::Closure(args, body) = closure {
-				// Let's create a new VicFunc using the Closure's data
-				VicFunc { args, body }
-			} else {
-				return Err(format!("Expected a closure, found {}",closure.display_type()))
-			}
-		} else if let Some(func) = self.get_function(name) {
-			// No closure, so we search for a function now
-			func.clone()
-		} else {
-			// Nothing found by that name, return an error
-			return Err(format!("Function '{name}' not found"))
-		};
-		if given_args.len() != args.len() {
+	pub fn eval_closure(&mut self,
+		given_args: Vec<Val>,
+		arg_names: Vec<String>,
+		body: Vec<Expr>
+	) -> Result<Val,VicErr> {
+		if given_args.len() != arg_names.len() {
 			let given_len = given_args.len();
-			let expected_len = args.len();
-			return Err(format!("Function '{name}' expects {expected_len} arguments, got {given_len}"))
+			let expected_len = arg_names.len();
+			return Err(VicErr::Simple(format!("Closure expects {expected_len} arguments, got {given_len}")))
 		}
-		let arg_pairs = args.into_iter().zip(given_args.into_iter());
+		let arg_pairs = arg_names.into_iter().zip(given_args);
 		self.descend();
+		for (name,value) in arg_pairs {
+			self.set_var(name.clone(), value).map_err(|e| format!("In closure: {e}"))?;
+		}
 		for cmd in body {
-			for (name,value) in arg_pairs.clone() {
-				self.set_var(name.clone(), value).map_err(|e| format!("In function '{name}': {e}"))?;
-			}
-			let ret = self.eval_expr(&cmd);
+			let ret = self.eval_expr(true,&cmd).try_blame(cmd.span())?;
 			if cmd.is_return() {
+				self.ascend();
 				return Ok(ret)
 			}
 		}
 		self.ascend();
-		Ok(None)
+		Ok(Val::Null)
 	}
-	pub fn eval_expr(&mut self, cmd_expr: &Expr) -> Option<Val>{
-		let Expr { value: cmd, index, ..} = cmd_expr;
+	pub fn eval_prelude(&mut self) -> Result<(),VicErr> {
+		// We want to evaluate options and imports as basically 
+		// the first thing we do after constructing a ViCut instance
+		// So let's go ahead and do that
+
+		// We'll take the cmds vector and turn it into a peekable iterator
+		let mut cmds = std::mem::take(&mut self.cmds).into_iter().peekable();
+
+		// Next, we'll evaluate stuff while the next command is either an opts block or an include command
+		while let Some(ExprKind::Opts(_)) | Some(ExprKind::Command(Command::Include {..})) = cmds.peek().map(|cmd| cmd.value()) {
+			let cmd = cmds.next().unwrap();
+			self.eval_expr(false,&cmd);
+		}
+
+		// Collect the iterator now, evaluated expressions are consumed
+		self.cmds = cmds.collect();
+
+		Ok(())
+	}
+	pub fn eval_expr(&mut self, is_top_level: bool, cmd_expr: &Expr) -> Result<Val,VicErr> {
+		let Expr { value: cmd, accessors, ..} = cmd_expr;
 		let eval = match cmd {
+			ExprKind::Command(Command::New(var_name)) => {
+				// 'new' creates and returns a copy of another variable
+				// it's main use is to create new instances of classes
+				let Some(var) = self.read_var(var_name) else {
+					return Err(VicErr::Full(cmd_expr.span(), format!("Variable '{var_name}' not found")))
+				};
+				if !accessors.is_empty() {
+					return Err(VicErr::Full(cmd_expr.span(), "Cannot index into type 'variable'".into()))
+				}
+				var.clone()
+			}
 			ExprKind::Command(Command::ShellCmd { cmd }) => {
 				// Evaluate the shell command and execute it
-				todo!()
+				let command = self.eval_expr(false, cmd)?.to_string();
+				let expanded = self.expand_literal(&command).try_blame(cmd_expr.span())?;
+				self.run_shell_cmd(&expanded).try_blame(cmd_expr.span())?
 			}
 			ExprKind::Command(Command::BufSwitch { id }) => {
-				let Val::Num(id) = self.eval_expr(id).unwrap_or_else(|| blame_span(id.span(), "vicut: expected a number for buffer ID")) else {
-					blame_span(id.span(), "vicut: expected a number for buffer ID")
+				let Val::Num(id) = self.eval_expr(false,id)? else {
+					return Err(VicErr::Simple("vicut: expected a number for buffer ID".into()))
 				}; 
-				self.editor.set(id as usize);
+				if id >= self.num_buffers() as isize || id < 0 {
+					Val::Bool(false)
+				} else {
+					self.editor.set(id as usize);
+					Val::Bool(true)
+				}
 			}
 			ExprKind::Command(Command::Include { path }) => {
 				todo!()
@@ -1076,48 +1150,38 @@ impl ViCut {
 			ExprKind::Command(Command::BufId) => {
 				// Get the current buffer's ID
 				let buf_id = self.editor.get();
-				if index.is_some() {
-					blame_span(cmd_expr.span(), "Cannot index into type 'integer'")
+				if !accessors.is_empty() {
+					return Err(VicErr::Full(cmd_expr.span(), "Cannot index into type 'integer'".into()))
 				}
-				return Some(Val::Num(buf_id as isize));
+				Val::Num(buf_id as isize)
 			}
 			ExprKind::Command(Command::Push { stack, value }) => {
-				let stack_var = self.eval_expr(stack).unwrap_or_else(|| blame_span(stack.span(), "vicut: Expected a stack for 'push' command"));
-				let value = self.eval_expr(value).unwrap_or_else(|| blame_span(stack.span(), "vicut: invalid value for 'push' command") ).clone();
-				if &stack_var.to_string() == "buffers" {
-					// the 'buffers' variable is a built-in which holds all of the currently open buffers
-					// so now we push the given data onto it as a new LineBuf
-					self.push_buffer(value);
-					return None
-				}
+				let is_buffers = self.expr_targets_buffers(stack);
+				let value = self.eval_expr(false,value).try_blame(value.span())?.clone();
+				let stack_var = self.var_from_expr_mut(stack).try_blame(stack.span())?;
 
-				let stack_val = self.get_var_mut(&stack_var.to_string())
-					.ok_or_else(|| format!("vicut: variable '{stack_var}' not found"))
-					.unwrap_or_else(complain_and_exit);
-				match stack_val {
+				match stack_var {
+					_ if is_buffers => {
+						self.push_buffer(value);
+					}
 					Val::Str(str) => {
 						str.push_str(&value.to_string());
 					}
 					Val::Arr(arr) => {
 						arr.push(value);
 					}
-					_ => blame_span(stack.span(), format!("vicut: expected a list or string for variable '{stack_var}', found {stack_val}"))
+					_ => return Err(VicErr::Full(
+						stack.span(),
+						format!("vicut: expected a list or string for variable '{stack:?}', found {stack_var}")
+					))
 				}
+				Val::Null
 			}
 			ExprKind::Command(Command::Pop { stack }) => {
-				let stack_var = self.eval_expr(stack).unwrap_or_else(|| blame_span(stack.span(), "Expected a stack for 'pop' command")).to_string();
-				if &stack_var == "buffers" {
-					// the 'buffers' variable is a built-in which holds all of the currently open buffers
-					// so now we pop the last buffer off of it
-					// we are in a command context, so we can ignore the return value
-					self.pop_buffer();
-					return None
-				}
-				let Some(stack_val) = self.get_var_mut(&stack_var) else {
-					blame_span(stack.span(), format!("vicut: variable '{stack_var}' not found"))
-				};
-
-				let popped_value = match stack_val {
+				let is_buffers = self.expr_targets_buffers(stack);
+				let stack_var = self.var_from_expr_mut(stack).try_blame(stack.span())?;
+				let popped_value = match stack_var {
+					_ if is_buffers => Some(Val::Str(self.pop_buffer())),
 					Val::Str(str) => {
 						let mut graphemes = str.graphemes(true);
 						let popped = graphemes.next_back().map(|gr| Val::Str(gr.into()));
@@ -1126,26 +1190,33 @@ impl ViCut {
 						popped
 					}
 					Val::Arr(arr) => {
+						// We have to take() instead of popping in this case
 						arr.pop()
 					}
-					_ => blame_span(stack.span(), format!("vicut: expected a list or string for variable '{stack_var}', found {stack_val}"))
+					_ => return Err(VicErr::Full(
+						stack.span(),
+						format!("vicut: expected a list or string for variable '{stack:?}', found {stack_var}")
+					))
 				};
-				return popped_value
+
+				if is_buffers && self.num_buffers() == 0 {
+					self.push_buffer("");
+				}
+				popped_value.unwrap_or_default()
 			}
 			ExprKind::Command(Command::Break) |
-				ExprKind::Command(Command::Continue) => {
-					// These are only checked for in loop contexts
-					// We can just return
-					return None
-				}
+			ExprKind::Command(Command::Continue) => {
+				// These are only checked for in loop contexts
+				// We can just return
+				Val::Null
+			}
 			ExprKind::Command(Command::Yank { register, motion }) => {
 				// Evaluate the arg and yank it into the given register
-				let reg = self.eval_expr(register).unwrap_or_else(|| blame_span(register.span(), "Expected a register name for 'yank' command")).to_string()
-					.chars().next().unwrap_or_else(|| blame_span(register.span(), format!("vicut: expected a register name, found empty string")));
-				let span = motion.span();
-				let motion_eval = self.eval_expr(motion).unwrap_or_else(|| blame_span(motion.span(), "Expected a motion for 'yank' command")).to_string();
+				let reg = self.eval_expr(false,register).try_blame(register.span())?.to_string()
+					.chars().next().ok_or(VicErr::Full(register.span(), "vicut: expected a register name, found empty string".into()))?;
+				let motion_eval = self.eval_expr(false,motion).try_blame(motion.span())?.to_string();
 
-				let value = self.read_field(&motion_eval).unwrap_or_else(|err| blame_span(motion.span(), err));
+				let value = self.read_field(&motion_eval).try_blame(motion.span())?;
 
 				// Uppercase register name means "append to the register"
 				if reg.is_ascii_uppercase() {
@@ -1153,29 +1224,32 @@ impl ViCut {
 				} else {
 					write_register(Some(reg), RegisterContent::Span(value.to_string()));
 				}
+				Val::Null
 			}
 			ExprKind::Command(Command::Return { ret }) => {
 				let Some(ret) = ret else {
-					return Some(Val::Null)
+					return Ok(Val::Null)
 				};
-				// Evaluate the argument and return it
-				// This is the only branch that returns a value
-				let value = self.eval_expr(ret).unwrap_or_else(|| blame_span(ret.span(), "Failed to evaluate return value"));
-				return Some(value)
+				self.eval_expr(false,ret).try_blame(ret.span())?
 			}
 			ExprKind::Command(Command::Echo { args }) => {
 				if args.is_empty() {
 					println!();
-					return None
+					return Ok(Val::Null);
 				}
 				let mut display_args = vec![];
 				for arg in args {
-					let value = self.eval_expr(arg).unwrap_or_else(|| blame_span(arg.span(), "Failed to evaluate echo arg"));
+					let value = self.eval_expr(false,arg).try_blame(arg.span())?;
 
 					display_args.push(value.to_string());
 				}
 				let output = display_args.join(" ");
-				println!("{output}");
+				if is_top_level {
+					println!("{output}");
+					Val::Null
+				} else {
+					Val::Str(output)
+				}
 			}
 			ExprKind::Command(Command::Repeat { count, block }) => {
 				let n_repeats = self.eval_count(count).unwrap_or_else(complain_and_exit);
@@ -1184,18 +1258,19 @@ impl ViCut {
 
 					for r_cmd in block {
 						// We use recursion so that we can nest repeats easily
-						self.eval_expr(r_cmd);
+						self.eval_expr(true,r_cmd);
 					}
 					if !self.find_opt(|o| o.keep_mode).unwrap_or(false) {
 						self.set_normal_mode();
 					}
 				}
 				self.ascend(); // leave scope
+				Val::Null
 			}
 			ExprKind::Command(Command::NotGlobal { pattern, block }) |
 			ExprKind::Command(Command::Global { pattern, block }) => {
 				let polarity = matches!(cmd, ExprKind::Command(Command::Global { .. }));
-				let pattern = self.eval_expr(pattern).unwrap_or_else(|| blame_span(pattern.span(), "Failed to evaluate pattern for loop block"));
+				let pattern = self.eval_expr(false,pattern).try_blame(pattern.span())?;
 				let motion = match polarity {
 					false  => Motion::NotGlobal(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pattern),
 					true => Motion::Global(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pattern)
@@ -1207,21 +1282,21 @@ impl ViCut {
 				if !lines.is_empty() {
 					// Positive branch
 					for line in lines {
-						let mut line_no = line;
+						let line_no = line;
 						let field_num = if self.find_opt_or_default(|o| o.global_uses_line_numbers) {
 							// If we are using line numbers, we need to set the field number to the line number
-							&mut line_no
+							line_no
 						} else {
-							&mut self.exec_ctx.field_num.clone()
+							self.exec_ctx.field_num
 						};
 						let Some((start,_)) = self.current_buffer().line_bounds(line) else { continue };
 						// Set the cursor on the start of the line
 						self.current_buffer().cursor.set(start);
 						// Execute our commands
-
+						self.exec_ctx.field_num = field_num;
 						self.descend(); // new scope
 						for cmd in block {
-							self.eval_expr(cmd);
+							self.eval_expr(true,cmd);
 							if !self.find_opt_or_default(|o| o.keep_mode) {
 								self.set_normal_mode();
 							}
@@ -1229,23 +1304,29 @@ impl ViCut {
 						self.ascend(); // leave scope
 					}
 				} 	
+				Val::Null
 			}
 			ExprKind::Command(Command::Move { motion }) => {
-				let motion_eval = self.eval_expr(motion).unwrap_or_else(|| blame_span(motion.span(), "Expected a vim motion for 'move' command")).to_string();
+				let motion_eval = self.eval_expr(false,motion).try_blame(motion.span())?.to_string();
+				let cursor_pos = self.current_buffer().cursor.get();
 				if let Err(e) = self.move_cursor(&motion_eval) {
-					blame_span(motion.span(), e);
+					return Err(e).try_blame(motion.span());
 				}
+				let new_pos = self.current_buffer().cursor.get();
+				Val::Bool(cursor_pos != new_pos)
 			}
 			ExprKind::Command(Command::Cut { motion }) => {
-				let motion_eval = self.eval_expr(motion).unwrap_or_else(|| blame_span(motion.span(), "Expected a vim motion for 'cut' command")).to_string();
+				let motion_eval = self.eval_expr(false,motion).try_blame(motion.span())?.to_string();
 				self.exec_ctx.field_num += 1;
 				match self.read_field(&motion_eval) {
 					Ok(field) => {
 						let name = format!("{}",self.exec_ctx.field_num);
-						self.exec_ctx.fields.push((name,field))
+						self.exec_ctx.fields.push((name,field.clone()));
+						return Ok(Val::Str(field));
 					}
 					Err(e) => {
 						eprintln!("vicut: {e}");
+						Val::Bool(false)
 					}
 				}
 			}
@@ -1262,44 +1343,93 @@ impl ViCut {
 				if !self.exec_ctx.fields.is_empty() {
 					self.exec_ctx.fmt_lines.push(std::mem::take(&mut self.exec_ctx.fields));
 				}
+				Val::Null
+			}
+			ExprKind::ClassDef { name, fields } => {
+				let mut fields = fields
+					.clone()
+					.into_iter()
+					.map(|(name, expr)| {
+						self.eval_expr(false, &expr).map(|val| (name, val))
+					})
+				.collect::<Result<HashMap<String, Val>, VicErr>>()?;
+				fields.insert("_name".to_string(), Val::Str(name.to_string()));
+				fields.insert("_type".to_string(), Val::Str("class".to_string()));
+				let val = Val::Dict(fields);
+				self.set_var(name.to_string(), val)?;
+				Val::Null
 			}
 			ExprKind::FuncDef { name, params, body } => {
 				// Define a function
-				self.set_function(name.clone(), params.clone(), body.clone());
+				if is_top_level {
+					self.set_var(name.clone(), Val::Closure(params.clone(),body.clone()))?;
+					Val::Null
+				} else {
+					Val::Closure(params.clone(), body.clone())
+				}
 			}
 			ExprKind::FuncCall { name, args } => {
 				// Func calls use evaluated names, so that stuff like func_ptr_array[0](arg1,arg2) is valid
-				let name = self.eval_expr(name).unwrap_or_else(|| blame_span(name.span(), "Invalid name for function call")).to_string();
-				let func_args = args
-					.iter()
-					.map(|arg| self.eval_expr(arg).unwrap_or_else(|| blame_span(arg.span(), "Invalid argument in function call")))
-					.collect::<Vec<_>>();
-				self.eval_function(&name, func_args).unwrap_or_else(|err| blame_span(cmd_expr.span(), err));
+				let result = self.eval_expr(false, name).try_blame(name.span());
+				if let Ok(Val::Closure(arg_names, body)) = result {
+					// If we are here, we are working with an anonymous closure
+					let func_args: Result<Vec<Val>, VicErr> = args
+						.iter()
+						.map(|arg| self.eval_expr(false,arg).try_blame(arg.span()))
+						.collect();
+					self.eval_closure(func_args?, arg_names, body)?
+
+				} else if let Ok(Val::Var(var)) = result {
+					// If we are here, we are working with a named, defined function
+					if let Some(Val::Closure(arg_names, body)) = self.read_var(&var) {
+						let func_args: Result<Vec<Val>, VicErr> = args
+							.iter()
+							.map(|arg| self.eval_expr(false,arg).try_blame(arg.span()))
+							.collect();
+						self.eval_closure(func_args?, arg_names, body)?
+					} else {
+						return Err(VicErr::Full(
+							name.span(),
+							format!("'{}' is not callable", name.span().as_str())
+						))
+					}
+
+				} else {
+					return Err(VicErr::Full(
+						name.span(),
+						format!("Function '{}' not found", name.span().as_str())
+					))
+				}
 			}
 			ExprKind::VarDec { name, value } => {
-				let value = self.eval_expr(value).unwrap_or_else(|| blame_span(value.span(), "Invalid value for variable declaration"));
-				self.set_var(name.clone(), value.clone()).unwrap_or_else(|err| blame_span(cmd_expr.span(), "Failed to set variable"));
+				let value = self.eval_expr(false,value).try_blame(value.span())?;
+				self.set_var(name.clone(), value.clone()).try_blame(cmd_expr.span())?;
+				Val::Null
 			}
 			ExprKind::VarMut { name, op, value } => {
-				let value = self.eval_expr(value).unwrap_or_else(|| blame_span(value.span(), "Invalid value for variable mutation"));
-				if let Some(index) = index {
-					todo!()
+				let value = self.eval_expr(false,value).try_blame(value.span())?;
+				if !accessors.is_empty() && accessors.len() > 1 {
+					return Err(VicErr::Full(
+							cmd_expr.span(),
+							"Assigning to a variable with multiple indexes is not yet supported".to_string()
+					));
 				} else {
-					self.mutate_var(&name, op.clone(), value.clone()).unwrap_or_else(|err| blame_span(cmd_expr.span(), err));
+					self.mutate_var(name, op.clone(), accessors.first(), value.clone()).try_blame(cmd_expr.span())?;
 				}
+				Val::Null
 			}
 			ExprKind::IfBlock { cond_blocks, else_block } => {
 				let mut executed = false;
 				for block in cond_blocks {
 					let Expr { value, .. } = block;
 					let ExprKind::CondBlock { cond, body } = value else { unreachable!() };
-					let cond_value = self.eval_expr(cond).unwrap_or_else(|| blame_span(block.span(), "Failed to evaluate 'if' condition"));
+					let cond_value = self.eval_expr(false,cond).try_blame(cond.span())?;
 					let result = cond_value.is_truthy(self);
 					if result {
 						executed = true;
 						self.descend(); // new scope
 						for cmd in body {
-							self.eval_expr(cmd).unwrap_or_else(|| blame_span(cmd.span(), "Failed to execute 'if' statement command"));
+							self.eval_expr(true,cmd);
 							if !self.find_opt_or_default(|o| o.keep_mode) {
 								self.set_normal_mode();
 							}
@@ -1309,22 +1439,21 @@ impl ViCut {
 					}
 				}
 
-				if let Some(else_block) = else_block {
-					if !executed {
-						self.descend(); // new scope
-						for cmd in else_block {
-							self.eval_expr(cmd).unwrap_or_else(|| blame_span(cmd.span(), "Failed to execute 'else' statement command"));
-							if !self.find_opt_or_default(|o| o.keep_mode) {
-								self.set_normal_mode();
-							}
+				if let Some(else_block) = else_block && !executed {
+					self.descend(); // new scope
+					for cmd in else_block {
+						self.eval_expr(false,cmd).try_blame(cmd.span())?;
+						if !self.find_opt_or_default(|o| o.keep_mode) {
+							self.set_normal_mode();
 						}
-						self.ascend(); // leave scope
 					}
+					self.ascend(); // leave scope
 				}
+				Val::Null
 			}
 			ExprKind::ForBlock { var_name, list, body } => {
-				let val = self.eval_expr(list).unwrap_or_else(|| blame_span(list.span(), "Failed to evaluate list in 'for' block"));
-				let val_iter = val.try_into_iter().unwrap_or_else(|err| blame_span(cmd_expr.span(), err));
+				let val = self.eval_expr(false,list).try_blame(list.span())?;
+				let val_iter = val.try_into_iter().try_blame(cmd_expr.span())?;
 
 				'main: for item in val_iter {
 					self.descend(); // new scope
@@ -1337,117 +1466,634 @@ impl ViCut {
 						if cmd.is_continue() {
 							continue 'main;
 						}
-						self.eval_expr(cmd).unwrap_or_else(|| blame_span(cmd.span(), "Failed to execute 'for' statement command"));
+						self.eval_expr(true,cmd).try_blame(cmd.span())?;
 						if !self.find_opt_or_default(|o| o.keep_mode) {
 							self.set_normal_mode();
 						}
 					}
 					self.ascend(); // leave scope
 				}
+				Val::Null
 			}
 			ExprKind::UntilBlock { cond, body } |
-				ExprKind::WhileBlock { cond, body } => {
-					// This is the function we will use to see if we are still running
-					let running = |vicut: &mut ViCut| {
-						let result = vicut.eval_expr(cond).unwrap_or_else(|| blame_span(cond.span(), "Failed to evaluate loop block condition")).is_truthy(vicut); 
-						if matches!(cmd, ExprKind::WhileBlock { .. }) {
-							result
-						} else {
-							!result
-						}
-					};
+			ExprKind::WhileBlock { cond, body } => {
+				// This is the function we will use to see if we are still running
+				let running = |vicut: &mut ViCut| -> Result<bool,VicErr> {
+					let result = vicut.eval_expr(false,cond).try_blame(cond.span())?.is_truthy(vicut); 
+					if matches!(cmd, ExprKind::WhileBlock { .. }) {
+						Ok(result)
+					} else {
+						Ok(!result)
+					}
+				};
 
-					while running(self) {
-						self.descend(); // new scope
-						for cmd in body {
-							if cmd.is_break() {
-								break;
-							}
-							if cmd.is_continue() {
-								continue;
-							}
-							self.eval_expr(cmd);
-							if !self.find_opt_or_default(|o| o.keep_mode) {
-								self.set_normal_mode();
-							}
+				while running(self)? {
+					self.descend(); // new scope
+					for cmd in body {
+						if cmd.is_break() {
+							break;
 						}
-						self.ascend(); // leave scope
+						if cmd.is_continue() {
+							continue;
+						}
+						self.eval_expr(true,cmd);
+						if !self.find_opt_or_default(|o| o.keep_mode) {
+							self.set_normal_mode();
+						}
+					}
+					self.ascend(); // leave scope
+				}
+				Val::Null
+			}
+			ExprKind::Block(exprs) => todo!(),
+			ExprKind::Value(val) => self.eval_value(val).try_blame(cmd_expr.span())?,
+			ExprKind::Opts(exprs) => {
+				self.eval_opts(exprs).try_blame(cmd_expr.span())?;
+				Val::Null
+			}
+			ExprKind::Opt { set, name, arg } => {
+				// really shouldn't be here, but just in case...
+				self.eval_opts(std::slice::from_ref(cmd_expr)).try_blame(cmd_expr.span());
+				Val::Null
+			}
+			ExprKind::Range { start, end } => todo!(),
+			ExprKind::BinExpr(rpn) => self.eval_bin_expr(rpn).try_blame(cmd_expr.span())?,
+			ExprKind::BoolExpr(rpn) => self.eval_bool_expr(rpn).try_blame(cmd_expr.span())?,
+			_ => unimplemented!("Unimplemented expression kind: {cmd:?}")
+		};
+		if !accessors.is_empty() {
+			let mut eval = eval;
+			for accessor in accessors {
+				let Ok(val) = self.access_val(&mut eval, accessor) else {
+					return Ok(Val::Null)
+				};
+				eval = val;
+			}
+			Ok(eval)
+		} else {
+			Ok(eval)
+		}
+	}
+	fn eval_bool_expr(&mut self, rpn: &[RpnItem]) -> Result<Val,VicErr> {
+		let mut stack = vec![];
+		for item in rpn {
+			match item {
+				RpnItem::Not(expr) |
+				RpnItem::Val(expr) => {
+					let polarity = matches!(item, RpnItem::Val(_));
+					let val = self.eval_expr(false, expr).try_blame(expr.span())?.is_truthy(self);
+					if polarity {
+						stack.push(val);
+					} else {
+						stack.push(!val);
 					}
 				}
-			ExprKind::Vic(exprs) => todo!(),
-			ExprKind::TopLevel(expr) => todo!(),
-			ExprKind::Block(exprs) => todo!(),
-			ExprKind::Value(val) => todo!(),
-			ExprKind::Opts(exprs) => todo!(),
-			ExprKind::Opt { name, arg } => todo!(),
-			ExprKind::CondBlock { cond, body } => todo!(),
-			ExprKind::Range { start, end } => todo!(),
-			ExprKind::BinaryExpr { left, op, right } => todo!(),
-			ExprKind::BoolExpr { left, op, right } => todo!(),
-		};
-		if let Some(index) = index {
+				RpnItem::BoolOp(op) => {
+					let right = stack.pop().ok_or("Expected a value on the stack for boolean operation")?;
+					let left = stack.pop().ok_or("Expected a value on the stack for boolean operation")?;
 
-		} else {
-		}
-		None
-	}
-	fn execute(&mut self, filename: Option<PathBuf>) -> Result<Vec<Vec<(String,String)>>,String> {
-		let basename = filename.clone()
-			.map(|s| s.file_name().unwrap_or_default().to_string_lossy().to_string())
-			.unwrap_or_else(|| String::from("stdin"));
-		let filepath = filename.map(|s| s.to_string_lossy().to_string()).unwrap_or(String::from("stdin"));
-		self.set_var("filename".into(), Val::Str(basename))?;
-		self.set_var("filepath".into(), Val::Str(filepath))?;
-
-
-		let cmds = self.cmds.clone(); // FIXME: This might cause some weird desync issues if we do something like allowing scoped 'include' calls later
-		for cmd in cmds {
-			self.eval_expr(&cmd);
-			if !self.find_opt(|o| o.keep_mode).unwrap_or_default() {
-				self.set_normal_mode();
+					let result = match op {
+						BoolOp::Ne => left != right,
+						BoolOp::Eq => left == right,
+						BoolOp::Lt => left < right,
+						BoolOp::Gt => left > right,
+						BoolOp::Lte => left <= right,
+						BoolOp::Gte => left >= right,
+						BoolOp::And => left && right,
+						BoolOp::Or => left || right,
+						BoolOp::Not => unreachable!()
+					};
+					stack.push(result);
+				}
+				_ => unreachable!()
 			}
 		}
-
-		let opts = self.flatten_opts();
-
-		if !self.exec_ctx.fields.is_empty() {
-			self.exec_ctx.fmt_lines.push(std::mem::take(&mut self.exec_ctx.fields));
-		}
-
-		if self.exec_ctx.fmt_lines.is_empty() && self.find_opt(|o| o.silent).unwrap_or_default() {
-			return Ok(vec![]);
-		}
-
-		// Let's figure out if we want to print the whole buffer
-		let no_fields = self.exec_ctx.fmt_lines.is_empty(); // No fields were extracted
-		let has_files = !opts.files.is_some_and(|f| f.is_empty()); // We have files to edit
-		let editing_inplace = self.find_opt(|o| o.edit_inplace).unwrap_or_default(); // We are not editing in place
-
-		// If we have not extracted any fields, and the following conditions are true:
-		// * We have files without editing in place, or
-		// * We don't have any files, order
-		// * We have a pattern search with at least one field extraction
-		//
-		// then we print the entire buffer
-		let should_print_entire_buffer = (!editing_inplace || !has_files) && no_fields;
-
-		if should_print_entire_buffer {
-			let big_line = self.current_buffer().buffer.clone();
-			self.exec_ctx.fmt_lines.push(vec![("0".into(),big_line)]);
-		}
-
-		if opts.trim_fields.unwrap_or_default() {
-			self.trim_fields();
-		}
-
-		Ok(self.exec_ctx.fmt_lines.clone())
+		assert_eq!(stack.len(), 1, "RPN Stack did not fold into a single value: {stack:?}");
+		Ok(Val::Bool(stack.pop().unwrap()))
 	}
-	/// Trim the fields 🧑‍🌾
-	fn trim_fields(&mut self) {
-		for line in self.exec_ctx.fmt_lines.iter_mut() {
-			for (_, field) in line {
-				*field = field.trim().to_string()
+	fn eval_bin_expr(&mut self, rpn: &[RpnItem]) -> Result<Val,VicErr> {
+		// Luckily pest does most of the invariant enforcing for this on it's own
+		let mut stack = vec![];
+		for item in rpn {
+			match item {
+				RpnItem::Val(val) => {
+					let eval = self.eval_expr(false, val).try_blame(val.span())?;
+					stack.push(eval);
+				}
+				RpnItem::BinOp(op) => {
+					let right = stack.pop().ok_or("Expected a value on the stack for binary operation")?;
+					let left = stack.pop().ok_or("Expected a value on the stack for binary operation")?;
+					let result = match op {
+						BinOp::Add => left.add(right)?,
+						BinOp::Sub => left.sub(right)?,
+						BinOp::Mult => left.mult(right)?,
+						BinOp::Div => left.div(right)?,
+						BinOp::Mod => left.modulo(right)?,
+						BinOp::Pow => left.pow(right)?,
+						_ => unreachable!()
+					};
+					stack.push(result);
+				}
+				_ => unreachable!()
 			}
+		}
+		if stack.len() != 1 {
+			return Err(VicErr::Simple(format!("Expected a single value on the stack after evaluation, found {}", stack.len())))
+		}
+		Ok(stack.pop().unwrap())
+	}
+	fn eval_opts(&mut self, opts: &[Expr]) -> Result<(),VicErr> {
+		for opt in opts {
+			let ExprKind::Opt { set, name, arg } = opt.value() else { unreachable!("Expected an Opt expression") };
+			match name.as_str() {
+				"json" => self.opts_mut().json = Some(*set),
+				"linewise" => self.opts_mut().linewise = Some(*set),
+				"serial" => self.opts_mut().single_thread = Some(*set),
+				"trim_fields" => self.opts_mut().trim_fields = Some(*set),
+				"keep_mode" => self.opts_mut().keep_mode = Some(*set),
+				"global_uses_line_numbers" => self.opts_mut().global_uses_line_numbers = Some(*set),
+				"edit_inplace" => self.opts_mut().edit_inplace = Some(*set),
+				"backup" => self.opts_mut().backup_files = Some(*set),
+				"trace" => self.opts_mut().trace = Some(*set),
+				"no_input" => self.opts_mut().no_input = Some(*set),
+				"silent" => self.opts_mut().silent = Some(*set),
+				"file" => {
+					if let Some(arg) = arg {
+						let file_path = self.eval_expr(false,arg).try_blame(arg.span())?;
+						if let Val::Str(path) = file_path {
+							let path = PathBuf::from(path);
+							self.push_file(path);
+						} else {
+							return Err(VicErr::Simple(format!("Expected a string for file path, found {}", file_path.display_type())))
+						}
+					} else {
+						return Err(VicErr::Simple("Expected a file path argument for 'file' option".into()))
+					}
+				}
+				"template" => {
+					if let Some(arg) = arg {
+						let template = self.eval_expr(false,arg).try_blame(arg.span())?;
+						if let Val::Str(template) = template {
+							self.opts_mut().template = Some(template);
+						} else {
+							return Err(VicErr::Simple(format!("Expected a string for template, found {}", template.display_type())))
+						}
+					} else {
+						return Err(VicErr::Simple("Expected a template argument for 'template' option".into()))
+					}
+				}
+				"delimiter" => {
+					if let Some(arg) = arg {
+						let delimiter = self.eval_expr(false,arg).try_blame(arg.span())?;
+						if let Val::Str(delimiter) = delimiter {
+							self.opts_mut().delimiter = Some(delimiter);
+						} else {
+							return Err(VicErr::Simple(format!("Expected a string for delimiter, found {}", delimiter.display_type())))
+						}
+					} else {
+						return Err(VicErr::Simple("Expected a delimiter argument for 'delimiter' option".into()))
+					}
+				}
+				"max_jobs" => {
+					if let Some(arg) = arg {
+						let max_jobs = self.eval_expr(false,arg).try_blame(arg.span())?;
+						if let Val::Num(num) = max_jobs {
+							if num < 1 {
+								return Err(VicErr::Simple("vicut: max jobs must be at least 1".into()));
+							}
+							self.opts_mut().max_jobs = Some(num as u32);
+						} else {
+							return Err(VicErr::Simple(format!("Expected a number for max jobs, found {}", max_jobs.display_type())))
+						}
+					} else {
+						return Err(VicErr::Simple("Expected a max jobs argument for 'max_jobs' option".into()))
+					}
+				}
+				"backup_ext" => {
+					if let Some(arg) = arg {
+						let backup_ext = self.eval_expr(false,arg).try_blame(arg.span())?;
+						if let Val::Str(ext) = backup_ext {
+							self.opts_mut().backup_extension = Some(ext);
+						} else {
+							return Err(VicErr::Simple(format!("Expected a string for backup extension, found {}", backup_ext.display_type())))
+						}
+					} else {
+						return Err(VicErr::Simple("vicut: expected a backup extension argument for 'backup_ext' option".into()));
+					}
+				}
+				"write" => todo!(),
+				"pipe_in" => todo!(),
+				"pipe_out" => todo!(),
+				_ => unreachable!("Unknown option: {name}"),
+			}
+		}
+		Ok(())
+	}
+	fn index_val_mut(&mut self, indexed_val: &mut Val, index: &Index, new_val: Val) -> Result<(),VicErr> {
+		match indexed_val {
+			Val::Str(str) => {
+				let graphemes = str.grapheme_indices(true).map(|(idx,gr)| (idx,gr.to_string())).collect::<Vec<(usize,String)>>();
+				match index {
+					Index::Single(idx) => {
+						let idx = self.eval_expr(false, idx).try_blame(idx.span())?;
+						let Val::Num(idx) = idx else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.display_type())))
+						};
+						let Some((byte_pos,gr)) = graphemes.get(idx as usize) else {
+							return Err(VicErr::Simple(format!("Index {idx} out of bounds for string of length {}", str.len())))
+						};
+						let range = *byte_pos..byte_pos + gr.len();
+						str.replace_range(range, &new_val.to_string());
+					}
+					Index::To(idx) => {
+						let idx = self.eval_expr(false, idx).try_blame(idx.span())?;
+						let Val::Num(idx) = idx else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.display_type())))
+						};
+						let Some((byte_pos,_)) = graphemes.get(idx as usize) else {
+							return Err(VicErr::Simple(format!("Index {idx} out of bounds for string of length {}", str.len())))
+						};
+						str.replace_range(..byte_pos, &new_val.to_string());
+					}
+					Index::From(idx) => {
+						let idx = self.eval_expr(false, idx).try_blame(idx.span())?;
+						let Val::Num(idx) = idx else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.display_type())))
+						};
+						let Some((byte_pos,_)) = graphemes.get(idx as usize) else {
+							return Err(VicErr::Simple(format!("Index {idx} out of bounds for string of length {}", str.len())))
+						};
+						str.replace_range(byte_pos.., &new_val.to_string());
+					}
+					Index::Slice(start, end) => {
+						let start = self.eval_expr(false, start).try_blame(start.span())?;
+						let Val::Num(start) = start else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", start.display_type())))
+						};
+						let Some((start_byte_pos,_)) = graphemes.get(start as usize) else {
+							return Err(VicErr::Simple(format!("Index {start} out of bounds for string of length {}", str.len())))
+						};
+						let end = self.eval_expr(false, end).try_blame(end.span())?;
+						let Val::Num(end) = end else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", end.display_type())))
+						};
+						let Some((end_byte_pos,_)) = graphemes.get(end as usize) else {
+							return Err(VicErr::Simple(format!("Index {end} out of bounds for string of length {}", str.len())))
+						};
+						let (start_byte_pos,end_byte_pos) = ordered(*start_byte_pos, *end_byte_pos);
+						let range = start_byte_pos..end_byte_pos;
+						str.replace_range(range, &new_val.to_string());
+					}
+					Index::ToInc(_) |
+					Index::SliceInc(_, _) => unimplemented!(),
+				}
+			}
+			Val::Arr(arr) => {
+				match index {
+					Index::Single(idx) => {
+						let idx = self.eval_expr(false, idx).try_blame(idx.span())?;
+						let Val::Num(idx) = idx else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.display_type())))
+						};
+						let idx = idx as usize;
+						if idx >= arr.len() {
+							// If someone assigns to an out of bounds index,
+							// We fill the array with Nulls leading up to that index
+							arr.resize_with(idx + 1, || Val::Null);
+						}
+						arr[idx] = new_val
+					}
+					Index::To(idx) => {
+						let idx = self.eval_expr(false, idx).try_blame(idx.span())?;
+						let Val::Num(idx) = idx else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.display_type())))
+						};
+						let idx = idx as usize;
+						if idx > arr.len() {
+							arr.resize_with(idx + 1, || Val::Null);
+						}
+						match new_val {
+							Val::Arr(arr2) => {
+								// In this case, we splice the other array into the current array
+								arr.splice(..idx, arr2.iter().cloned());
+							}
+							_ => {
+								// In the case of other values, we replace every sliced index with a copy of the given Val
+								arr.splice(..idx, std::iter::repeat(new_val).take(idx));
+							}
+						}
+					}
+					Index::From(idx) => {
+						let idx = self.eval_expr(false, idx).try_blame(idx.span())?;
+						let Val::Num(idx) = idx else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.display_type())))
+						};
+						let idx = idx as usize;
+						if idx >= arr.len() {
+							arr.resize_with(idx + 1, || Val::Null);
+						}
+						match new_val {
+							Val::Arr(arr2) => {
+								// In this case, we splice the other array into the current array
+								arr.splice(idx.., arr2.iter().cloned());
+							}
+							_ => {
+								// In the case of other values, we replace every sliced index with a copy of the given Val
+								arr.splice(idx.., std::iter::repeat(new_val).take(idx));
+							}
+						}
+					}
+					Index::Slice(start, end) => {
+						let start = self.eval_expr(false, start).try_blame(start.span())?;
+						let Val::Num(start) = start else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", start.display_type())))
+						};
+						let start = start as usize;
+						if start >= arr.len() {
+							arr.resize_with(start + 1, || Val::Null);
+						}
+						let end = self.eval_expr(false, end).try_blame(end.span())?;
+						let Val::Num(end) = end else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", end.display_type())))
+						};
+						let end = end as usize;
+						if end > arr.len() {
+							arr.resize_with(end + 1, || Val::Null);
+						}
+						let (start,end) = ordered(start, end);
+						match new_val {
+							Val::Arr(arr2) => {
+								// In this case, we splice the other array into the current array
+								arr.splice(start..end, arr2.iter().cloned());
+							}
+							_ => {
+								// In the case of other values, we replace every sliced index with a copy of the given Val
+								arr.splice(start..end, std::iter::repeat_n(new_val, end - start));
+							}
+						}
+
+					}
+					Index::ToInc(_) |
+					Index::SliceInc(_, _) => unimplemented!(),
+				}
+			}
+			_ => {
+				return Err(VicErr::Simple(format!("Cannot index into type '{}'", indexed_val.display_type())))
+			}
+		}
+		Ok(())
+	}
+	fn access_val(&mut self, val: &mut Val, accessor: &Accessor) -> Result<Val,VicErr> {
+		match accessor {
+			Accessor::Method(name, exprs) => {
+				if let Val::Dict(map) = val {
+					if let Some(Val::Str(s)) = map.get("_type") {
+						if s == "class" {
+							let Some(Val::Closure(args,body)) = map.get(name) else {
+								return Err(VicErr::Simple(format!("Class '{s}' has no method '{name}'")))
+							};
+							// Since 'vic' mainly passes stuff by value, we have to do some seriously weird shit
+							// to make 'self' parameters work.
+							// We use this Val::Ref() value in order to track the changes made by the closure.
+							let method_map = map.clone();
+							let self_val = Val::Ref(Arc::new(RefCell::new(Box::new(Val::Dict(method_map)))));
+							let mut eval_args = vec![];
+
+							// Check for the position of the 'self' parameter in the args list
+							let self_pos = args.iter().position(|a| a == "self");
+
+							// Make sure we have the right number of args before doing any real work
+							let arg_count = if self_pos.is_some() { args.len() - 1 } else { args.len() };
+							if exprs.len() != arg_count {
+								return Err(VicErr::Simple(format!(
+									"Method '{}' expects {} arguments, found {}",
+									name, arg_count, exprs.len()
+								)));
+							}
+
+							for expr in exprs {
+								// Evaluate the user's given args
+								let eval = self.eval_expr(false, expr).try_blame(expr.span())?;
+								eval_args.push(eval);
+							}
+							if let Some(pos) = self_pos {
+								eval_args.insert(pos, self_val.clone());
+							}
+							let res = self.eval_closure(eval_args, args.clone(), body.clone());
+							if self_pos.is_some() {
+								let Val::Ref(reference) = self_val else { unreachable!() };
+								let Val::Dict(dict) = *(reference.borrow().clone()) else { unreachable!() };
+								*map = dict.clone();
+							}
+							res
+						} else {
+							todo!()
+						}
+					} else {
+						todo!()
+					}
+				} else {
+					todo!()
+				}
+			}
+			Accessor::Field(field) => {
+				dbg!(&field);
+				if let Val::Dict(map) = val.try_deref() {
+					if let Some(v) = map.get(field) {
+						Ok(v.clone())
+					} else {
+						Err(VicErr::Simple(format!("Field '{}' not found in value of type '{}'", field, val.display_type())))
+					}
+				} else {
+					Err(VicErr::Simple(format!("Cannot access field '{}' on type '{}'", field, val.display_type())))
+				}
+			}
+			Accessor::Index(index) => todo!(),
+		}
+	}
+	fn index_val(&mut self, val: &Val, index: &Index) -> Result<Val,VicErr> {
+		match val {
+			Val::Str(str) => {
+				let graphemes = str.graphemes(true).collect::<Vec<&str>>();
+				match index {
+					Index::Single(idx) => {
+						let idx = self.eval_expr(false, idx).try_blame(idx.span())?;
+						let Val::Num(idx) = idx else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.display_type())))
+						};
+						let Some(gr) = graphemes.get(idx as usize) else {
+							return Err(VicErr::Simple(format!("Index {idx} out of bounds for string of length {}", str.len())))
+						};
+						Ok(Val::Str(gr.to_string()))
+					}
+					Index::To(idx) => {
+						let idx = self.eval_expr(false, idx).try_blame(idx.span())?;
+						let Val::Num(idx) = idx else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.display_type())))
+						};
+						let idx = idx as usize;
+						if idx > str.len() {
+							return Err(VicErr::Simple(format!("Index {idx} out of bounds for string of length {}", str.len())))
+						}
+						let slice = graphemes.get(..idx).unwrap().join("");
+						Ok(Val::Str(slice))
+					}
+					Index::From(idx) => {
+						let idx = self.eval_expr(false, idx).try_blame(idx.span())?;
+						let Val::Num(idx) = idx else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.display_type())))
+						};
+						let idx = idx as usize;
+						if idx >= str.len() {
+							return Err(VicErr::Simple(format!("Index {idx} out of bounds for string of length {}", str.len())))
+						}
+						let slice = graphemes.get(idx..).unwrap().join("");
+						Ok(Val::Str(slice))
+					}
+					Index::Slice(start, end) => {
+						let start = self.eval_expr(false, start).try_blame(start.span())?;
+						let Val::Num(start) = start else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", start.display_type())))
+						};
+						let end = self.eval_expr(false, end).try_blame(end.span())?;
+						let Val::Num(end) = end else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", end.display_type())))
+						};
+						let mut start = start as usize;
+						let mut end = end as usize;
+						match start.cmp(&end) {
+							Ordering::Less => {
+								if end > str.len() {
+									return Err(VicErr::Simple(format!("Index {end} out of bounds for string of length {}", str.len())))
+								}
+								if start >= str.len() {
+									return Err(VicErr::Simple(format!("Index {start} out of bounds for string of length {}", str.len())))
+								}
+								let slice = graphemes.get(start..end).unwrap().join("");
+								Ok(Val::Str(slice))
+							}
+							Ordering::Greater => {
+								std::mem::swap(&mut start, &mut end);
+								if end > str.len() {
+									return Err(VicErr::Simple(format!("Index {end} out of bounds for string of length {}", str.len())))
+								}
+								if start >= str.len() {
+									return Err(VicErr::Simple(format!("Index {start} out of bounds for string of length {}", str.len())))
+								}
+								let len = start - end;
+								let slice = graphemes
+									.into_iter()
+									.rev()
+									.skip(start)
+									.take(len)
+									.collect::<Vec<_>>().join("");
+								Ok(Val::Str(slice))
+							}
+							Ordering::Equal => Ok(Val::Str(String::new())),
+						}
+					}
+					_ => unimplemented!()
+				}
+			}
+			Val::Arr(arr) => {
+				match index {
+					Index::Single(idx) => {
+						let idx = self.eval_expr(false, idx).try_blame(idx.span())?;
+						let Val::Num(idx) = idx else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.display_type())))
+						};
+						let idx = idx as usize;
+						if idx >= arr.len() {
+							return Err(VicErr::Simple(format!("Index {idx} out of bounds for array of length {}", arr.len())))
+						}
+						Ok(arr[idx].clone().unwrap())
+					}
+					Index::To(idx) => {
+						let idx = self.eval_expr(false, idx).try_blame(idx.span())?;
+						let Val::Num(idx) = idx else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.display_type())))
+						};
+						let idx = idx as usize;
+						if idx > arr.len() {
+							return Err(VicErr::Simple(format!("Index {idx} out of bounds for array of length {}", arr.len())))
+						}
+						let slice = arr[..idx].to_vec();
+						Ok(Val::Arr(slice))
+					}
+					Index::From(idx) => {
+						let idx = self.eval_expr(false, idx).try_blame(idx.span())?;
+						let Val::Num(idx) = idx else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.display_type())))
+						};
+						let idx = idx as usize;
+						if idx >= arr.len() {
+							return Err(VicErr::Simple(format!("Index {idx} out of bounds for array of length {}", arr.len())))
+						}
+						let slice = arr[idx..].to_vec();
+						Ok(Val::Arr(slice))
+					}
+					Index::Slice(start, end) => {
+						let start = self.eval_expr(false, start).try_blame(start.span())?;
+						let Val::Num(start) = start else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", start.display_type())))
+						};
+						let end = self.eval_expr(false, end).try_blame(end.span())?;
+						let Val::Num(end) = end else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", end.display_type())))
+						};
+						let mut start = start as usize;
+						let mut end = end as usize;
+
+						match start.cmp(&end) {
+							Ordering::Less => {
+								if end > arr.len() {
+									return Err(VicErr::Simple(format!("Index {end} out of bounds for array of length {}", arr.len())))
+								}
+								if start >= arr.len() {
+									return Err(VicErr::Simple(format!("Index {start} out of bounds for array of length {}", arr.len())))
+								}
+								let slice = arr[start..end].to_vec();
+								Ok(Val::Arr(slice))
+							}
+							Ordering::Greater => {
+								std::mem::swap(&mut start, &mut end);
+								if end > arr.len() {
+									return Err(VicErr::Simple(format!("Index {end} out of bounds for array of length {}", arr.len())))
+								}
+								if start >= arr.len() {
+									return Err(VicErr::Simple(format!("Index {start} out of bounds for array of length {}", arr.len())))
+								}
+								let len = start - end;
+								let slice = arr
+									.iter()
+									.rev()
+									.skip(start)
+									.take(len)
+									.cloned()
+									.collect::<Vec<_>>();
+								Ok(Val::Arr(slice))
+							}
+							Ordering::Equal => Ok(Val::Arr(vec![])),
+						}
+					}
+					_ => unimplemented!()
+				}
+			}
+			_ => Err(VicErr::Simple(format!("Cannot index into type '{}'", val.display_type()))),
+		}
+	}
+	/// A little bit redundant, but variables are kept in the Val enum
+	fn eval_value(&mut self, val: &Val) -> Result<Val,VicErr> {
+		match val {
+			Val::Var(name) => {
+				let val = self.get_var(name).ok_or_else(|| format!("Variable '{name}' not found"))?;
+				Ok(val)
+			}
+			Val::Str(str) => {
+				let val = self.expand_literal(str)?;
+				Ok(Val::Str(val))
+			}
+			_ => Ok(val.clone())
 		}
 	}
 }

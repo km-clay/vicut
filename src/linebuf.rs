@@ -13,6 +13,7 @@ use regex::Regex;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::vic::error::VicErr;
 use crate::vic::parse::Val;
 use crate::register::RegisterContent;
 use crate::{modes::ex::SubFlags, vicmd::{LineAddr, ReadSrc, WriteDest}};
@@ -2152,13 +2153,6 @@ impl LineBuf {
 	pub fn cursor_at_max(&mut self) -> bool {
 		// hack
 		let cursor_pos = self.cursor.get();
-		dbg!(cursor_pos);
-		dbg!(self.cursor.exclusive);
-		if self.cursor.exclusive {
-			dbg!(self.cursor.max.saturating_sub(2));
-		} else {
-			dbg!(self.cursor.max.saturating_sub(1));
-		}
 		if self.cursor.exclusive {
 			cursor_pos >= self.cursor.max.saturating_sub(2)
 		} else {
@@ -2166,7 +2160,10 @@ impl LineBuf {
 		}
 	}
 	pub fn cursor_at_eol(&mut self) -> bool {
-		self.grapheme_after_cursor().is_none_or(|gr| gr == "\n")
+		self.cursor.get() == self.end_of_line()
+	}
+	pub fn cursor_at_sol(&mut self) -> bool {
+		self.cursor.get() == self.start_of_line()
 	}
 	pub fn cursor_col(&mut self) -> usize {
 		let start = self.start_of_line();
@@ -3241,7 +3238,7 @@ impl LineBuf {
 		}
 	}
 	#[allow(clippy::unnecessary_to_owned)]
-	pub fn exec_verb(&mut self, verb: Verb, motion: MotionKind, register: RegisterName) -> Result<(),String> {
+	pub fn exec_verb(&mut self, verb: Verb, motion: MotionKind, register: RegisterName) -> Result<(),VicErr> {
 		match verb {
 			Verb::Delete |
 			Verb::Yank |
@@ -3688,7 +3685,7 @@ impl LineBuf {
 				if child.status.success() {
 					return Ok(());
 				} else {
-					return Err(format!("Shell command exited with status {}", child.status.code().unwrap_or(-1)));
+					return Err(VicErr::Simple(format!("Shell command exited with status {}", child.status.code().unwrap_or(-1))));
 				}
 			}
 			Verb::Read(src) => {
@@ -3713,7 +3710,7 @@ impl LineBuf {
 							String::from_utf8(child.stdout)
 								.map_err(|e| format!("Command output was not valid UTF-8: {e}"))?
 						} else {
-							return Err(format!("Shell command exited with status {}", child.status.code().unwrap_or(-1)));
+							return Err(VicErr::Simple(format!("Shell command exited with status {}", child.status.code().unwrap_or(-1))));
 						}
 					}
 					ReadSrc::File(path) => {
@@ -3886,7 +3883,7 @@ impl LineBuf {
 		}
 		Ok(())
 	}
-	pub fn exec_cmd(&mut self, cmd: ViCmd) -> Result<(),String> {
+	pub fn exec_cmd(&mut self, cmd: ViCmd) -> Result<(),VicErr> {
 		let clear_redos = !cmd.is_undo_op() || cmd.verb.as_ref().is_some_and(|v| v.1.is_edit());
 		let is_char_insert = cmd.verb.as_ref().is_some_and(|v| v.1.is_char_insert());
 		let is_line_motion = cmd.is_line_motion();

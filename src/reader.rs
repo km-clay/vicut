@@ -17,7 +17,7 @@ pub trait KeyReader {
 ///
 /// `RawReader`'s main job is to read a command string like 'd2w' and convert it into KeyEvents
 /// KeyEvents are the tokens that our mode structs use to parse new Vim commands.
-#[derive(Default,Debug)]
+#[derive(Default,Clone,Debug)]
 pub struct RawReader {
 	pub bytes: VecDeque<u8>,
 	pub is_escaped: bool // The last byte was a backslash or not
