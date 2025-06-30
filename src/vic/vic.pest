@@ -56,20 +56,11 @@ not_global    = ${ ("v" | "not_global" | "!global") ~ " "+ ~ expr ~ WHITESPACE* 
 move          = ${ ("move" | "m") ~ " "+ ~ expr ~ WHITESPACE* }
 cut           = ${ ("cut" | "c") ~ " "+ ~ expr ~ WHITESPACE* }
 next          = ${ "next" ~ WHITESPACE+ }
-echo          = ${ ("echo") ~ (" "+ ~ expr)* }
-repeat        = ${ ("repeat" | "r") ~ " "+ ~ expr ~ " "+ ~ block }
-yank          = ${ ("yank" | "y") ~ " "+ ~ expr ~ " "+ ~ expr ~ WHITESPACE* }
+repeat        = ${ ("repeat") ~ " "+ ~ expr ~ " "+ ~ block }
 break_loop    = ${ ("break") ~ WHITESPACE* }
-shell_cmd     = ${ ("shell" | "sh") ~ " "+ ~ expr ~ WHITESPACE* }
-push          = ${ ("push") ~ " "+ ~ expr ~ " "+ ~ expr ~ WHITESPACE* }
-pop           = ${ ("pop") ~ " "+ ~ expr ~ WHITESPACE* }
-new           = ${ "new" ~ WHITESPACE+ ~ var ~ WHITESPACE* }
-buf_cmd       = ${ "buf" ~ " "+ ~ buf_cmd_arg ~ WHITESPACE* }
-buf_cmd_arg   = ${ (buf_switch ~ WHITESPACE+ ~ expr) | buf_id }
-buf_switch    = ${ "switch" }
-buf_id        = ${ "id" }
+new           = ${ "new" ~ WHITESPACE+ ~ expr ~ WHITESPACE* }
 continue_loop = ${ ("continue") ~ WHITESPACE* }
-return        = ${ ("return" | "ret") ~ " "+ ~ expr ~ WHITESPACE* }
+return        = ${ ("return" | "ret") ~ " "+ ~ expr }
 include       = ${ ("include") ~ " "+ ~ expr ~ WHITESPACE* }
 
 command = {
@@ -79,14 +70,8 @@ command = {
   | cut
   | new
   | next
-  | echo
   | repeat
-  | yank
   | break_loop
-  | shell_cmd
-  | push
-  | pop
-  | buf_cmd
   | continue_loop
   | return
   | include
@@ -139,17 +124,15 @@ not     = { "!" }
 // I'm not sure why I need to nest these rules like this
 // but it didn't work right until I did
 expr               = !{
-    (func_call | (bool_expr | bin_expr | (command | value))) ~ accessor*
+    (bin_expr | func_call | (bool_expr | (command | value))) ~ accessor*
 }
 expr_not_recursive = !{
     (command | func_call | value) ~ accessor*
 }
 
-accessor = { method | field | index }
+accessor = { field | index }
 
-method = { "." ~ func_call }
-
-field = { "." ~ var ~ index* }
+field = { "." ~ var }
 
 index        = {
     "[" ~ (index_to | slice | index_from | index_sng) ~ "]"
@@ -186,9 +169,9 @@ func_name     = { var ~ func_def_args }
 func_def      = { "def" ~ func_name ~ block }
 
 func_call_args = { "(" ~ expr_list ~ ")" }
-func_call      = { func_call_name ~ func_call_args }
+func_call      = { func_call_name ~ func_call_args ~ accessor* }
 func_call_name = !{
-    value ~ index*
+    value ~ accessor*
 }
 
 // Primitives
@@ -237,7 +220,6 @@ value = {
 top_level_cmd = {
     var_declare
   | opts
-  | (var ~ method)
   | var_add
   | var_sub
   | var_mut

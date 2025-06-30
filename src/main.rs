@@ -499,8 +499,8 @@ fn execute(mut vicut: ViCut, args: &Opts, filename: Option<PathBuf>) -> Result<V
 		.map(|s| s.file_name().unwrap_or_default().to_string_lossy().to_string())
 		.unwrap_or_else(|| String::from("stdin"));
 	let filepath = filename.map(|s| s.to_string_lossy().to_string()).unwrap_or(String::from("stdin"));
-	vicut.set_var("filename".into(), Val::Str(basename))?;
-	vicut.set_var("filepath".into(), Val::Str(filepath))?;
+	vicut.set_var("filename".into(), Val::Str(basename).into())?;
+	vicut.set_var("filepath".into(), Val::Str(filepath).into())?;
 
 
 	let cmds = vicut.cmds.clone();
@@ -533,7 +533,9 @@ fn execute(mut vicut: ViCut, args: &Opts, filename: Option<PathBuf>) -> Result<V
 	let should_print_entire_buffer = (!editing_inplace || !has_files) && no_fields;
 
 	if should_print_entire_buffer {
-		let big_line = vicut.current_buffer().buffer.clone();
+		let buf = vicut.current_buffer();
+		let Val::Buffer(ref mut cur_buf) = *buf.borrow_mut() else { unreachable!() };
+		let big_line = cur_buf.buffer.clone();
 		vicut.exec_ctx.fmt_lines.push(vec![("0".into(),big_line)]);
 	}
 

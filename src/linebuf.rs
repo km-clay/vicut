@@ -2394,9 +2394,9 @@ impl LineBuf {
 				};
 				let mut lines = vec![];
 				let line_range = start_line..end_line;
-				let regex = match pattern {
-					Val::Regex(regex) => regex.clone(),
-					_ => match Regex::new(&pattern.to_string()) {
+				let regex = match *pattern.borrow() {
+					Val::Regex(ref regex) => regex.clone(),
+					_ => match Regex::new(&pattern.borrow().to_string()) {
 						Ok(regex) => regex,
 						Err(e) => {
 							eprintln!("vicut: {e}");

@@ -1,4 +1,4 @@
-use std::{boxed, cell::RefCell, collections::HashMap, fmt::Display, ops::Deref, sync::Arc};
+use std::{boxed, cell::RefCell, cmp::Ordering, collections::HashMap, fmt::Display, ops::Deref, rc::Rc, sync::Arc};
 
 use pest::{iterators::{Pair, Pairs}, Parser};
 use pest_derive::Parser;
@@ -171,6 +171,7 @@ impl Expr {
 			Rule::func_def => Self::parse_func_def(cmd),
 			Rule::class_def => Self::parse_class_def(cmd),
 			Rule::opts => Self::parse_opts(cmd),
+			Rule::expr => Self::parse_expr(cmd),
 			Rule::top_level_cmd => {
 				let inner = cmd.into_inner().next().unwrap();
 				Self::parse_top_level(inner)
@@ -197,20 +198,25 @@ impl Expr {
 
 			ExprKind::VarDec { name, value }
 		} else {
-			let name = inner.next().unwrap().as_str().to_string();
+			let name_val = Val::Var(inner.next().unwrap().as_str().to_string());
 			let mut val_or_accessor = inner.next().unwrap();
 			while val_or_accessor.as_rule() == Rule::accessor {
 				let idx = Self::parse_accessor(val_or_accessor)?;
 				accessors.push(idx);
 				val_or_accessor = inner.next().unwrap();
 			}
+			let name = Box::new(Expr {
+				value: ExprKind::Value(name_val.into()),
+				accessors,
+				span: ArcSpan::new(Arc::clone(&span.input), span.start, span.end)
+			});
 			let op = BinOp::from_rule(rule);
 			let value = Box::new(Self::parse_expr(val_or_accessor)?);
 
 			ExprKind::VarMut { name, op, value }
 		};
 
-		Ok(Self { value, accessors, span })
+		Ok(Self { value, accessors: vec![], span })
 	}
 	fn parse_class_def(cmd: ArcPair) -> Result<Self,VicErr> {
 		let span = cmd.as_span();
@@ -326,20 +332,10 @@ impl Expr {
 	fn parse_accessor(accessor: ArcPair) -> Result<Accessor,VicErr> {
 		let accessor_kind = accessor.into_inner().next().unwrap();
 		match accessor_kind.as_rule() {
-			Rule::method => Self::parse_method(accessor_kind),
 			Rule::field => Self::parse_field(accessor_kind),
 			Rule::index => Self::parse_index(accessor_kind),
 			_ => unreachable!()
 		}
-	}
-	fn parse_method(method: ArcPair) -> Result<Accessor,VicErr> {
-		let func_call = method.into_inner().next().unwrap();
-		let span = func_call.as_span();
-		let method_name = func_call.clone().into_inner().next().unwrap().as_str().to_string();
-		let ExprKind::FuncCall { name: _, args } = Self::parse_expr(func_call)?.value else {
-			return Err(VicErr::Full(span, "Expected a function call in method accessor".to_string()));
-		};
-		Ok(Accessor::Method(method_name, args))
 	}
 	fn parse_field(field: ArcPair) -> Result<Accessor,VicErr> {
 		let var_name = field.into_inner().next().unwrap();
@@ -393,20 +389,18 @@ impl Expr {
 			Rule::func_call => {
 				let span = expr.as_span();
 				let mut inner = expr.into_inner();
-				let mut name_maybe_accessor = inner.next().unwrap().into_inner();
-				let mut name = Box::new(Self::parse_expr(name_maybe_accessor.next().unwrap())?);
-				let mut accessors = vec![];
-				while let Some(accessor) = name_maybe_accessor.next() {
-					let accessor = Self::parse_accessor(accessor)?;
-					accessors.push(accessor);
-				}
+				let name = Box::new(Self::parse_expr(inner.next().unwrap())?);
 				let mut args = vec![];
 				let arg_pairs = inner.next().unwrap().into_inner()
 					.next().unwrap().into_inner();
 				for arg in arg_pairs {
 					args.push(Self::parse_expr(arg)?);
 				}
-				let accessor = inner.next().map(Self::parse_accessor).transpose()?;
+				let mut accessors = vec![];
+				while let Some(accessor) = inner.next() {
+					let accessor = Self::parse_accessor(accessor)?;
+					accessors.push(accessor);
+				}
 				let value = ExprKind::FuncCall { name, args };
 				Ok(Self {
 					value,
@@ -420,14 +414,14 @@ impl Expr {
 				match bool_inner.as_rule() {
 					Rule::r#true => {
 						Ok(Self {
-							value: ExprKind::Value(Val::Bool(true)),
+							value: ExprKind::Value(Val::Bool(true).into()),
 							accessors: vec![],
 							span
 						})
 					}
 					Rule::r#false => {
 						Ok(Self {
-							value: ExprKind::Value(Val::Bool(false)),
+							value: ExprKind::Value(Val::Bool(false).into()),
 							accessors: vec![],
 							span
 						})
@@ -439,10 +433,20 @@ impl Expr {
 				let var_name = expr.as_str().to_string();
 				let span = expr.as_span();
 				Ok(Self {
-					value: ExprKind::Value(Val::Var(var_name)),
+					value: ExprKind::Value(Val::Var(var_name).into()),
 					accessors: vec![],
 					span
 				})
+			}
+			Rule::func_call_name => {
+				let mut inner = expr.into_inner();
+				let mut name = Self::parse_value(inner.next().unwrap())?;
+				let mut accessors = vec![];
+				while let Some(accessor) = inner.next() {
+					accessors.push(Self::parse_accessor(accessor)?);
+				}
+				name.accessors = accessors;
+				Ok(name)
 			}
 			// All of these are rules that we have to unwrap further
 			// before we can continue processing. So we just unwrap
@@ -547,16 +551,6 @@ impl Expr {
 					span
 				})
 			}
-			"shell" | "sh" => {
-				let span = cmd.as_span();
-				let mut inner = cmd.into_inner();
-				let cmd_expr = Box::new(Self::parse_expr(inner.next().unwrap())?);
-				Ok(Self {
-					value: ExprKind::Command(Command::ShellCmd { cmd: cmd_expr }),
-					accessors: vec![],
-					span
-				})
-			}
 			"continue" => {
 				let span = cmd.as_span();
 				Ok(Self {
@@ -625,19 +619,6 @@ impl Expr {
 					span
 				})
 			}
-			"echo" => {
-				let span = cmd.as_span();
-				let inner = cmd.into_inner();
-				let mut args = vec![];
-				for arg in inner {
-					args.push(Self::parse_expr(arg)?);
-				}
-				Ok(Self {
-					value: ExprKind::Command(Command::Echo { args }),
-					accessors: vec![],
-					span
-				})
-			}
 			"repeat" | "r" => {
 				let span = cmd.as_span();
 				let mut inner = cmd.into_inner();
@@ -648,62 +629,6 @@ impl Expr {
 					accessors: vec![],
 					span
 				})
-			}
-			"yank" | "y" => {
-				let span = cmd.as_span();
-				let mut inner = cmd.into_inner();
-				let register_pair = inner.next().unwrap();
-				let register = Box::new(Self::parse_expr(register_pair)?);
-				let motion = Box::new(Self::parse_expr(inner.next().unwrap())?);
-				Ok(Self {
-					value: ExprKind::Command(Command::Yank { register, motion }),
-					accessors: vec![],
-					span
-				})
-			}
-			"push" => {
-				let span = cmd.as_span();
-				let mut inner = cmd.into_inner();
-				let stack = Box::new(Self::parse_expr(inner.next().unwrap())?);
-				let value = Box::new(Self::parse_expr(inner.next().unwrap())?);
-				Ok(Self {
-					value: ExprKind::Command(Command::Push { stack, value }),
-					accessors: vec![],
-					span
-				})
-			}
-			"pop" => {
-				let span = cmd.as_span();
-				let mut inner = cmd.into_inner();
-				let stack = Box::new(Self::parse_expr(inner.next().unwrap())?);
-				Ok(Self {
-					value: ExprKind::Command(Command::Pop { stack }),
-					accessors: vec![],
-					span
-				})
-			}
-			"buf" => {
-				let span = cmd.as_span();
-				let mut inner = cmd.into_inner().next().unwrap().into_inner();
-				let rule = inner.next().unwrap().as_rule();
-				match rule {
-					Rule::buf_switch => {
-						let id = Box::new(Self::parse_expr(inner.next().unwrap())?);
-						Ok(Self {
-							value: ExprKind::Command(Command::BufSwitch { id }),
-							accessors: vec![],
-							span
-						})
-					}
-					Rule::buf_id => {
-						Ok(Self {
-							value: ExprKind::Command(Command::BufId),
-							accessors: vec![],
-							span
-						})
-					}
-					_ => unreachable!("Unexpected rule in buf command: {rule:?}")
-				}
 			}
 			"return" => {
 				let span = cmd.as_span();
@@ -787,7 +712,7 @@ impl Expr {
 		let value_kind = value.into_inner().next().unwrap();
 		let value = Val::try_from_pair(value_kind).try_blame(span.clone())?;
 		Ok(Self {
-			value: ExprKind::Value(value),
+			value: ExprKind::Value(value.into()),
 			accessors: vec![],
 			span
 		})
@@ -811,7 +736,7 @@ pub enum ExprKind {
 	Vic(Vec<Expr>), // Root node of AST
 	TopLevel(Box<Expr>),
 	Block(Vec<Expr>),
-	Value(Val),
+	Value(RcVal),
 	Command(Command),
 	Opts(Vec<Expr>), // Always contains 'ExprKind::Opt'
 	/// `set` is whether or not the opt is passed with a leading '!'
@@ -819,7 +744,7 @@ pub enum ExprKind {
 	/// e.g. Some(false), this is to allow shadowing existing options
 	Opt { set: bool, name: String, arg: Option<Box<Expr>> },
 	VarDec { name: String, value: Box<Expr> },
-	VarMut { name: String, op: Option<BinOp>, value: Box<Expr> },
+	VarMut { name: Box<Expr>, op: Option<BinOp>, value: Box<Expr> },
 	CondBlock { cond: Box<Expr>, body: Vec<Expr> },
 	ForBlock { var_name: String, list: Box<Expr>, body: Vec<Expr> },
 	IfBlock { cond_blocks: Vec<Expr>, else_block: Option<Vec<Expr>>, },
@@ -828,6 +753,7 @@ pub enum ExprKind {
 	Range { start: Box<Expr>, end: Box<Expr> },
 	BinExpr(Vec<RpnItem>),
 	BoolExpr(Vec<RpnItem>),
+	MethodCall { name: String }, // Accessors are included in the Expr itself
 	FuncCall { name: Box<Expr>, args: Vec<Expr> },
 	FuncDef { name: String, params: Vec<String>, body: Vec<Expr> },
 	ClassDef { name: String, fields: HashMap<String, Expr> },
@@ -835,7 +761,7 @@ pub enum ExprKind {
 
 impl ExprKind {
 	pub fn string(str: impl ToString) -> Self {
-		Self::Value(Val::Str(str.to_string()))
+		Self::Value(Val::Str(str.to_string()).into())
 	}
 }
 
@@ -863,7 +789,6 @@ pub enum Command {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Accessor {
-	Method(String,Vec<Expr>),
 	Field(String),
 	Index(Index)
 }
@@ -982,6 +907,8 @@ impl BoolOp {
 	}
 }
 
+pub type RcVal = Rc<RefCell<Val>>;
+
 // Evaluated expressions
 #[derive(Default, Debug, Clone)]
 pub enum Val {
@@ -989,14 +916,12 @@ pub enum Val {
 	Null,
 	Str(String),
 	Var(String),
-	Arr(Vec<Val>),
+	Arr(Vec<RcVal>),
 	Num(isize),
 	Register(char),
 	Closure(Vec<String>, Vec<Expr>),
-	Dict(HashMap<String,Val>),
-	Class(String,HashMap<String,Val>),
+	Dict(HashMap<String,RcVal>),
 	Bool(bool),
-	Ref(Arc<RefCell<Box<Val>>>),
 	Regex(Regex),
 	Expr(Box<Expr>),
 
@@ -1008,6 +933,12 @@ pub enum Val {
 	Buffer(Box<LineBuf>) 
 }
 
+impl From<Val> for RcVal {
+	fn from(value: Val) -> Self {
+		Rc::new(RefCell::new(value))
+	}
+}
+
 impl Val {
 	/// Unwrap implementation for `Val`
 	///
@@ -1016,19 +947,115 @@ impl Val {
 		if let Self::Null = self { panic!("Called unwrap on a Null value") }
 		self
 	}
-	pub fn try_deref(&self) -> Self {
-		match self {
-			Self::Ref(refer) => {
-				let val = refer.borrow();
-				(**val).clone()
-			}
-			_ => self.clone()
-		}
-	}
 	/// Unwrap implementation for `Val` with a default value
 	pub fn unwrap_or_else<F: FnOnce() -> Self>(self, default: F) -> Self { 
 		if let Self::Null = self { return default() }
 		self
+	}
+	pub fn cmp(&self, other: &Val, vicut: &mut ViCut) -> Option<Ordering> {
+		match self {
+			Val::Null => {
+				if let Val::Null = other { Some(Ordering::Equal) } else { Some(Ordering::Less) }
+			}
+			Val::Str(str1) => {
+				if let Val::Str(str2) = other {
+					Some(str1.cmp(str2))
+				} else {
+					None
+				}
+			}
+			Val::Var(var) => {
+				let val = vicut.read_var(var)?;
+				val.borrow().cmp(other, vicut)
+			}
+			Val::Arr(ref_cells) => {
+				if let Val::Arr(other_cells) = other {
+					let mut iter1 = ref_cells.iter();
+					let mut iter2 = other_cells.iter();
+					loop {
+						match (iter1.next(), iter2.next()) {
+							(Some(val1), Some(val2)) => {
+								if let Some(ordering) = val1.borrow().cmp(&val2.borrow(), vicut) {
+									if ordering != Ordering::Equal { return Some(ordering) }
+								} else {
+									return None;
+								}
+							}
+							(None, None) => return Some(Ordering::Equal),
+							(None, _) => return Some(Ordering::Less),
+							(_, None) => return Some(Ordering::Greater),
+						}
+					}
+				} else {
+					None
+				}
+			}
+			Val::Num(n1) => {
+				if let Val::Num(n2) = other {
+					Some(n1.cmp(n2))
+				} else {
+					None
+				}
+			}
+			Val::Register(reg) => {
+				let content = read_register(Some(*reg))?.to_string();
+				if let Val::Str(other_str) = other {
+					Some(content.cmp(other_str))
+				} else {
+					None
+				}
+			}
+			Val::Closure(_, _) => {
+				panic!("this should have already been evaluated")
+			}
+			Val::Dict(hash_map) => {
+				if let Val::Dict(other_map) = other {
+					let mut iter1 = hash_map.iter();
+					let mut iter2 = other_map.iter();
+					loop {
+						match (iter1.next(), iter2.next()) {
+							(Some((key1, val1)), Some((key2, val2))) => {
+								if key1 != key2 { return None }
+								if let Some(ordering) = val1.borrow().cmp(&val2.borrow(), vicut) {
+									if ordering != Ordering::Equal { return Some(ordering) }
+								} else {
+									return None;
+								}
+							}
+							(None, None) => return Some(Ordering::Equal),
+							(None, _) => return Some(Ordering::Less),
+							(_, None) => return Some(Ordering::Greater),
+						}
+					}
+				} else {
+					None
+				}
+			}
+			Val::Bool(bool1) => {
+				if let Val::Bool(bool2) = other {
+					Some(bool1.cmp(bool2))
+				} else {
+					None
+				}
+			}
+			Val::Regex(regex) => {
+				if let Val::Str(other_str) = other {
+					if regex.is_match(other_str) {
+						Some(Ordering::Equal)
+					} else {
+						None
+					}
+				} else {
+					None
+				}
+			}
+			Val::Expr(_) => {
+				panic!("this should have already been evaluated")
+			}
+			Val::Buffer(_) => {
+				panic!("this type can't be created or worked with by the user")
+			}
+		}
 	}
 	pub fn is_compound(&self) -> bool {
 		matches!(self, Self::Arr(_) | Self::Str(_))
@@ -1037,17 +1064,17 @@ impl Val {
 		match self {
 			Self::Arr(arr) => Ok(arr.clone().into_iter()),
 			Self::Str(s) => {
-				let graphemes = s.graphemes(true).map(|g| Val::Str(g.to_string())).collect::<Vec<_>>();
+				let graphemes = s.graphemes(true).map(|g| Val::Str(g.to_string()).into()).collect::<Vec<_>>();
 				Ok(graphemes.into_iter())
 			}
 			_ => Err(VicErr::Simple(format!("Value of type '{}' is not iterable", self.display_type())))
 		}
 	}
-	pub fn try_into_iter(self) -> Result<impl Iterator<Item=Val>, VicErr> {
+	pub fn try_into_iter(self) -> Result<impl Iterator<Item=RcVal>, VicErr> {
 		match self {
 			Self::Arr(arr) => Ok(arr.into_iter()),
 			Self::Str(s) => {
-				let graphemes = s.graphemes(true).map(|g| Val::Str(g.to_string())).collect::<Vec<_>>();
+				let graphemes = s.graphemes(true).map(|g| Val::Str(g.to_string()).into()).collect::<Vec<_>>();
 				Ok(graphemes.into_iter())
 			}
 			_ => Err(VicErr::Simple(format!("Value of type '{}' is not iterable", self.display_type())))
@@ -1061,8 +1088,8 @@ impl Val {
 				for elem in elem_list {
 					let elem_inner = elem.into_inner().next().unwrap();
 					match elem_inner.as_rule() {
-						Rule::value => elements.push(Self::try_from_pair(elem_inner.into_inner().next().unwrap())?),
-						Rule::expr => elements.push(Self::Expr(Box::new(Expr::parse_expr(elem_inner)?))),
+						Rule::value => elements.push(Self::try_from_pair(elem_inner.into_inner().next().unwrap())?.into()),
+						Rule::expr => elements.push(Self::Expr(Box::new(Expr::parse_expr(elem_inner)?)).into()),
 						_ => return Err(VicErr::Simple(format!("Unexpected rule in array: {:?}", elem_inner.as_rule()))),
 					}
 				}
@@ -1118,7 +1145,7 @@ impl Val {
 			(s1, Self::Str(s2)) => Ok(Self::Str(s1.to_string() + &s2.to_string())),
 			(Self::Arr(arr), val) => {
 				let mut arr = arr.clone();
-				arr.push(val.clone());
+				arr.push(val.clone().into());
 				Ok(Self::Arr(arr))
 			}
 			_ => Err(VicErr::Simple(format!("Cannot add values of type '{}' and '{}'", self.display_type(), other.display_type())))
@@ -1171,12 +1198,7 @@ impl Val {
 	pub fn display_type(&self) -> String {
 		match self {
 			Self::Buffer(_) => "buffer".to_string(),
-			Self::Class(_,_) => "class".to_string(),
 			Self::Dict(_) => "dictionary".to_string(),
-			Self::Ref(refer) => {
-				let inner = refer.borrow();
-				inner.display_type()
-			}
 			Self::Str(_) => "string".to_string(),
 			Self::Num(_) => "number".to_string(),
 			Self::Register(_) => "register".to_string(),
@@ -1193,24 +1215,17 @@ impl Val {
 		match self {
 			Self::Buffer(buf) => !buf.buffer.is_empty(),
 			Self::Dict(dict) => !dict.is_empty(),
-			Self::Ref(refer) => {
-				let inner = refer.borrow();
-				inner.is_truthy(vicut)
-			},
-			Self::Class(name, data) => {
-				data.is_empty() && name.is_empty()
-			},
 			Self::Str(s) => !s.is_empty(),
 			Self::Num(n) => *n != 0,
 			Self::Expr(e) => {
-				vicut.eval_expr(false, e).is_ok_and(|eval| eval.is_truthy(vicut))
+				vicut.eval_expr(false, e).is_ok_and(|eval| eval.borrow().is_truthy(vicut))
 			}
 			Self::Register(ch) => {
 				read_register(Some(*ch)).is_some_and(|content| !content.is_empty())
 			}
 			Self::Var(v) => {
 				let Some(var) = vicut.read_var(v).clone() else { return false };
-				var.is_truthy(vicut)
+				var.borrow().is_truthy(vicut)
 			}
 			Self::Closure(args, body) => todo!(),
 			Self::Arr(arr) => !arr.is_empty(),
@@ -1250,24 +1265,19 @@ impl Display for Val {
 		match self {
 			Self::Arr(arr) => {
 				let inner = arr.iter()
-					.map(|val| val.to_string())
+					.map(|val| val.borrow().to_string())
 					.collect::<Vec<_>>()
 					.join(", ");
 				write!(f, "[{inner}]")
 			}
-			Self::Ref(refer) => {
-				let inner = refer.borrow();
-				write!(f, "{inner}")
-			}
 			Self::Dict(dict) => {
 				let mut key_values = vec![];
 				for (key,value) in dict {
-					key_values.push(format!("{key}: {value}"))
+					key_values.push(format!("{key}: {}",value.borrow()))
 				}
 				let joined = key_values.join(", ");
 				write!(f, "{{{joined}}}")
 			}
-			Self::Class(name, dict) => write!(f, "{{ class }}"),
 			Self::Expr(_) => {
 				write!(f, "{{ expression }}")
 			}

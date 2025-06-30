@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use bitflags::bitflags;
 
-use crate::{vic::parse::Val, linebuf::SelectRange, modes::ex::SubFlags, register::{RegisterContent, REGISTERS}};
+use crate::{linebuf::SelectRange, modes::ex::SubFlags, register::{RegisterContent, REGISTERS}, vic::parse::{RcVal, Val}};
 
 use super::register::{append_register, read_register, write_register};
 
@@ -349,9 +349,9 @@ pub enum Motion {
 	PatternSearch(String),
 	PatternSearchRev(String),
 	/// The first field should *always* be `Line(_)` or `LineRange(_,_)`
-	Global(Box<Motion>,Val),
+	Global(Box<Motion>,RcVal),
 	/// The first field should *always* be `Line(_)` or `LineRange(_,_)`
-	NotGlobal(Box<Motion>,Val),
+	NotGlobal(Box<Motion>,RcVal),
 	NextMatch,
 	PrevMatch,
 	BackwardChar,

@@ -3,4 +3,5 @@
 
 pub mod parse;	
 pub mod error;
+pub mod libvic;
 
