@@ -162,8 +162,10 @@ impl Expr {
 			Rule::var_div |
 			Rule::var_pow |
 			Rule::var_mod => Self::parse_var_cmd(cmd),
+			Rule::with_block => Self::parse_with_block(cmd),
 			Rule::for_block => Self::parse_for_block(cmd),
 			Rule::if_block => Self::parse_if_block(cmd),
+			Rule::switch_block => Self::parse_switch_block(cmd),
 			Rule::while_block => Self::parse_loop_block(cmd,true),
 			Rule::until_block => Self::parse_loop_block(cmd,false),
 			Rule::func_call |
@@ -184,6 +186,54 @@ impl Expr {
 				unreachable!("Unhandled rule: {:?}", cmd.as_rule())
 			}
 		}
+	}
+	fn parse_with_block(cmd: ArcPair) -> Result<Self,VicErr> {
+		let span = cmd.as_span();
+		let mut inner = cmd.into_inner();
+		let buffer = Box::new(Self::parse_expr(inner.next().unwrap())?);
+		let body = Self::parse_block(inner.next().unwrap())?;
+		Ok(Self {
+			value: ExprKind::WithBlock { buffer, body },
+			accessors: vec![],
+			span
+		})
+	}
+	fn parse_switch_block(cmd: ArcPair) -> Result<Self,VicErr> {
+		let span = cmd.as_span();
+		let mut inner = cmd.into_inner();
+		let scrutinee = Self::parse_expr(inner.next().unwrap())?;
+		let case_pairs = inner.next().unwrap().into_inner();
+		let mut cases = vec![];
+		let mut default = None;
+		for case in case_pairs {
+			let mut patterns = vec![];
+			match case.as_rule() {
+				Rule::case => {
+					let mut case_inner = case.into_inner();
+					let mut value = case_inner.next().unwrap();
+					while value.as_rule() == Rule::literal {
+						let parsed = Val::try_from_pair(value.into_inner().next().unwrap())?;
+						patterns.push(parsed);
+						value = case_inner.next().unwrap();
+					}
+					let body = Self::parse_block(value)?;
+					cases.push(Self::case_block(span.clone(), patterns, body))
+				}
+				Rule::default_block => {
+					default = Some(Self::parse_block(case.into_inner().next().unwrap())?)
+				}
+				_ => unreachable!()
+			}
+		}
+		Ok(Self {
+			value: ExprKind::SwitchBlock {
+				scrutinee: Box::new(scrutinee),
+				case_blocks: cases,
+				default_block: default
+			},
+			accessors: vec![],
+			span
+		})
 	}
 	fn parse_var_cmd(cmd: ArcPair) -> Result<Self,VicErr> {
 		let span = cmd.as_span();
@@ -271,6 +321,13 @@ impl Expr {
 		let body = Self::parse_block(inner.next().unwrap())?;
 		let value = ExprKind::ForBlock { var_name, list, body };
 		Ok(Self { value, accessors: vec![], span })
+	}
+	fn case_block(span: ArcSpan, cases: Vec<Val>, body: Vec<Expr>) -> Self {
+		Self {
+			value: ExprKind::CaseBlock { cond: cases, body },
+			accessors: vec![],
+			span
+		}
 	}
 	fn cond_block(span: ArcSpan, cond: Expr, body: Vec<Expr>) -> Self {
 		Self {
@@ -376,6 +433,7 @@ impl Expr {
 			Rule::command => Self::parse_command(expr),
 			Rule::bin_expr => Self::parse_bin_expr(expr),
 			Rule::bool_expr => Self::parse_bool_expr(expr),
+			Rule::with_block => Self::parse_with_block(expr),
 			Rule::expr => {
 				let mut inner = expr.into_inner();
 				let mut eval = Self::parse_expr(inner.next().unwrap())?;
@@ -445,7 +503,9 @@ impl Expr {
 				while let Some(accessor) = inner.next() {
 					accessors.push(Self::parse_accessor(accessor)?);
 				}
-				name.accessors = accessors;
+				if name.accessors.is_empty() {
+					name.accessors = accessors;
+				}
 				Ok(name)
 			}
 			// All of these are rules that we have to unwrap further
@@ -457,8 +517,20 @@ impl Expr {
 			Rule::bool_atom |
 			Rule::expr_not_recursive |
 			Rule::expr_bool_priority => {
-				let inner = expr.into_inner().next().unwrap();
-				Self::parse_expr(inner)
+				let mut inner = expr.into_inner();
+				let mut accessors = vec![];
+				let next = inner.next().unwrap();
+				let mut expr = Self::parse_expr(next)?;
+				while let Some(pair) = inner.next() {
+					if let Rule::accessor = pair.as_rule() {
+						let accessor = Self::parse_accessor(pair)?;
+						accessors.push(accessor);
+					}
+				}
+				if expr.accessors.is_empty() {
+					expr.accessors = accessors;
+				}
+				Ok(expr)
 			}
 			_ => unreachable!("Unexpected rule: {:?}", expr.as_rule())
 		}
@@ -468,9 +540,20 @@ impl Expr {
 		let mut ops: Vec<BoolOp> = vec![];
 		let span = expr.as_span();
 		let mut inner = expr.into_inner();
+		let first_pair = inner.next().unwrap();
+		if first_pair.as_rule() == Rule::not {
+			// we are in an expression that is literally just '!value'
+			// so that makes things easy(?)
+			let next = inner.next().unwrap();
+			let expr = Expr::parse_expr(next)?;
+			rpn_stack.push(RpnItem::Not(expr));
+			// there won't be anything after this
+			// so the while loop won't run
+		} else {
+			let first = RpnItem::parse_bool_value(first_pair)?;
+			rpn_stack.push(first);
+		}
 
-		let first = RpnItem::parse_bool_value(inner.next().unwrap())?;
-		rpn_stack.push(first);
 
 		while let Some(op) = inner.next() {
 			let op = op.into_inner().next().unwrap();
@@ -542,7 +625,7 @@ impl Expr {
 		let cmd = cmd.into_inner().next().unwrap();
 		let cmd_raw = cmd.as_str().split(" ").next().unwrap();
 
-		match cmd_raw {
+		match cmd_raw.trim() {
 			"next" => {
 				let span = cmd.as_span();
 				Ok(Self {
@@ -746,10 +829,13 @@ pub enum ExprKind {
 	VarDec { name: String, value: Box<Expr> },
 	VarMut { name: Box<Expr>, op: Option<BinOp>, value: Box<Expr> },
 	CondBlock { cond: Box<Expr>, body: Vec<Expr> },
-	ForBlock { var_name: String, list: Box<Expr>, body: Vec<Expr> },
+	CaseBlock { cond: Vec<Val>, body: Vec<Expr> },
+	SwitchBlock { scrutinee: Box<Expr>, case_blocks: Vec<Expr>, default_block: Option<Vec<Expr>> },
 	IfBlock { cond_blocks: Vec<Expr>, else_block: Option<Vec<Expr>>, },
+	ForBlock { var_name: String, list: Box<Expr>, body: Vec<Expr> },
 	WhileBlock { cond: Box<Expr>, body: Vec<Expr> },
 	UntilBlock { cond: Box<Expr>, body: Vec<Expr> },
+	WithBlock { buffer: Box<Expr>, body: Vec<Expr> },
 	Range { start: Box<Expr>, end: Box<Expr> },
 	BinExpr(Vec<RpnItem>),
 	BoolExpr(Vec<RpnItem>),
@@ -925,12 +1011,15 @@ pub enum Val {
 	Regex(Regex),
 	Expr(Box<Expr>),
 
+	// these two are functionally identical to "Null"
+	// but used internally for control flow in loops
+	// the "break"/"continue" keywords return these values
+	Break,
+	Continue,
+
 	/// This one is *only* used internally, and not exposed to the user directly
-	/// The `_buffers` built-in variable contains only these.
-	/// We also have to box it, because LineBuf as a struct requires at least 384 bytes, and that's when it's empty.
-	/// This requirement means that *all* Val instances would be at least 384 bytes in size
-	/// And that sounds like hell, so we will just store a pointer.
-	Buffer(Box<LineBuf>) 
+	/// Used as a value that represents the currently selected buffer
+	BufferHandle
 }
 
 impl From<Val> for RcVal {
@@ -952,14 +1041,40 @@ impl Val {
 		if let Self::Null = self { return default() }
 		self
 	}
+	pub fn deep_clone(&self) -> Self {
+		match self {
+			Val::Dict(map) => {
+				let new_map = map.iter()
+					.map(|(k, v)| (k.clone(), Rc::new(RefCell::new(v.borrow().deep_clone()))))
+					.collect();
+				Val::Dict(new_map)
+			}
+			Val::Arr(arr) => {
+				let new_arr = arr.iter()
+					.map(|v| Rc::new(RefCell::new(v.borrow().deep_clone())))
+					.collect();
+				Val::Arr(new_arr)
+			}
+			_ => self.clone()
+		}
+	}
 	pub fn cmp(&self, other: &Val, vicut: &mut ViCut) -> Option<Ordering> {
 		match self {
+			Val::BufferHandle => unreachable!(),
+			Val::Break |
+			Val::Continue |
 			Val::Null => {
 				if let Val::Null = other { Some(Ordering::Equal) } else { Some(Ordering::Less) }
 			}
 			Val::Str(str1) => {
 				if let Val::Str(str2) = other {
 					Some(str1.cmp(str2))
+				} else if let Val::Regex(regex) = other {
+					if regex.is_match(str1) {
+						Some(Ordering::Equal)
+					} else {
+						None
+					}
 				} else {
 					None
 				}
@@ -1052,9 +1167,6 @@ impl Val {
 			Val::Expr(_) => {
 				panic!("this should have already been evaluated")
 			}
-			Val::Buffer(_) => {
-				panic!("this type can't be created or worked with by the user")
-			}
 		}
 	}
 	pub fn is_compound(&self) -> bool {
@@ -1099,6 +1211,18 @@ impl Val {
 			Rule::int => {
 				let int = pair.as_str().parse::<isize>().unwrap();
 				Ok(Self::Num(int))
+			}
+			Rule::dict => {
+				let key_value_list = pair.into_inner().next().unwrap().into_inner();
+				let mut map = HashMap::new();
+				for key_value in key_value_list {
+					let mut inner = key_value.into_inner();
+					let name = inner.next().unwrap().as_str().to_string();
+					let val = Val::Expr(Box::new(Expr::parse_expr(inner.next().unwrap())?));
+					map.insert(name, val.into());
+				}
+				Ok(Self::Dict(map))
+
 			}
 			Rule::str_literal => {
 				let text = pair.into_inner().next().unwrap().as_str().to_string();
@@ -1197,7 +1321,7 @@ impl Val {
 	}
 	pub fn display_type(&self) -> String {
 		match self {
-			Self::Buffer(_) => "buffer".to_string(),
+			Self::BufferHandle => "buffer_handle".to_string(),
 			Self::Dict(_) => "dictionary".to_string(),
 			Self::Str(_) => "string".to_string(),
 			Self::Num(_) => "number".to_string(),
@@ -1207,13 +1331,19 @@ impl Val {
 			Self::Arr(_) => "array".to_string(),
 			Self::Bool(_) => "boolean".to_string(),
 			Self::Regex(_) => "regex".to_string(),
+			Self::Break |
+			Self::Continue |
 			Self::Null => "null".to_string(),
 			Self::Expr(_) => "expression".to_string(),
 		}
 	}
 	pub fn is_truthy(&self, vicut: &mut ViCut) -> bool {
 		match self {
-			Self::Buffer(buf) => !buf.buffer.is_empty(),
+			Self::BufferHandle => {
+				// This is a special case, we consider the buffer handle to be truthy
+				// if it exists, which it always does.
+				true
+			}
 			Self::Dict(dict) => !dict.is_empty(),
 			Self::Str(s) => !s.is_empty(),
 			Self::Num(n) => *n != 0,
@@ -1230,6 +1360,8 @@ impl Val {
 			Self::Closure(args, body) => todo!(),
 			Self::Arr(arr) => !arr.is_empty(),
 			Self::Bool(b) => *b,
+			Self::Break |
+			Self::Continue |
 			Self::Null => false,
 
 			// Weird case. The regex compiled successfully, so we consider it truthy
@@ -1263,6 +1395,9 @@ impl PartialEq for Val {
 impl Display for Val {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
+			Self::BufferHandle => {
+				write!(f, "{{ buffer handle }}")
+			}
 			Self::Arr(arr) => {
 				let inner = arr.iter()
 					.map(|val| val.borrow().to_string())
@@ -1282,7 +1417,6 @@ impl Display for Val {
 				write!(f, "{{ expression }}")
 			}
 			Self::Register(ch) => write!(f, "@{ch}"),
-			Self::Buffer(buf) => write!(f, "{}", &buf.buffer),
 			Self::Var(v) => write!(f, "{v}"),
 			Self::Closure(_, _) => {
 				write!(f, "{{ closure }}")
@@ -1291,6 +1425,8 @@ impl Display for Val {
 			Self::Num(n) => write!(f, "{n}"),
 			Self::Bool(b) => write!(f, "{b}"),
 			Self::Regex(r) => write!(f, "{r}"),
+			Self::Break |
+			Self::Continue |
 			Self::Null => write!(f, "null")
 		}
 	}

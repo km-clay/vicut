@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use crate::vic::parse::{ArcSpan, Rule};
+use crate::vic::parse::{ArcSpan, RcVal, Rule};
 
 /// Leverage `pest`'s pretty error reporting
 pub fn expr_error(message: String, span: ArcSpan) -> String {
@@ -39,7 +39,13 @@ fn expr_error2<R: pest::RuleType>(message: String, span: pest::Span) -> String {
 #[derive(Debug,Clone,PartialEq)]
 pub enum VicErr {
 	Full(ArcSpan,String),
-	Simple(String)
+	Simple(String),
+
+	// These three are control flow that are returned as 'errors'
+	// this pattern allows for signals to flow upwards easily through nested contexts
+	Continue(ArcSpan),
+	Break(ArcSpan),
+	Return(ArcSpan,RcVal)
 }
 
 impl VicErr {
@@ -53,12 +59,14 @@ impl VicErr {
 		match self {
 			VicErr::Full(_, msg) |
 			VicErr::Simple(msg) => VicErr::Full(span, msg),
+			_ => self
 		}
 	}
 	pub fn try_with_span(self, span: ArcSpan) -> Self {
 		match self {
 			VicErr::Full(_, _) => self,
 			VicErr::Simple(msg) => VicErr::Full(span, msg),
+			_ => self
 		}
 	}
 }
@@ -88,6 +96,18 @@ impl Display for VicErr {
 				} else {
 					write!(f,"vicut: {msg}")
 				}
+			}
+			VicErr::Continue(arc_span) => {
+				let pretty_err = expr_error("found 'continue' outside of loop context".into(), arc_span.clone());
+				write!(f, "{pretty_err}")
+			}
+			VicErr::Break(arc_span) => {
+				let pretty_err = expr_error("found 'break' outside of loop context".into(), arc_span.clone());
+				write!(f, "{pretty_err}")
+			}
+			VicErr::Return(arc_span,_) => {
+				let pretty_err = expr_error("found 'return' outside of function context".into(), arc_span.clone());
+				write!(f, "{pretty_err}")
 			}
 		}
 	}

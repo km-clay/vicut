@@ -1,9 +1,9 @@
-use crate::{exec::ViCut, linebuf::ClampedUsize, register::{read_register, write_register, RegisterContent}, set_buf, vic::{error::VicErr, parse::{RcVal, Val}}, vicmd::{Bound, Word}};
+use crate::{exec::ViCut, linebuf::ClampedUsize, register::{read_register, write_register, RegisterContent}, vic::{error::VicErr, parse::{RcVal, Val}}, vicmd::{Bound, Word}};
 
 
 impl ViCut {
 	pub fn get_builtin_var(&mut self, name: &str) -> Option<RcVal> {
-		set_buf!(self,cur_buf);
+		let cur_buf = self.current_buffer_mut();
 
 		if !Self::BUILTINS.contains(&name) {
 			return None // Not a built-in variable
@@ -43,20 +43,61 @@ impl ViCut {
 			_ => unreachable!()
 		})
 	}
+	pub fn set_builtin_var(&mut self, name: &str, value: RcVal) -> Result<(), VicErr> {
+		let cur_buf = self.current_buffer_mut();
+
+		if !Self::BUILTINS.contains(&name) {
+			return Err(VicErr::Simple(format!("{} is not a built-in variable", name)));
+		}
+		match name {
+			"_col" => {
+				let Ok(col) = value.borrow().to_string().parse::<usize>() else {
+					return Err(VicErr::Simple("Column must be a non-negative integer".to_string()));
+				};
+				let line_no = cur_buf.cursor_line_number();
+				let Some((start,_)) = cur_buf.line_bounds(line_no) else {
+					return Err(VicErr::Simple(format!("Line {} does not exist", cur_buf.cursor_line_number())));
+				};
+				cur_buf.cursor.set(start + col);
+			},
+			"_line" => {
+				let Ok(line) = value.borrow().to_string().parse::<usize>() else {
+					return Err(VicErr::Simple("Line must be a non-negative integer".to_string()));
+				};
+				let Some((start,_)) = cur_buf.line_bounds(line) else {
+					return Err(VicErr::Simple(format!("Line {} does not exist", line)));
+				};
+				cur_buf.cursor.set(start);
+			},
+			"_pos" => {
+				let Ok(pos) = value.borrow().to_string().parse::<usize>() else {
+					return Err(VicErr::Simple("Position must be a non-negative integer".to_string()));
+				};
+				cur_buf.cursor.set(pos);
+			},
+			_ => return Err(VicErr::Simple(format!("Cannot set built-in variable {}", name))),
+		}
+		Ok(())
+	}
 	pub fn dispatch_builtin_method(&mut self, self_val: RcVal, method_name: &str, args: Vec<RcVal>) -> Result<RcVal,VicErr> {
 		let inner = self_val.borrow().clone();
 		match inner {
 			Val::Str(_) => self.string_builtins(self_val.clone(), method_name, args),
 			Val::Arr(_) => self.arr_builtins(self_val.clone(), method_name, args),
 			Val::Num(_) => self.num_builtins(self_val.clone(), method_name, args),
-			Val::Register(_) => todo!(),
+			Val::Register(_) => self.register_builtins(self_val.clone(), method_name, args),
 			Val::Closure(_, _) => todo!(),
 			Val::Dict(_) => todo!(),
 			Val::Bool(_) => todo!(),
 			Val::Regex(_) => todo!(),
 			Val::Expr(_) => todo!(),
-			Val::Buffer(_) => todo!(),
+			Val::BufferHandle => self.buffer_builtins(method_name, args),
 			_ => Err(VicErr::Simple(format!("Cannot call method '{}' on value of type {}", method_name, inner.display_type()))),
+		}
+	}
+	fn buffer_builtins(&mut self, method_name: &str, args: Vec<RcVal>) -> Result<RcVal, VicErr> {
+		match method_name {
+			_ => Err(VicErr::Simple(format!("Unknown buffer method: {method_name}"))),
 		}
 	}
 	fn register_builtins(&mut self, self_val: RcVal, method_name: &str, args: Vec<RcVal>) -> Result<RcVal, VicErr> {
@@ -71,7 +112,7 @@ impl ViCut {
 				Ok(Val::Null.into())
 			}
 			"put" => {
-				if args.len() > 0 {
+				if !args.is_empty() {
 					return Err(VicErr::Simple("put does not take any arguments".to_string()));
 				}
 				let Val::Register(reg) = *self_val.borrow() else { unreachable!() };
@@ -84,7 +125,7 @@ impl ViCut {
 	fn num_builtins(&mut self, self_val: RcVal, method_name: &str, args: Vec<RcVal>) -> Result<RcVal, VicErr> {
 		match method_name {
 			"abs" => {
-				if args.len() > 0 {
+				if !args.is_empty() {
 					return Err(VicErr::Simple("abs does not take any arguments".to_string()));
 				}
 				if let Val::Num(num) = *self_val.borrow() {
@@ -94,7 +135,7 @@ impl ViCut {
 				}
 			},
 			"sqrt" => {
-				if args.len() > 0 {
+				if !args.is_empty() {
 					return Err(VicErr::Simple("sqrt does not take any arguments".to_string()));
 				}
 				if let Val::Num(num) = *self_val.borrow() {
@@ -112,7 +153,7 @@ impl ViCut {
 	fn arr_builtins(&mut self, self_val: RcVal, method_name: &str, args: Vec<RcVal>) -> Result<RcVal, VicErr> {
 		match method_name {
 			"len" => {
-				if args.len() > 0 {
+				if !args.is_empty() {
 					return Err(VicErr::Simple("len does not take any arguments".to_string()));
 				}
 				let len = match *self_val.borrow() {
@@ -126,14 +167,15 @@ impl ViCut {
 					return Err(VicErr::Simple("push takes exactly one argument".to_string()));
 				}
 				if let Val::Arr(ref mut arr) = *self_val.borrow_mut() {
-					arr.push(args[0].clone());
+					let val_copy = args[0].borrow().clone();
+					arr.push(val_copy.into());
 					Ok(Val::Null.into())
 				} else {
 					Err(VicErr::Simple("push can only be called on arrays".to_string()))
 				}
 			},
 			"pop" => {
-				if args.len() > 0 {
+				if !args.is_empty() {
 					return Err(VicErr::Simple("pop does not take any arguments".to_string()));
 				}
 				if let Val::Arr(ref mut arr) = *self_val.borrow_mut() {
@@ -152,7 +194,7 @@ impl ViCut {
 	fn string_builtins(&mut self, self_val: RcVal, method_name: &str, args: Vec<RcVal>) -> Result<RcVal, VicErr> {
 		match method_name {
 			"len" => {
-				if args.len() > 0 {
+				if !args.is_empty() {
 					return Err(VicErr::Simple("len does not take any arguments".to_string()));
 				}
 				let len = match *self_val.borrow() {
@@ -162,8 +204,34 @@ impl ViCut {
 				};
 				Ok(Val::Num(len as isize).into())
 			},
+			"push" => {
+				if args.len() != 1 {
+					return Err(VicErr::Simple("push takes exactly one argument".to_string()));
+				}
+				if let Val::Str(ref mut s) = *self_val.borrow_mut() {
+					s.push_str(&args[0].borrow().to_string());
+					Ok(Val::Null.into())
+				} else {
+					Err(VicErr::Simple("push can only be called on strings".to_string()))
+				}
+			},
+			"pop" => {
+				if !args.is_empty() {
+					return Err(VicErr::Simple("pop does not take any arguments".to_string()));
+				}
+				if let Val::Str(ref mut s) = *self_val.borrow_mut() {
+					if !s.is_empty() {
+						let last_char = s.pop().unwrap();
+						Ok(Val::Str(last_char.to_string()).into())
+					} else {
+						Err(VicErr::Simple("pop called on an empty string".to_string()))
+					}
+				} else {
+					Err(VicErr::Simple("pop can only be called on strings".to_string()))
+				}
+			}
 			"to_upper" => {
-				if args.len() > 0 {
+				if !args.is_empty() {
 					return Err(VicErr::Simple("to_upper does not take any arguments".to_string()));
 				}
 				if let Val::Str(ref s) = *self_val.borrow() {
@@ -173,7 +241,7 @@ impl ViCut {
 				}
 			},
 			"to_lower" => {
-				if args.len() > 0 {
+				if !args.is_empty() {
 					return Err(VicErr::Simple("to_lower does not take any arguments".to_string()));
 				}
 				if let Val::Str(ref s) = *self_val.borrow() {
@@ -183,7 +251,7 @@ impl ViCut {
 				}
 			},
 			"trim" => {
-				if args.len() > 0 {
+				if !args.is_empty() {
 					return Err(VicErr::Simple("trim does not take any arguments".to_string()));
 				}
 				if let Val::Str(ref s) = *self_val.borrow() {
@@ -192,7 +260,40 @@ impl ViCut {
 					Err(VicErr::Simple("trim can only be called on strings".to_string()))
 				}
 			},
-			_ => Err(VicErr::Simple(format!("Unknown method: {}", method_name))),
+			"trim_matches" => {
+				if args.len() != 1 {
+					return Err(VicErr::Simple("trim_matches takes exactly one argument".to_string()));
+				}
+				let arg = args[0].borrow().clone();
+				if let Val::Str(ref s) = *self_val.borrow() {
+					let s = s.to_string();
+					let trimmed = match arg {
+						Val::Str(ref pat_str) => s.trim_matches(|c| pat_str.contains(c)),
+						Val::Arr(ref arr) => {
+							let chars: Option<Vec<char>> = arr.iter()
+								.map(|v| {
+									let s = v.borrow().to_string();
+									let mut chars = s.chars();
+									match (chars.next(), chars.next()) {
+										(Some(c), None) => Some(c), // single char string
+										_ => None
+									}
+								})
+							.collect();
+							if let Some(char_vec) = chars {
+								s.trim_matches(&char_vec[..])
+							} else {
+								return Err(VicErr::Simple("All elements in array must be single-character strings".to_string()));
+							}
+						}
+						_ => return Err(VicErr::Simple("Expected string or array of single-character strings".to_string())),
+					};
+					Ok(Val::Str(trimmed.to_string()).into())
+				} else {
+					Err(VicErr::Simple("trim_matches can only be called on strings".to_string()))
+				}
+			}
+			_ => Err(VicErr::Simple(format!("Unknown string method: {method_name}"))),
 		}
 	}
 }

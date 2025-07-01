@@ -82,12 +82,17 @@ command = {
 range           = { expr ~ ".." ~ expr }
 range_inclusive = { expr ~ "..=" ~ expr }
 
+switch_block       = { "switch" ~ expr ~ cases }
+cases              = { "{" ~ case* ~ default_block? ~ "}" }
+case               = { "case" ~ literal ~ ("|" ~ literal)* ~ block }
+with_block         = { "with" ~ expr ~ block }
 for_block          = { "for" ~ var ~ "in" ~ (range_inclusive | range | expr) ~ block }
 while_block        = { "while" ~ expr_bool_priority ~ block }
 until_block        = { "until" ~ expr_bool_priority ~ block }
 if_block           = { "if" ~ expr_bool_priority ~ block ~ elif_block* ~ else_block? }
 elif_block         = { "elif" ~ expr_bool_priority ~ block }
 else_block         = { "else" ~ block }
+default_block      = { "default" ~ block }
 expr_bool_priority = { bool_expr | bool | expr }
 
 // Expressions
@@ -124,7 +129,7 @@ not     = { "!" }
 // I'm not sure why I need to nest these rules like this
 // but it didn't work right until I did
 expr               = !{
-    (bin_expr | func_call | (bool_expr | (command | value))) ~ accessor*
+    (with_block | (bin_expr | func_call | (bool_expr | (command | value)))) ~ accessor*
 }
 expr_not_recursive = !{
     (command | func_call | value) ~ accessor*
@@ -199,7 +204,7 @@ expr_list = { ((expr ~ ",")* ~ expr?)? }
 null = { "null" }
 
 regex_delim = _{ !(ASCII_ALPHANUMERIC | "'" | "}" | "{" | "(" | ")" | "[" | "]") ~ ANY }
-regex       =  { PUSH(regex_delim) ~ (&PEEK ~ PUSH(regex_delim))* ~ raw_inner ~ POP_ALL }
+regex       = ${ PUSH(regex_delim) ~ (&PEEK ~ PUSH(regex_delim))* ~ raw_inner ~ POP_ALL }
 
 register = { "@" ~ reg_name }
 reg_name = { ASCII_ALPHA }
@@ -217,6 +222,17 @@ value = {
   | regex
 }
 
+literal = {
+  array
+  | dict
+  | null
+  | int
+  | str_literal
+  | bool
+  | register
+  | regex
+}
+
 top_level_cmd = {
     var_declare
   | opts
@@ -227,6 +243,8 @@ top_level_cmd = {
   | var_div
   | var_pow
   | var_mod
+  | with_block
+  | switch_block
   | for_block
   | if_block
   | while_block
@@ -235,6 +253,7 @@ top_level_cmd = {
   | class_def
   | func_def
   | func_call
+  | expr
 }
 
 block = !{ "{" ~ (top_level_cmd ~ ";"?)* ~ "}" }

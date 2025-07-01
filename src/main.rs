@@ -23,7 +23,7 @@ use exec::ViCut;
 use serde_json::{Map, Value};
 use rayon::prelude::*;
 
-use crate::vic::error::VicErr;
+use crate::{linebuf::LineBuf, vic::error::VicErr};
 
 pub mod vicmd;
 pub mod modes;
@@ -534,8 +534,7 @@ fn execute(mut vicut: ViCut, args: &Opts, filename: Option<PathBuf>) -> Result<V
 
 	if should_print_entire_buffer {
 		let buf = vicut.current_buffer();
-		let Val::Buffer(ref mut cur_buf) = *buf.borrow_mut() else { unreachable!() };
-		let big_line = cur_buf.buffer.clone();
+		let big_line = buf.buffer.clone();
 		vicut.exec_ctx.fmt_lines.push(vec![("0".into(),big_line)]);
 	}
 
@@ -947,7 +946,7 @@ fn exec_files(vicut: ViCut, args: &Opts) {
 /// Default execution pathway. Operates on `stdin`.
 ///
 /// Simplest of the three routes.
-fn exec_stdin(vicut: ViCut, args: &Opts) {
+fn exec_stdin(mut vicut: ViCut, args: &Opts) {
 	let mut stdout = io::stdout().lock();
 	let mut lines = vec![];
 	let mut stream: Box<dyn BufRead> = Box::new(io::BufReader::new(io::stdin()));
@@ -959,6 +958,7 @@ fn exec_stdin(vicut: ViCut, args: &Opts) {
 			return;
 		}
 	}
+	*vicut.current_buffer_mut() = LineBuf::new().with_initial(input, 0);
 	match execute(vicut, args, None) {
 		Ok(mut output) => {
 			lines.append(&mut output);

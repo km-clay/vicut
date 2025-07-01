@@ -1640,6 +1640,7 @@ impl LineBuf {
 		// 'new_delim' is the character that will increment the depth counter
 		let new_delim = self.read_grapheme_at(idx)?;
 		let mut depth = 0u32;
+		let mut last_quote = None;
 
 		match search_direction {
 			Direction::Forward => {
@@ -1647,6 +1648,21 @@ impl LineBuf {
 				while let Some(idx) = fwd_indices.next() {
 					let gr = self.read_grapheme_at(idx)?;
 					match gr {
+						"\"" => {
+							if last_quote == Some("\"") {
+								last_quote = None;
+							} else {
+								last_quote = Some("\"");
+							}
+						}
+						"'" => {
+							if last_quote == Some("'") {
+								last_quote = None;
+							} else {
+								last_quote = Some("'");
+							}
+						}
+						_ if last_quote.is_some() => { /* Inside quotes, ignore */ }
 						_ if gr == new_delim => depth += 1,
 						_ if gr == target_delim => {
 							depth = depth.saturating_sub(1);
@@ -1664,6 +1680,21 @@ impl LineBuf {
 				while let Some(idx) = bkwd_indices.next() {
 					let gr = self.read_grapheme_at(idx)?;
 					match gr {
+						"\"" => {
+							if last_quote == Some("\"") {
+								last_quote = None;
+							} else {
+								last_quote = Some("\"");
+							}
+						}
+						"'" => {
+							if last_quote == Some("'") {
+								last_quote = None;
+							} else {
+								last_quote = Some("'");
+							}
+						}
+						_ if last_quote.is_some() => { /* Inside quotes, ignore */ }
 						_ if gr == new_delim => depth += 1,
 						_ if gr == target_delim => {
 							depth -= 1;
