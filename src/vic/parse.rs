@@ -1,4 +1,4 @@
-use std::{boxed, cell::RefCell, cmp::Ordering, collections::HashMap, fmt::Display, ops::Deref, rc::Rc, sync::Arc};
+use std::{boxed, cell::RefCell, cmp::Ordering, collections::{HashMap, VecDeque}, fmt::Display, ops::Deref, rc::Rc, sync::Arc};
 
 use pest::{iterators::{Pair, Pairs}, Parser};
 use pest_derive::Parser;
@@ -249,10 +249,11 @@ impl Expr {
 			ExprKind::VarDec { name, value }
 		} else {
 			let name_val = Val::Var(inner.next().unwrap().as_str().to_string());
+			dbg!(span.as_str());
 			let mut val_or_accessor = inner.next().unwrap();
-			while val_or_accessor.as_rule() == Rule::accessor {
-				let idx = Self::parse_accessor(val_or_accessor)?;
-				accessors.push(idx);
+			while val_or_accessor.as_rule() == Rule::accessor || val_or_accessor.as_rule() == Rule::accessor_call {
+				let accessor = Self::parse_accessor(val_or_accessor.clone())?;
+				accessors.push(accessor);
 				val_or_accessor = inner.next().unwrap();
 			}
 			let name = Box::new(Expr {
@@ -387,11 +388,30 @@ impl Expr {
 		Ok(cmds)
 	}
 	fn parse_accessor(accessor: ArcPair) -> Result<Accessor,VicErr> {
-		let accessor_kind = accessor.into_inner().next().unwrap();
-		match accessor_kind.as_rule() {
-			Rule::field => Self::parse_field(accessor_kind),
-			Rule::index => Self::parse_index(accessor_kind),
-			_ => unreachable!()
+		if accessor.as_rule() == Rule::accessor_call {
+			let mut accessor_and_args = accessor.into_inner();
+			let accessor = {
+				let accessor_kind = accessor_and_args.next().unwrap();
+				match accessor_kind.as_rule() {
+					Rule::field => Self::parse_field(accessor_kind)?,
+					Rule::index => Self::parse_index(accessor_kind)?,
+					_ => unreachable!("Unexpected rule in accessor: {:?}", accessor_kind.as_rule())
+				}
+			};
+			let mut args = vec![];
+			let arg_pairs = accessor_and_args.next().unwrap().into_inner()
+				.next().unwrap().into_inner();
+			for arg in arg_pairs {
+				args.push(Self::parse_expr(arg)?);
+			}
+			Ok(Accessor::Call(Box::new(accessor), args))
+		} else {
+			let accessor_kind = accessor.into_inner().next().unwrap();
+			match accessor_kind.as_rule() {
+				Rule::field => Self::parse_field(accessor_kind),
+				Rule::index => Self::parse_index(accessor_kind),
+				_ => unreachable!("Unexpected rule in accessor: {:?}", accessor_kind.as_rule())
+			}
 		}
 	}
 	fn parse_field(field: ArcPair) -> Result<Accessor,VicErr> {
@@ -427,6 +447,7 @@ impl Expr {
 		};
 		Ok(Accessor::Index(index))
 	}
+	#[track_caller]
 	fn parse_expr(expr: ArcPair) -> Result<Expr,VicErr> {
 		match expr.as_rule() {
 			Rule::value => Self::parse_value(expr),
@@ -441,7 +462,9 @@ impl Expr {
 				while let Some(accessor) = inner.next() {
 					accessors.push(Self::parse_accessor(accessor)?)
 				}
-				eval.accessors = accessors;
+				if eval.accessors.is_empty() {
+					eval.accessors = accessors;
+				}
 				Ok(eval)
 			}
 			Rule::func_call => {
@@ -522,7 +545,7 @@ impl Expr {
 				let next = inner.next().unwrap();
 				let mut expr = Self::parse_expr(next)?;
 				while let Some(pair) = inner.next() {
-					if let Rule::accessor = pair.as_rule() {
+					if let Rule::accessor | Rule::accessor_call = pair.as_rule() {
 						let accessor = Self::parse_accessor(pair)?;
 						accessors.push(accessor);
 					}
@@ -532,7 +555,7 @@ impl Expr {
 				}
 				Ok(expr)
 			}
-			_ => unreachable!("Unexpected rule: {:?}", expr.as_rule())
+			_ => unreachable!("Unexpected rule: {:?}, caller '{}'", expr.as_rule(), std::panic::Location::caller())
 		}
 	}
 	fn parse_bool_expr(expr: ArcPair) -> Result<Expr,VicErr> {
@@ -653,9 +676,9 @@ impl Expr {
 			"new" => {
 				let span = cmd.as_span();
 				let mut inner = cmd.into_inner();
-				let var = Val::Str(inner.next().unwrap().as_str().to_string());
+				let var = Self::parse_expr(inner.next().unwrap())?;
 				Ok(Self {
-					value: ExprKind::Command(Command::New(var.to_string())),
+					value: ExprKind::Command(Command::New(Box::new(var))),
 					accessors: vec![],
 					span
 				})
@@ -854,7 +877,7 @@ impl ExprKind {
 #[derive(Debug,Clone,PartialEq)]
 pub enum Command {
 	Next,
-	New(String), // constructor for classes
+	New(Box<Expr>), // constructor for classes
 	Continue,
 	Break,
 	BufId,
@@ -875,6 +898,7 @@ pub enum Command {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Accessor {
+	Call(Box<Accessor>,Vec<Expr>),
 	Field(String),
 	Index(Index)
 }
@@ -1002,9 +1026,10 @@ pub enum Val {
 	Null,
 	Str(String),
 	Var(String),
-	Arr(Vec<RcVal>),
+	Arr(VecDeque<RcVal>),
 	Num(isize),
 	Register(char),
+	MethodClosure(Box<RcVal>, Box<RcVal>), // holds the Closure and the 'self' value
 	Closure(Vec<String>, Vec<Expr>),
 	Dict(HashMap<String,RcVal>),
 	Bool(bool),
@@ -1120,6 +1145,7 @@ impl Val {
 					None
 				}
 			}
+			Val::MethodClosure(_, _) |
 			Val::Closure(_, _) => {
 				panic!("this should have already been evaluated")
 			}
@@ -1176,7 +1202,7 @@ impl Val {
 		match self {
 			Self::Arr(arr) => Ok(arr.clone().into_iter()),
 			Self::Str(s) => {
-				let graphemes = s.graphemes(true).map(|g| Val::Str(g.to_string()).into()).collect::<Vec<_>>();
+				let graphemes = s.graphemes(true).map(|g| Val::Str(g.to_string()).into()).collect::<VecDeque<_>>();
 				Ok(graphemes.into_iter())
 			}
 			_ => Err(VicErr::Simple(format!("Value of type '{}' is not iterable", self.display_type())))
@@ -1186,7 +1212,7 @@ impl Val {
 		match self {
 			Self::Arr(arr) => Ok(arr.into_iter()),
 			Self::Str(s) => {
-				let graphemes = s.graphemes(true).map(|g| Val::Str(g.to_string()).into()).collect::<Vec<_>>();
+				let graphemes = s.graphemes(true).map(|g| Val::Str(g.to_string()).into()).collect::<VecDeque<_>>();
 				Ok(graphemes.into_iter())
 			}
 			_ => Err(VicErr::Simple(format!("Value of type '{}' is not iterable", self.display_type())))
@@ -1195,15 +1221,10 @@ impl Val {
 	pub fn try_from_pair(pair: ArcPair) -> Result<Self,VicErr> {
 		match pair.as_rule() {
 			Rule::array => {
-				let mut elements = vec![];
+				let mut elements = VecDeque::new();
 				let elem_list = pair.into_inner().next().unwrap().into_inner();
 				for elem in elem_list {
-					let elem_inner = elem.into_inner().next().unwrap();
-					match elem_inner.as_rule() {
-						Rule::value => elements.push(Self::try_from_pair(elem_inner.into_inner().next().unwrap())?.into()),
-						Rule::expr => elements.push(Self::Expr(Box::new(Expr::parse_expr(elem_inner)?)).into()),
-						_ => return Err(VicErr::Simple(format!("Unexpected rule in array: {:?}", elem_inner.as_rule()))),
-					}
+					elements.push_back(Self::Expr(Box::new(Expr::parse_expr(elem)?)).into());
 				}
 				Ok(Self::Arr(elements))
 			}
@@ -1269,7 +1290,7 @@ impl Val {
 			(s1, Self::Str(s2)) => Ok(Self::Str(s1.to_string() + &s2.to_string())),
 			(Self::Arr(arr), val) => {
 				let mut arr = arr.clone();
-				arr.push(val.clone().into());
+				arr.push_back(val.clone().into());
 				Ok(Self::Arr(arr))
 			}
 			_ => Err(VicErr::Simple(format!("Cannot add values of type '{}' and '{}'", self.display_type(), other.display_type())))
@@ -1327,6 +1348,7 @@ impl Val {
 			Self::Num(_) => "number".to_string(),
 			Self::Register(_) => "register".to_string(),
 			Self::Var(_) => "variable".to_string(),
+			Self::MethodClosure(_,_) |
 			Self::Closure(_,_) => "closure".to_string(),
 			Self::Arr(_) => "array".to_string(),
 			Self::Bool(_) => "boolean".to_string(),
@@ -1357,6 +1379,7 @@ impl Val {
 				let Some(var) = vicut.read_var(v).clone() else { return false };
 				var.borrow().is_truthy(vicut)
 			}
+			Self::MethodClosure(_,_) => todo!(),
 			Self::Closure(args, body) => todo!(),
 			Self::Arr(arr) => !arr.is_empty(),
 			Self::Bool(b) => *b,
@@ -1418,6 +1441,7 @@ impl Display for Val {
 			}
 			Self::Register(ch) => write!(f, "@{ch}"),
 			Self::Var(v) => write!(f, "{v}"),
+			Self::MethodClosure(_, _) |
 			Self::Closure(_, _) => {
 				write!(f, "{{ closure }}")
 			}

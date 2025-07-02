@@ -136,6 +136,7 @@ expr_not_recursive = !{
 }
 
 accessor = { field | index }
+accessor_call = { (field | index) ~ func_call_args }
 
 field = { "." ~ var }
 
@@ -174,7 +175,7 @@ func_name     = { var ~ func_def_args }
 func_def      = { "def" ~ func_name ~ block }
 
 func_call_args = { "(" ~ expr_list ~ ")" }
-func_call      = { func_call_name ~ func_call_args ~ accessor* }
+func_call      = { func_call_name ~ func_call_args ~ accessor_call* }
 func_call_name = !{
     value ~ accessor*
 }
@@ -191,7 +192,7 @@ true  = { "true" }
 false = { "false" }
 bool  = { true | false }
 
-int = @{ ASCII_DIGIT+ }
+int = @{ negative? ~ ASCII_DIGIT+ }
 
 array = { "[" ~ expr_list ~ "]" }
 
