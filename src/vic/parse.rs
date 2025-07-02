@@ -5,7 +5,7 @@ use pest_derive::Parser;
 use regex::Regex;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::{exec::ViCut, linebuf::LineBuf, register::read_register, vic::error::{VicErr, VicErrResult}, Opts};
+use crate::{exec::ViCut, linebuf::LineBuf, register::read_register, vic::error::{expr_error, VicErr, VicErrResult}, Opts};
 
 #[derive(Parser)]
 #[grammar = "vic/vic.pest"] // relative to src
@@ -410,6 +410,7 @@ impl Expr {
 			match accessor_kind.as_rule() {
 				Rule::field => Self::parse_field(accessor_kind),
 				Rule::index => Self::parse_index(accessor_kind),
+				Rule::err_prop => Ok(Accessor::ErrProp),
 				_ => unreachable!("Unexpected rule in accessor: {:?}", accessor_kind.as_rule())
 			}
 		}
@@ -694,6 +695,17 @@ impl Expr {
 					span
 				})
 			}
+			"catch" => {
+				let span = cmd.as_span();
+				let mut inner = cmd.into_inner();
+				let scrutinee = Box::new(Self::parse_expr(inner.next().unwrap())?);
+				let catch_block = Self::parse_block(inner.next().unwrap())?;
+				Ok(Self {
+					value: ExprKind::CatchBlock { scrutinee, catch_block },
+					accessors: vec![],
+					span: span.clone()
+				})
+			}
 			"not_global" | "!global" | "v" => {
 				let span = cmd.as_span();
 				let mut inner = cmd.into_inner();
@@ -701,6 +713,16 @@ impl Expr {
 				let block = Self::parse_block(inner.next().unwrap())?;
 				Ok(Self {
 					value: ExprKind::Command(Command::NotGlobal { pattern, block }),
+					accessors: vec![],
+					span
+				})
+			}
+			"error!" => {
+				let span = cmd.as_span();
+				let mut inner = cmd.into_inner();
+				let msg = Box::new(Val::try_from_pair(inner.next().unwrap())?.into());
+				Ok(Self {
+					value: ExprKind::Value(Val::Err(span.clone(),msg).into()),
 					accessors: vec![],
 					span
 				})
@@ -859,6 +881,7 @@ pub enum ExprKind {
 	WhileBlock { cond: Box<Expr>, body: Vec<Expr> },
 	UntilBlock { cond: Box<Expr>, body: Vec<Expr> },
 	WithBlock { buffer: Box<Expr>, body: Vec<Expr> },
+	CatchBlock { scrutinee: Box<Expr>, catch_block: Vec<Expr> },
 	Range { start: Box<Expr>, end: Box<Expr> },
 	BinExpr(Vec<RpnItem>),
 	BoolExpr(Vec<RpnItem>),
@@ -900,7 +923,8 @@ pub enum Command {
 pub enum Accessor {
 	Call(Box<Accessor>,Vec<Expr>),
 	Field(String),
-	Index(Index)
+	Index(Index),
+	ErrProp
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1024,6 +1048,7 @@ pub type RcVal = Rc<RefCell<Val>>;
 pub enum Val {
 	#[default]
 	Null,
+	Err(ArcSpan,Box<RcVal>),
 	Str(String),
 	Var(String),
 	Arr(VecDeque<RcVal>),
@@ -1086,6 +1111,7 @@ impl Val {
 	pub fn cmp(&self, other: &Val, vicut: &mut ViCut) -> Option<Ordering> {
 		match self {
 			Val::BufferHandle => unreachable!(),
+			Val::Err(_, _) => None,
 			Val::Break |
 			Val::Continue |
 			Val::Null => {
@@ -1280,6 +1306,10 @@ impl Val {
 				let regex = Regex::new(&regex_raw).map_err(|e| format!("Invalid regex: {e}"))?;
 				Ok(Self::Regex(regex))
 			}
+			Rule::expr => {
+				let expr = Expr::parse_expr(pair)?;
+				Ok(Self::Expr(Box::new(expr)))
+			}
 				_ => unreachable!("Unexpected rule: {:?}", pair.as_rule())
 		}
 	}
@@ -1342,6 +1372,7 @@ impl Val {
 	}
 	pub fn display_type(&self) -> String {
 		match self {
+			Self::Err(_, _) => "error".to_string(),
 			Self::BufferHandle => "buffer_handle".to_string(),
 			Self::Dict(_) => "dictionary".to_string(),
 			Self::Str(_) => "string".to_string(),
@@ -1361,6 +1392,7 @@ impl Val {
 	}
 	pub fn is_truthy(&self, vicut: &mut ViCut) -> bool {
 		match self {
+			Self::Err(_,_) => false,
 			Self::BufferHandle => {
 				// This is a special case, we consider the buffer handle to be truthy
 				// if it exists, which it always does.
@@ -1418,6 +1450,11 @@ impl PartialEq for Val {
 impl Display for Val {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
+			Self::Err(span, msg) => {
+				let msg = msg.borrow().to_string();
+				let pest_err = expr_error(msg, span.clone());
+				write!(f, "{pest_err}")
+			}
 			Self::BufferHandle => {
 				write!(f, "{{ buffer handle }}")
 			}

@@ -24,7 +24,7 @@ silent                   = { "silent" }
 no_input                 = { "no_input" }
 global_uses_line_numbers = { "global_uses_line_numbers" }
 
-opt    = {
+opt  = {
     json
   | pipe_in
   | pipe_out
@@ -56,16 +56,20 @@ not_global    = ${ ("v" | "not_global" | "!global") ~ " "+ ~ expr ~ WHITESPACE* 
 move          = ${ ("move" | "m") ~ " "+ ~ expr ~ WHITESPACE* }
 cut           = ${ ("cut" | "c") ~ " "+ ~ expr ~ WHITESPACE* }
 next          = ${ "next" ~ WHITESPACE+ }
+catch         =  { "catch" ~ expr ~ block }
 repeat        = ${ ("repeat") ~ " "+ ~ expr ~ " "+ ~ block }
 break_loop    = ${ ("break") ~ WHITESPACE* }
 new           = ${ "new" ~ WHITESPACE+ ~ expr ~ WHITESPACE* }
 continue_loop = ${ ("continue") ~ WHITESPACE* }
+error         =  { "error!" ~ expr }
 return        = ${ ("return" | "ret") ~ " "+ ~ expr }
 include       = ${ ("include") ~ " "+ ~ expr ~ WHITESPACE* }
 
 command = {
     global
   | not_global
+  | error
+  | catch
   | move
   | cut
   | new
@@ -110,10 +114,10 @@ modulo   = { "%" }
 pow      = { "**" }
 negative = { "-" }
 
-bool_expr = { bool_atom ~ (bool_op ~ bool_atom)+ |  (not+ ~ bool_atom)}
+bool_expr           = { bool_atom ~ (bool_op ~ bool_atom)+ | (not+ ~ bool_atom) }
 bool_expr_single_ok = { not* ~ bool_atom ~ (bool_op ~ bool_atom)* }
-bool_atom = { not* ~ (bool_lit | ("(" ~ bool_expr_single_ok ~ ")")) }
-bool_lit  = { (expr_not_recursive | ("(" ~ bin_expr ~ ")")) }
+bool_atom           = { not* ~ (bool_lit | ("(" ~ bool_expr_single_ok ~ ")")) }
+bool_lit            = { (expr_not_recursive | ("(" ~ bin_expr ~ ")")) }
 
 bool_op = { eq | ne | lt | le | ge | gt | and | or }
 eq      = { "==" }
@@ -135,18 +139,20 @@ expr_not_recursive = !{
     (command | func_call | value) ~ accessor*
 }
 
-accessor = { field | index }
-accessor_call = { (field | index) ~ func_call_args }
+accessor      = { field | index | err_prop }
+accessor_call = { (field | index | err_prop) ~ func_call_args }
+
+err_prop = { "?" }
 
 field = { "." ~ var }
 
-index        = {
+index      = {
     "[" ~ (index_to | slice | index_from | index_sng) ~ "]"
 }
-index_to     = { ".." ~ expr }
-slice        = { expr ~ ".." ~ expr }
-index_from   = { expr ~ ".." }
-index_sng    = { expr }
+index_to   = { ".." ~ expr }
+slice      = { expr ~ ".." ~ expr }
+index_from = { expr ~ ".." }
+index_sng  = { expr }
 
 // Variable Operations
 var         = @{ (ASCII_ALPHANUMERIC | "_")+ }
@@ -161,7 +167,7 @@ var_mod     =  { var ~ accessor* ~ "%=" ~ expr }
 
 // Class stuff
 
-class_def = { "class" ~ var ~ class_block }
+class_def   = { "class" ~ var ~ class_block }
 class_block = { "{" ~ key_value_list ~ func_def* ~ "}" }
 
 // Function stuff
@@ -174,19 +180,19 @@ func_def_args = { "(" ~ var_list ~ ")" }
 func_name     = { var ~ func_def_args }
 func_def      = { "def" ~ func_name ~ block }
 
-func_call_args = { "(" ~ expr_list ~ ")" }
-func_call      = { func_call_name ~ func_call_args ~ accessor_call* }
+func_call_args =  { "(" ~ expr_list ~ ")" }
+func_call      =  { func_call_name ~ func_call_args ~ (accessor_call | accessor)* }
 func_call_name = !{
     value ~ accessor*
 }
 
 // Primitives
 
-str_inner     = ${ ("\\\\" | ("\\" ~ "\"") | (!"\"" ~ ANY))* }
-raw_inner     =  ${ (!PEEK_ALL ~ ANY)* }
-str_literal   =  ${ raw_literal | ("\"" ~ str_inner ~ "\"") }
-raw_literal   =  _{ "r" ~ PUSH("-") ~ (&PEEK ~ PUSH("-"))* ~ PUSH("\"") ~ raw_inner ~ POP_ALL }
-closure       =  { closure_def_args ~ block }
+str_inner   = ${ ("\\\\" | ("\\" ~ "\"") | (!"\"" ~ ANY))* }
+raw_inner   = ${ (!PEEK_ALL ~ ANY)* }
+str_literal = ${ raw_literal | ("\"" ~ str_inner ~ "\"") }
+raw_literal = _{ "r" ~ PUSH("-") ~ (&PEEK ~ PUSH("-"))* ~ PUSH("\"") ~ raw_inner ~ POP_ALL }
+closure     =  { closure_def_args ~ block }
 
 true  = { "true" }
 false = { "false" }
@@ -196,9 +202,9 @@ int = @{ negative? ~ ASCII_DIGIT+ }
 
 array = { "[" ~ expr_list ~ "]" }
 
-key_value = { var ~ ":" ~ expr }
+key_value      = { var ~ ":" ~ expr }
 key_value_list = { ((key_value ~ ",")* ~ key_value?)? }
-dict = { "{" ~ key_value_list ~ "}" }
+dict           = { "{" ~ key_value_list ~ "}" }
 
 expr_list = { ((expr ~ ",")* ~ expr?)? }
 
@@ -224,7 +230,7 @@ value = {
 }
 
 literal = {
-  array
+    array
   | dict
   | null
   | int

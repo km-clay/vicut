@@ -1117,7 +1117,7 @@ impl ViCut {
 
 					for r_cmd in block {
 						// We use recursion so that we can nest repeats easily
-						self.eval_expr(true,r_cmd);
+						self.eval_expr(true,r_cmd)?;
 					}
 					if !self.find_opt(|o| o.keep_mode).unwrap_or(false) {
 						self.set_normal_mode();
@@ -1271,7 +1271,10 @@ impl ViCut {
 							let res = self.eval_closure(self_val, func_args?, arg_names.to_vec(), body.to_vec());
 							match res {
 								Ok(val) => val,
-								Err(VicErr::Return(_,val)) => val,
+								Err(VicErr::Return(_,val)) => {
+									let is_err = matches!(*val.borrow(), Val::Err(_,_));
+									val
+								}
 								Err(e) => return Err(e)
 							}
 
@@ -1574,6 +1577,31 @@ impl ViCut {
 				}
 				ret
 			}
+			ExprKind::CatchBlock { scrutinee, catch_block } => {
+				let scrutinee_eval = self.eval_expr(false,scrutinee).try_blame(scrutinee.span())?;
+				let is_err = matches!(*scrutinee_eval.borrow(), Val::Err(_,_));
+				if is_err {
+					self.descend(); // new scope
+					let mut ret = Val::Null.into();
+					for cmd in catch_block {
+						let res = self.eval_expr(true,cmd).try_blame(cmd.span());
+						match res {
+							Ok(val) => ret = val,
+							Err(e) => {
+								self.ascend();
+								return Err(e)
+							}
+						}
+						if !self.find_opt_or_default(|o| o.keep_mode) {
+							self.set_normal_mode();
+						}
+					}
+					self.ascend(); // leave scope
+					ret
+				} else {
+					scrutinee_eval
+				}
+			}
 			ExprKind::Block(exprs) => todo!(),
 			ExprKind::Value(val) => self.eval_value(val.clone()).try_blame(cmd_expr.span())?,
 			ExprKind::Opts(exprs) => {
@@ -1772,6 +1800,15 @@ impl ViCut {
 		for accessor in accessors {
 			last_eval = Some(eval.clone());
 			eval = match accessor {
+				Accessor::ErrProp => {
+					let is_err = matches!(*eval.borrow(), Val::Err(_,_));
+					if is_err {
+						let Val::Err(ref span,_) = *eval.borrow() else { unreachable!() };
+						return Err(VicErr::Return(span.clone(), eval.clone()))
+					} else {
+						eval
+					}
+				}
 				Accessor::Call(accessor, args) => {
 					let (self_val,method_name) = if matches!(**accessor, Accessor::Field(_)) {
 						let Accessor::Field(field_name) = &**accessor else { unreachable!() };
@@ -2067,6 +2104,10 @@ impl ViCut {
 				for item in arr.iter() {
 					self.deep_eval_value(item.clone())?;
 				}
+				Ok(val.clone())
+			}
+			Val::Err(_, ref expr) => {
+				self.deep_eval_value((**expr).clone())?;
 				Ok(val.clone())
 			}
 			_ => Ok(val.clone())
