@@ -354,9 +354,9 @@ fn parse_global(chars: &mut Peekable<Chars<'_>>, constraint: Option<&Motion>) ->
 	};
 	let constraint = Box::new(constraint.cloned().unwrap_or(Motion::LineRange(LineAddr::Number(1),LineAddr::Last)));
 	if is_negated {
-		Ok(Some((Motion::NotGlobal(constraint,Val::Str(global_pat).into()), command)))
+		Ok(Some((Motion::NotGlobal(constraint,Val::new_str(global_pat)), command)))
 	} else {
-		Ok(Some((Motion::Global(constraint,Val::Str(global_pat).into()), command)))
+		Ok(Some((Motion::Global(constraint,Val::new_str(global_pat)), command)))
 	}
 }
 

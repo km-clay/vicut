@@ -59,6 +59,26 @@ pub struct ExecCtx {
 	fmt_lines: Vec<Vec<(String,String)>>, // Lines to format output from
 }
 
+impl ExecCtx {
+	pub fn new() -> Self {
+		Self::default()
+	}
+	pub fn push_fields(&mut self) {
+		let fields = std::mem::take(&mut self.fields);
+		self.fmt_lines.push(fields);
+		self.field_num = 0;
+	}
+	/// Trim the fields 🧑‍🌾
+	fn trim_fields(&mut self) {
+		let lines = &mut self.fmt_lines;
+		for line in lines {
+			for (_, field) in line {
+				*field = field.trim().to_string()
+			}
+		}
+	}
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Opts {
     pub delimiter: Option<String>,
@@ -499,8 +519,8 @@ fn execute(mut vicut: ViCut, args: &Opts, filename: Option<PathBuf>) -> Result<V
 		.map(|s| s.file_name().unwrap_or_default().to_string_lossy().to_string())
 		.unwrap_or_else(|| String::from("stdin"));
 	let filepath = filename.map(|s| s.to_string_lossy().to_string()).unwrap_or(String::from("stdin"));
-	vicut.set_var("filename".into(), Val::Str(basename).into())?;
-	vicut.set_var("filepath".into(), Val::Str(filepath).into())?;
+	vicut.set_var("filename".into(), Val::new_str(basename))?;
+	vicut.set_var("filepath".into(), Val::new_str(filepath))?;
 
 
 	let cmds = vicut.cmds.clone();
@@ -512,7 +532,7 @@ fn execute(mut vicut: ViCut, args: &Opts, filename: Option<PathBuf>) -> Result<V
 	}
 
 	if !vicut.exec_ctx.fields.is_empty() {
-		vicut.exec_ctx.fmt_lines.push(std::mem::take(&mut vicut.exec_ctx.fields));
+		vicut.exec_ctx.push_fields();
 	}
 
 	if vicut.exec_ctx.fmt_lines.is_empty() && vicut.find_opt(|o| o.silent).unwrap_or(false) {
@@ -539,20 +559,12 @@ fn execute(mut vicut: ViCut, args: &Opts, filename: Option<PathBuf>) -> Result<V
 	}
 
 	if vicut.find_opt(|o| o.trim_fields).unwrap_or(false) {
-		trim_fields(&mut vicut.exec_ctx.fmt_lines);
+		vicut.exec_ctx.trim_fields();
 	}
 
 	Ok(vicut.exec_ctx.fmt_lines.clone())
 }
 
-/// Trim the fields 🧑‍🌾
-fn trim_fields(lines: &mut Vec<Vec<(String,String)>>) {
-	for line in lines {
-		for (_, field) in line {
-			*field = field.trim().to_string()
-		}
-	}
-}
 
 /// Split a string slice into it's lines.
 ///

@@ -23,21 +23,66 @@ use crate::modes::search::ViSearch;
 use crate::reader::{KeyReader, RawReader};
 use crate::register::{append_register, read_register, write_register, RegisterContent};
 use crate::vic::error::{VicErr, VicErrResult};
-use crate::vic::parse::{Accessor, BinOp, BoolOp, Command, Expr, ExprKind, Index, RcVal, RpnItem, Val};
+use crate::vic::libvic::{Builtin, Func, Var};
+use crate::vic::parse::{Accessor, ArcSpan, BinOp, BoolOp, Command, Expr, ExprKind, Index, LogOp, RcVal, RpnItem, Val};
 use crate::vicmd::{Bound, LineAddr, Word};
-use crate::{complain_and_exit, ExecCtx, Opts};
+use crate::{complain_and_exit, validate_filename, ExecCtx, Opts};
 
 use super::linebuf::{LineBuf, SelectAnchor, SelectMode};
 use super::vicmd::{CmdFlags, Motion, MotionCmd, RegisterName, Verb, VerbCmd, ViCmd};
 use super::modes::{CmdReplay, ModeReport, insert::ViInsert, ViMode, normal::ViNormal, replace::ViReplace, visual::ViVisual};
 
-/// shorthand for getting a mutable reference to ViCut's currently selected buffer
-/// Takes, the self parameter, and the name you want to assign the reference to
 
-#[derive(Debug, Clone)]
-pub struct VicFunc {
-	pub args: Vec<String>,
-	pub body: Vec<Expr>,
+/// A scope guard for `ViCut` that automatically handles descending and ascending the scope stack
+///
+/// This struct automatically manages scoping by guaranteeing a scope pop upon return from an inner scope
+/// This guarantee is leveraged by Rust's `Drop` trait.
+/// When the `ScopeGuard` is dropped, it will call `ascend` on the `ViCut` instance,
+///
+/// Note: This struct holds a **raw pointer** to the `ViCut` instance (`*mut ViCut`). 
+/// This is safe **only under the assumption** that:
+/// - The `ScopeGuard` is created and dropped entirely within the lifetime of a `&mut ViCut`
+/// - The `ViCut` instance is not moved or deallocated while the guard is alive
+///
+/// Violating these assumptions (e.g., storing the guard beyond the method scope, or creating it from an invalid reference)
+/// can cause **undefined behavior** when the raw pointer is dereferenced in `drop()`.
+///
+/// As a result, `ScopeGuard` must **never escape the function or method** it is created in,
+/// and should only be used inside methods that have exclusive access to the `ViCut` instance.
+pub struct ScopeGuard {
+	vicut: *mut ViCut,
+}
+
+impl ScopeGuard {
+	pub fn new(vicut: &mut ViCut) -> Self {
+		// You don't need to do `*mut vicut`, just cast
+		let ptr = vicut as *mut ViCut;
+		unsafe {
+			(*ptr).descend();
+		}
+		Self { vicut: ptr }
+	}
+}
+
+impl Drop for ScopeGuard {
+	fn drop(&mut self) {
+		assert!(!self.vicut.is_null());
+		unsafe {
+			(*self.vicut).ascend();
+		}
+	}
+}
+
+pub enum Call {
+	Method { 
+		self_val: Val,
+		args: Rc<[Expr]>,
+		func: Val,
+	},
+	Function {
+		args: Rc<[Expr]>,
+		func: Val,
+	}
 }
 
 pub struct ViCut {
@@ -52,7 +97,7 @@ pub struct ViCut {
 	/// It starts with two hashmaps: one contains built-in variables
 	/// and the other is the global scope accessible to the user
 	/// This stack should never dip below length 2.
-	pub variables: Vec<HashMap<String, RcVal>>,
+	pub variables: Vec<HashMap<String, Val>>,
 
 	/// We also scope the runtime options
 	/// This allows for scoped 'opts' blocks, e.g.
@@ -69,29 +114,6 @@ pub struct ViCut {
 
 
 impl ViCut {
-	pub const BUILTINS: [&str;14] = [
-		"_col",
-		"_line",
-		"_lines",
-		"_pos",
-		"_byte",
-		"_buf_len",
-		"_selection",
-		"_buffer",
-		"_word",
-		"_WORD",
-		"_is_eof",
-		"_is_eol",
-		"_is_bof",
-		"_char"
-	];
-	pub const BUILTIN_FUNCS: [&str;5] = [
-		"print",
-		"json",
-		"env",
-		"format",
-		"type_of",
-	];
 	pub fn new(opts: Opts, input: String, cursor: usize) -> Result<Self,VicErr> {
 		let vic_src = if let Some(ref raw) = opts.vic_raw {
 			raw.to_string()
@@ -102,8 +124,7 @@ impl ViCut {
 		};
 		let ExprKind::Vic(cmds) = Expr::parse_vic(Arc::new(vic_src))?.into_value() else { unreachable!() };
 		// i am hacker man
-		let mut builtins = HashMap::new();
-		builtins.insert("_buffer".to_string(), Val::BufferHandle.into());
+		let builtins = Self::init_builtins();
 
 		let mut new = Self {
 			reader: RawReader::new(),
@@ -581,25 +602,13 @@ impl ViCut {
 	pub fn expr_targets_buffers(&self, expr: &Expr) -> bool {
 		match expr.value() {
 			ExprKind::Value(var) => {
-				let Val::Var(ref var) = *var.borrow() else { return false };
+				let Val::Var(var) = var else { return false };
 				var == "_buffers"
 			}
 			_ => false
 		}
 	}
-	pub fn var_from_expr(&mut self, expr: &Expr) -> Result<RcVal, VicErr> {
-		let ExprKind::Value(var) = expr.value() else {
-			return Err(VicErr::Full(expr.span(), format!("Expected a variable, got {}", expr.span().as_str())))
-		};
-		let Val::Var(ref var) = *var.borrow() else {
-			return Err(VicErr::Full(expr.span(), format!("Expected a variable, got {}", expr.span().as_str())))
-		};
-		let Some(var_val) = self.get_var(var) else {
-			return Err(VicErr::Full(expr.span(), format!("Variable '{var}' not found")))
-		};
-		Ok(var_val)
-	}
-	pub fn read_var(&self, name: &str) -> Option<RcVal> {
+	pub fn read_var(&self, name: &str) -> Option<Val> {
 		// Search the stack frames for the variable
 		// We do this in reverse order, so that we get the most local variable
 		for frame in self.variables.iter().rev() {
@@ -609,47 +618,36 @@ impl ViCut {
 		}
 		None
 	}
-	pub fn get_var(&mut self, name: &str) -> Option<RcVal> {
+	pub fn get_var(&mut self, name: &str) -> Option<Val> {
 		// Search the stack frames for the variable
 		// We do this in reverse order, so that we get the most local variable
+		let mut ret = None;
 		for frame in self.variables.iter().rev() {
 			if frame.contains_key(name) {
-				return frame.get(name).cloned()
+				ret = frame.get(name).cloned()
 			}
 		}
-		if Self::BUILTINS.contains(&name) {
-			// If the variable is a built-in, we return it as a Val::Str
-			// This is to allow for built-in variables like 'col', 'line', etc.
-			return self.get_builtin_var(name).clone()
+		if let Some(Val::BuiltinHandle(Builtin::Var(var))) = ret {
+			self.get_builtin_var(var)
+		} else {
+			ret
+		}
+	}
+	pub fn get_var_mut(&mut self, name: &str,) -> Option<&mut Val> {
+		// Search the stack frames for the variable
+		// We do this in reverse order, so that we get the most local variable
+		for frame in self.variables.iter_mut().rev() {
+			if frame.contains_key(name) {
+				return frame.get_mut(name)
+			}
 		}
 		None
 	}
-	pub fn set_var(&mut self, name: String, value: RcVal) -> Result<(),VicErr> {
+	pub fn set_var(&mut self, name: String, value: Val) -> Result<(),VicErr> {
 		let Some(frame) = self.variables.last_mut() else {
 			panic!("There is supposed to be a stack frame here")
 		};
 		frame.insert(name, value);
-		Ok(())
-	}
-	pub fn mutate_var(&mut self, var: RcVal, op: Option<BinOp>, value: RcVal) -> Result<(),VicErr> {
-		if let Some(op) = op {
-			let value = {
-				let borrowed_var = var.borrow();
-				let borrowed_val = value.borrow();
-				match op {
-					BinOp::Add => borrowed_var.add(borrowed_val.clone()),
-					BinOp::Sub => borrowed_var.sub(borrowed_val.clone()),
-					BinOp::Mult => borrowed_var.mult(borrowed_val.clone()),
-					BinOp::Div => borrowed_var.div(borrowed_val.clone()),
-					BinOp::Mod => borrowed_var.modulo(borrowed_val.clone()),
-					BinOp::Pow => borrowed_var.pow(borrowed_val.clone()),
-					BinOp::Equals => Ok(borrowed_val.clone())
-				}?
-			};
-			*var.borrow_mut() = value;
-		} else {
-			*var.borrow_mut() = value.borrow().clone();
-		}
 		Ok(())
 	}
 	pub fn clear_var(&mut self, name: &str) {
@@ -658,15 +656,9 @@ impl ViCut {
 		};
 		frame.remove(name);
 	}
-	pub fn eval_count(&mut self, count: &Expr) -> Result<usize,VicErr> {
-		let val = self.eval_expr(false,count).try_blame(count.span())?;
-		let Val::Num(ref n) = *val.borrow() else {
-			return Err(VicErr::Full(count.span(), format!("Expected a number, got {}", val.borrow().display_type())))
-		};
-		Ok(*n as usize)
-	}
-	pub fn run_shell_cmd(&mut self, cmd: &str) -> Result<RcVal,VicErr> {
-		let mut outputs = vec![];
+	pub fn run_shell_cmd(&mut self, cmd: &Expr) -> Result<Val,VicErr> {
+		let cmd = self.eval_expr(false, cmd).try_blame(cmd.span())?.to_string();
+		let mut outputs = HashMap::new();
 		let output = std::process::Command::new("sh")
 			.arg("-c")
 			.arg(cmd)
@@ -676,11 +668,11 @@ impl ViCut {
 			return Err(VicErr::Simple(format!("Shell command failed with status: {}", output.status)))
 		}
 		// Shell commands return an array containing stdout as index 0 and stderr as index 1
-		let stdout = String::from_utf8_lossy(&output.stdout).trim_end().to_string();
-		let stderr = String::from_utf8_lossy(&output.stderr).trim_end().to_string();
-		outputs.push(stdout);
-		outputs.push(stderr);
-		Ok(Val::Arr(outputs.into_iter().map(|output| Val::Str(output).into()).collect()).into())
+		let stdout = Val::new_str(String::from_utf8_lossy(&output.stdout).trim_end().to_string());
+		let stderr = Val::new_str(String::from_utf8_lossy(&output.stderr).trim_end().to_string());
+		outputs.insert("stdout".to_string(),stdout);
+		outputs.insert("stderr".to_string(), stderr);
+		Ok(Val::new_dict(outputs))
 	}
 	pub fn expand_literal(&mut self, literal: &str) -> Result<String,VicErr> {
 		let mut expanded = String::new();
@@ -740,7 +732,7 @@ impl ViCut {
 								return Err(VicErr::Simple("Unmatched ${{".to_string()))
 							}
 							if let Some(var) = self.get_var(&std::mem::take(&mut var_name)) {
-								expanded.push_str(&var.borrow().to_string());
+								expanded.push_str(&var.to_string());
 							}
 						}
 						(ch1,ch2) => {
@@ -879,6 +871,24 @@ impl ViCut {
 			output
 		}
 	}
+	pub fn introspect(&self) {
+		self.debug_vars(|i, scope| {
+			eprintln!("\x1b[1;31mscope {i}\x1b[0m:");
+			for (k, v) in scope {
+				if k.contains("ret") || v.contains("string!") {
+					eprintln!("  \x1b[1;35m{k}\x1b[0m = {v}");
+				}
+			}
+		});
+	}
+	pub fn debug_vars<F: FnMut(usize, &HashMap<String, String>)>(&self, mut f: F) {
+		for (i, frame) in self.variables.iter().enumerate() {
+			let map = frame.iter()
+				.map(|(k, v)| (k.to_string(), v.to_string()))
+				.collect::<HashMap<_, _>>();
+			f(i, &map);
+		}
+	}
 	/// Format the output as JSON
 	pub fn format_output_json(&self) -> String {
 		use serde_json::{Map, Value};
@@ -967,46 +977,6 @@ impl ViCut {
 		}
 		Ok(output)
 	}
-	pub fn eval_closure(&mut self,
-		self_val: Option<RcVal>,
-		mut given_args: Vec<RcVal>,
-		arg_names: Vec<String>,
-		body: Vec<Expr>
-	) -> Result<RcVal,VicErr> {
-		let self_pos = arg_names.iter().position(|name| name == "self");
-		if let Some(pos) = self_pos {
-			if let Some(val) = self_val {
-				// If 'self' is provided, we insert it at the position of 'self'
-				given_args.insert(pos, val);
-			} else {
-				return Err(VicErr::Simple("'self' is a reserved parameter name".to_string()))
-			}
-		}
-		if given_args.len() != arg_names.len() {
-			let given_len = given_args.len();
-			let expected_len = arg_names.len();
-			return Err(VicErr::Simple(format!("Closure expects {expected_len} arguments, got {given_len}")))
-		}
-		let arg_pairs = arg_names.into_iter().zip(given_args);
-		self.descend();
-		for (name,value) in arg_pairs {
-			self.set_var(name.clone(), value).map_err(|e| format!("In closure: {e}"))?;
-		}
-		let mut ret = Val::Null.into();
-		for cmd in body {
-			let res = self.eval_expr(true,&cmd).try_blame(cmd.span());
-			match res {
-				Ok(val) => ret = val,
-				Err(VicErr::Return(_, val)) => {
-					self.ascend();
-					return Ok(val)
-				}
-				Err(e) => return Err(e)
-			}
-		}
-		self.ascend();
-		Ok(ret)
-	}
 	pub fn eval_prelude(&mut self) -> Result<(),VicErr> {
 		// We want to evaluate options and imports as basically 
 		// the first thing we do after constructing a ViCut instance
@@ -1026,615 +996,432 @@ impl ViCut {
 
 		Ok(())
 	}
-	pub fn eval_expr(&mut self, is_top_level: bool, cmd_expr: &Expr) -> Result<RcVal,VicErr> {
-		let Expr { value: cmd, accessors, ..} = cmd_expr;
-		let mut eval = match cmd {
-			ExprKind::Command(Command::New(var_name)) => {
-				// 'new' creates and returns a copy of another variable
-				// it's main use is to create new instances of classes
-				// but it can create a copy of any existing variable
-				let var = self.eval_expr(false, var_name).try_blame(var_name.span())?;
-				if !accessors.is_empty() {
-					return Err(VicErr::Full(cmd_expr.span(), "Cannot index into type 'variable'".into()))
-				}
-				var.borrow().deep_clone().into()
-			}
-			ExprKind::Command(Command::ShellCmd { cmd }) => {
-				// Evaluate the shell command and execute it
-				let command = self.eval_expr(false, cmd)?.borrow().to_string();
-				let expanded = self.expand_literal(&command).try_blame(cmd_expr.span())?;
-				self.run_shell_cmd(&expanded).try_blame(cmd_expr.span())?
-			}
-			ExprKind::Command(Command::BufSwitch { id }) => {
-				let Val::Num(ref id) = self.eval_expr(false,id)?.borrow().clone() else {
-					return Err(VicErr::Simple("vicut: expected a number for buffer ID".into()))
-				}; 
-				if *id >= self.num_buffers() as isize || *id < 0 {
-					Val::Bool(false).into()
-				} else {
-					self.editor.set(*id as usize);
-					Val::Bool(true).into()
-				}
-			}
-			ExprKind::Command(Command::Include { path }) => {
-				todo!()
-			}
-			ExprKind::Command(Command::BufId) => {
-				// Get the current buffer's ID
-				let buf_id = self.editor.get();
-				if !accessors.is_empty() {
-					return Err(VicErr::Full(cmd_expr.span(), "Cannot index into type 'integer'".into()))
-				}
-				Val::Num(buf_id as isize).into()
-			}
-			ExprKind::Command(Command::Break) => return Err(VicErr::Break(cmd_expr.span())),
-			ExprKind::Command(Command::Continue) => return Err(VicErr::Continue(cmd_expr.span())),
-			ExprKind::Command(Command::Yank { register, motion }) => {
-				// Evaluate the arg and yank it into the given register
-				let reg = self.eval_expr(false,register).try_blame(register.span())?.borrow().to_string()
-					.chars().next().ok_or(VicErr::Full(register.span(), "vicut: expected a register name, found empty string".into()))?;
-				let motion_eval = self.eval_expr(false,motion).try_blame(motion.span())?.borrow().to_string();
-
-				let value = self.read_field(&motion_eval).try_blame(motion.span())?;
-
-				// Uppercase register name means "append to the register"
-				if reg.is_ascii_uppercase() {
-					append_register(Some(reg), RegisterContent::Span(value.to_string()));
-				} else {
-					write_register(Some(reg), RegisterContent::Span(value.to_string()));
-				}
-				Val::Null.into()
-			}
-			ExprKind::Command(Command::Return { ret }) => {
-				let Some(ret) = ret else {
-					return Err(VicErr::Return(cmd_expr.span(),Val::Null.into()))
-				};
-				return Err(VicErr::Return(cmd_expr.span(),self.eval_expr(false,ret).try_blame(ret.span())?))
-			}
-			ExprKind::Command(Command::Echo { args }) => {
-				if args.is_empty() {
-					println!();
-					return Ok(Val::Null.into());
-				}
-				let mut display_args = vec![];
-				for arg in args {
-					let value = self.eval_expr(false,arg).try_blame(arg.span())?;
-
-					display_args.push(value.borrow().to_string());
-				}
-				let output = display_args.join(" ");
-				if is_top_level {
-					println!("{output}");
-					Val::Null.into()
-				} else {
-					Val::Str(output).into()
-				}
-			}
-			ExprKind::Command(Command::Repeat { count, block }) => {
-				let n_repeats = self.eval_count(count).unwrap_or_else(complain_and_exit);
-				self.descend(); // new scope
-				for _ in 0..n_repeats {
-
-					for r_cmd in block {
-						// We use recursion so that we can nest repeats easily
-						self.eval_expr(true,r_cmd)?;
-					}
-					if !self.find_opt(|o| o.keep_mode).unwrap_or(false) {
-						self.set_normal_mode();
-					}
-				}
-				self.ascend(); // leave scope
-				Val::Null.into()
-			}
-			ExprKind::Command(Command::NotGlobal { pattern, block }) |
-			ExprKind::Command(Command::Global { pattern, block }) => {
-				/*
-				let polarity = matches!(cmd, ExprKind::Command(Command::Global { .. }));
-				let pattern = self.eval_expr(false,pattern).try_blame(pattern.span())?;
-				let motion = match polarity {
-					false  => Motion::NotGlobal(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pattern),
-					true => Motion::Global(Box::new(Motion::LineRange(LineAddr::Number(1), LineAddr::Last)), pattern)
-				};
-
-				// Here we ask ViCut's editor directly to evaluate the Global motion for us.
-				// LineBuf::eval_motion() *always* returns MotionKind::Lines() for Motion::Global/NotGlobal.
-				let MotionKind::Lines(lines) = cur_buf.eval_motion(None, MotionCmd(1,motion)) else { unreachable!() };
-				if !lines.is_empty() {
-					// Positive branch
-					for line in lines {
-						let line_no = line;
-						let field_num = if self.find_opt_or_default(|o| o.global_uses_line_numbers) {
-							// If we are using line numbers, we need to set the field number to the line number
-							line_no
-						} else {
-							self.exec_ctx.field_num
-						};
-						let Some((start,_)) = cur_buf.line_bounds(line) else { continue };
-						// Set the cursor on the start of the line
-						cur_buf.cursor.set(start);
-						// Execute our commands
-						self.exec_ctx.field_num = field_num;
-						self.descend(); // new scope
-						for cmd in block {
-							self.eval_expr(true,cmd);
-							if !self.find_opt_or_default(|o| o.keep_mode) {
-								self.set_normal_mode();
-							}
-						}
-						self.ascend(); // leave scope
-					}
-				} 	
-				Val::Null.into()
-				*/ todo!()
-			}
-			ExprKind::Command(Command::Move { motion }) => {
-				let motion_eval = self.eval_expr(false,motion).try_blame(motion.span())?.borrow().to_string();
-				let cursor_pos = self.current_buffer_mut().cursor.get();
-				if let Err(e) = self.move_cursor(&motion_eval) {
-					return Err(e).try_blame(motion.span());
-				}
-				let new_pos = self.current_buffer_mut().cursor.get();
-				Val::Bool(cursor_pos != new_pos).into()
-			}
-			ExprKind::Command(Command::Cut { motion }) => {
-				let motion_eval = self.eval_expr(false,motion).try_blame(motion.span())?.borrow().to_string();
-				self.exec_ctx.field_num += 1;
-				match self.read_field(&motion_eval) {
-					Ok(field) => {
-						let name = format!("{}",self.exec_ctx.field_num);
-						if is_top_level {
-							self.exec_ctx.fields.push((name,field.clone()));
-							Val::Null.into()
-						} else {
-							Val::Str(field).into()
-						}
-					}
-					Err(e) => {
-						eprintln!("vicut: {e}");
-						Val::Bool(false).into()
-					}
-				}
-			}
-			ExprKind::Command(Command::Next) => {
-				if self.find_opt_or_default(|o| o.trace) {
-					trace!("Breaking field group with fields: ");
-					for field in &mut self.exec_ctx.fields {
-						let name = &field.0;
-						let content = &field.1;
-						trace!("\t{name}: {content}");
-					}
-				}
-				self.exec_ctx.field_num = 0;
-				if !self.exec_ctx.fields.is_empty() {
-					self.exec_ctx.fmt_lines.push(std::mem::take(&mut self.exec_ctx.fields));
-				}
-				Val::Null.into()
-			}
-			ExprKind::ClassDef { name, fields } => {
-				let mut fields = fields
-					.clone()
-					.into_iter()
-					.map(|(name, expr)| {
-						self.eval_expr(false, &expr).map(|val| (name, val))
-					})
-				.collect::<Result<HashMap<String, RcVal>, VicErr>>()?;
-				fields.insert("_name".to_string(), Val::Str(name.to_string()).into());
-				fields.insert("_type".to_string(), Val::Str("class".to_string()).into());
-				let val = Val::Dict(fields).into();
-				self.set_var(name.to_string(), val)?;
-				Val::Null.into()
-			}
-			ExprKind::FuncDef { name, params, body } => {
-				// Define a function
-				if is_top_level {
-					self.set_var(name.clone(), Val::Closure(params.clone(),body.clone()).into())?;
-					Val::Null.into()
-				} else {
-					Val::Closure(params.clone(), body.clone()).into()
-				}
-			}
-
-			ExprKind::FuncCall { name, args } => {
-				// First we check if this is a method call using this weird hack
-				let (self_val,method_name) = if matches!(name.accessors.last(), Some(Accessor::Field(_))) {
-					let Some(Accessor::Field(field_name)) = name.accessors.last() else { unreachable!() };
-					let method_name = Some(field_name.clone());
-					let mut outer_val = name.clone(); // clone the name value
-					outer_val.accessors.pop(); // throw out the last accessor
-					(self.deep_eval(false, &outer_val).ok(),method_name) // evaluate the new last accessor
-				} else {
-					(None,None)
-				};
-				// Func calls use evaluated names, so that stuff like func_ptr_array[0](arg1,arg2) is valid
-				let result = self.deep_eval(false, name).try_blame(name.span());
-				if let Ok(val) = result {
-					match *val.borrow() {
-						Val::MethodClosure(ref self_val, ref closure) => {
-							let Val::Closure(ref arg_names, ref body) = *closure.borrow() else { unreachable!() };
-							let func_args: Result<Vec<RcVal>, VicErr> = args
-								.iter()
-								.map(|arg| self.eval_expr(false,arg).try_blame(arg.span()))
-								.collect();
-							let res = self.eval_closure(Some((**self_val).clone()), func_args?, arg_names.to_vec(), body.to_vec());
-							match res {
-								Ok(val) => val,
-								Err(VicErr::Return(_,val)) => val,
-								Err(e) => return Err(e)
-							}
-						}
-						Val::Closure(ref arg_names, ref body) => {
-							// If we are here, we are working with an anonymous closure
-							let func_args: Result<Vec<RcVal>, VicErr> = args
-								.iter()
-								.map(|arg| self.eval_expr(false,arg).try_blame(arg.span()))
-								.collect();
-							let res = self.eval_closure(self_val, func_args?, arg_names.to_vec(), body.to_vec());
-							match res {
-								Ok(val) => val,
-								Err(VicErr::Return(_,val)) => {
-									let is_err = matches!(*val.borrow(), Val::Err(_,_));
-									val
-								}
-								Err(e) => return Err(e)
-							}
-
-						}
-						Val::Var(ref var) => {
-							// If we are here, we are working with a named, defined function
-							if let Some(val) = self.read_var(var) {
-								if let Val::Closure(ref arg_names, ref body) = *val.borrow() {
-									// If we are here, we are working with a named closure
-									let func_args: Result<Vec<RcVal>, VicErr> = args
-										.iter()
-										.map(|arg| self.eval_expr(false,arg).try_blame(arg.span()))
-										.collect();
-									let res = self.eval_closure(self_val, func_args?, arg_names.to_vec(), body.to_vec());
-									match res {
-										Ok(val) => val,
-										Err(VicErr::Return(_,val)) => val,
-										Err(e) => return Err(e)
-									}
-								} else {
-									return Err(VicErr::Full(
-											name.span(),
-											format!("'{}' is not callable", name.span().as_str())
-									))
-								}
-							} else {
-								return Err(VicErr::Full(
-										name.span(),
-										format!("'{}' is not callable", name.span().as_str())
-								))
-							}
-						}
-						Val::Expr(ref expr) => {
-							let (self_val,method_name) = if matches!(expr.accessors.last(), Some(Accessor::Field(_))) {
-								let Some(Accessor::Field(field_name)) = expr.accessors.last() else { unreachable!() };
-								let method_name = Some(field_name.clone());
-								let mut outer_val = name.clone(); // clone the name value
-								outer_val.accessors.pop(); // throw out the last accessor
-								(self.eval_expr(false, &outer_val).ok(),method_name) // evaluate the new last accessor
-							} else {
-								(None,None)
-							};
-							// If we are here, we are working with a named, defined function
-							if let Ok(val) = self.eval_expr(false, expr) {
-								if let Val::Closure(ref arg_names, ref body) = *val.borrow() {
-									// If we are here, we are working with a named closure
-									let func_args: Result<Vec<RcVal>, VicErr> = args
-										.iter()
-										.map(|arg| self.eval_expr(false,arg).try_blame(arg.span()))
-										.collect();
-									let res = self.eval_closure(self_val, func_args?, arg_names.to_vec(), body.to_vec());
-									match res {
-										Ok(val) => val,
-										Err(VicErr::Return(_,val)) => val,
-										Err(e) => return Err(e)
-									}
-								} else {
-									return Err(VicErr::Full(
-											name.span(),
-											format!("'{}' is not callable", name.span().as_str())
-									))
-								}
-							} else {
-								return Err(VicErr::Full(
-										name.span(),
-										format!("'{}' is not callable", name.span().as_str())
-								))
-							}
-						}
-						_ => {
-							return Err(VicErr::Full(
-									name.span(),
-									format!("Function '{}' not found", name.span().as_str())
-							))
-						}
-					}
-				} else if Self::BUILTIN_FUNCS.contains(&name.span().as_str().trim()) {
-					let func_args: Result<Vec<RcVal>, VicErr> = args
-						.iter()
-						.map(|arg| self.eval_expr(false,arg).try_blame(arg.span()))
-						.collect();
-					self.try_builtin_function(name.span().as_str().trim(), func_args?)?
-				} else if let Some(val) = self_val {
-					let func_args: Result<Vec<RcVal>, VicErr> = args
-						.iter()
-						.map(|arg| self.eval_expr(false,arg).try_blame(arg.span()))
-						.collect();
-					self.dispatch_builtin_method(val, &method_name.unwrap(), func_args?)?
-				} else {
-					return Err(VicErr::Full(
-							name.span(),
-							format!("Function '{}' not found", name.span().as_str())
-					))
-				}
-			}
-			ExprKind::VarDec { name, value } => {
-				let value = self.eval_expr(false,value).try_blame(value.span())?;
-				self.set_var(name.clone(), value.clone()).try_blame(cmd_expr.span())?;
-				Val::Null.into()
-			}
-			ExprKind::VarMut { name, op, value } => {
-				let span = name.span();
-				let name_raw = span
-					.as_str()
-					.split(" ")
-					.next()
-					.unwrap();
-				let value = self.eval_expr(false,value).try_blame(value.span())?;
-				if Self::BUILTINS.contains(&name_raw) {
-					self.set_builtin_var(name_raw, value)?;
-					Val::Null.into()
-				} else {
-					let var = self.eval_expr(false, name).try_blame(name.span())?;
-					self.mutate_var(var, op.clone(), value.clone()).try_blame(cmd_expr.span())?;
-					Val::Null.into()
-				}
-			}
-			ExprKind::SwitchBlock { scrutinee, case_blocks, default_block } => {
-				let mut executed = false;
-				let mut ret = Val::Null.into();
-				let scrutinee_value = self.eval_expr(false,scrutinee).try_blame(scrutinee.span())?;
-				for block in case_blocks {
-					let ExprKind::CaseBlock { cond, body } = &block.value else {
-						return Err(VicErr::Full(block.span(), "Expected a case block".to_string()));
-					};
-					let mut matches = false;
-					for pattern in cond {
-						matches = *pattern == *scrutinee_value.borrow();
-						if matches { break }
-					}
-					if matches {
-						executed = true;
-						self.descend(); // new scope
-						for cmd in body {
-							let res = self.eval_expr(true,cmd).try_blame(cmd.span());
-							match res {
-								Ok(val) => ret = val,
-								Err(e) => {
-									self.ascend();
-									return Err(e)
-								}
-							}
-							if !self.find_opt_or_default(|o| o.keep_mode) {
-								self.set_normal_mode();
-							}
-						}
-						self.ascend(); // leave scope
-						break;
-					}
-				}
-				if let Some(default) = default_block && !executed {
-					self.descend(); // new scope
-					for cmd in default {
-						ret = self.eval_expr(false,cmd).try_blame(cmd.span())?;
-						if !self.find_opt_or_default(|o| o.keep_mode) {
-							self.set_normal_mode();
-						}
-					}
-					self.ascend(); // leave scope
-				}
-				ret
-			}
-			ExprKind::WithBlock { buffer, body } => {
-				let mut ret = Val::Null.into();
-				let new_buf = self.eval_expr(false,buffer).try_blame(buffer.span())?.borrow().to_string();
-
-				self.descend();
-				self.buffers.push(LineBuf::new().with_initial(new_buf, 0));
-
-				for cmd in body {
-					let res = self.eval_expr(false,cmd);
-					match res {
-						Ok(val) => ret = val,
-						Err(e) => {
-							self.ascend();
-							return Err(e)
-						}
-					}
-					if !self.find_opt_or_default(|o| o.keep_mode) {
-						self.set_normal_mode();
-					}
-				}
-
-				self.ascend();
-				self.buffers.pop();
-
-				ret
-			}
-			ExprKind::IfBlock { cond_blocks, else_block } => {
-				let mut executed = false;
-				let mut ret = Val::Null.into();
-				for block in cond_blocks {
-					let Expr { value, .. } = block;
-					let ExprKind::CondBlock { cond, body } = value else { unreachable!() };
-					let cond_value = self.eval_expr(false,cond).try_blame(cond.span())?;
-					let result = cond_value.borrow().is_truthy(self);
-					if result {
-						executed = true;
-						self.descend(); // new scope
-						for cmd in body {
-							ret = self.eval_expr(true,cmd)?;
-							if !self.find_opt_or_default(|o| o.keep_mode) {
-								self.set_normal_mode();
-							}
-						}
-						self.ascend(); // leave scope
-						break;
-					}
-				}
-
-				if let Some(else_block) = else_block && !executed {
-					self.descend(); // new scope
-					for cmd in else_block {
-						ret = self.eval_expr(false,cmd).try_blame(cmd.span())?;
-						if !self.find_opt_or_default(|o| o.keep_mode) {
-							self.set_normal_mode();
-						}
-					}
-					self.ascend(); // leave scope
-				}
-				ret
-			}
-			ExprKind::ForBlock { var_name, list, body } => {
-				let val = self.eval_expr(false,list).try_blame(list.span())?;
-				let val_iter = val.borrow().clone().try_into_iter().try_blame(cmd_expr.span())?;
-
-				let mut ret = Val::Null.into();
-				'main: for item in val_iter {
-					self.descend(); // new scope
-					self.set_var(var_name.clone(), item).unwrap_or_else(complain_and_exit);
-
-					for cmd in body {
-						let res = self.eval_expr(true,cmd);
-
-						match res {
-							Ok(val) => ret = val,
-							Err(VicErr::Break(_)) => {
-								self.ascend();
-								break 'main
-							}
-							Err(VicErr::Continue(_)) => {
-								if !self.find_opt_or_default(|o| o.keep_mode) {
-									self.set_normal_mode();
-								}
-								continue 'main
-							}
-							Err(e) => {
-								self.ascend();
-								return Err(e)
-							}
-						}
-
-						if !self.find_opt_or_default(|o| o.keep_mode) {
-							self.set_normal_mode();
-						}
-					}
-					self.ascend(); // leave scope
-				}
-				ret
-			}
-			ExprKind::UntilBlock { cond, body } |
-			ExprKind::WhileBlock { cond, body } => {
-				// This is the function we will use to see if we are still running
-				let running = |vicut: &mut ViCut| -> Result<bool,VicErr> {
-					let result = vicut.eval_expr(false,cond).try_blame(cond.span())?.borrow().is_truthy(vicut); 
-					if matches!(cmd, ExprKind::WhileBlock { .. }) {
-						Ok(result)
-					} else {
-						Ok(!result)
-					}
-				};
-
-				let mut ret = Val::Null.into();
-				'main: while running(self)? {
-					self.descend(); // new scope
-					for cmd in body {
-						let res = self.eval_expr(true,cmd);
-						match res {
-							Ok(val) => ret = val,
-							Err(VicErr::Break(_)) => {
-								self.ascend();
-								break 'main
-							}
-							Err(VicErr::Continue(_)) => {
-								if !self.find_opt_or_default(|o| o.keep_mode) {
-									self.set_normal_mode();
-								}
-								continue 'main
-							}
-							Err(e) => {
-								self.ascend();
-								return Err(e)
-							}
-						}
-						if !self.find_opt_or_default(|o| o.keep_mode) {
-							self.set_normal_mode();
-						}
-					}
-					self.ascend(); // leave scope
-				}
-				ret
-			}
-			ExprKind::CatchBlock { scrutinee, catch_block } => {
-				let scrutinee_eval = self.eval_expr(false,scrutinee).try_blame(scrutinee.span())?;
-				let is_err = matches!(*scrutinee_eval.borrow(), Val::Err(_,_));
-				if is_err {
-					self.descend(); // new scope
-					let mut ret = Val::Null.into();
-					for cmd in catch_block {
-						let res = self.eval_expr(true,cmd).try_blame(cmd.span());
-						match res {
-							Ok(val) => ret = val,
-							Err(e) => {
-								self.ascend();
-								return Err(e)
-							}
-						}
-						if !self.find_opt_or_default(|o| o.keep_mode) {
-							self.set_normal_mode();
-						}
-					}
-					self.ascend(); // leave scope
-					ret
-				} else {
-					scrutinee_eval
-				}
-			}
-			ExprKind::Block(exprs) => todo!(),
-			ExprKind::Value(val) => self.eval_value(val.clone()).try_blame(cmd_expr.span())?,
-			ExprKind::Opts(exprs) => {
-				self.eval_opts(exprs).try_blame(cmd_expr.span())?;
-				Val::Null.into()
-			}
-			ExprKind::Opt { set, name, arg } => {
-				// really shouldn't be here, but just in case...
-				self.eval_opts(std::slice::from_ref(cmd_expr)).try_blame(cmd_expr.span())?;
-				Val::Null.into()
-			}
-			ExprKind::Range { start, end } => todo!(),
-			ExprKind::BinExpr(rpn) => self.eval_bin_expr(rpn).try_blame(cmd_expr.span())?,
-			ExprKind::BoolExpr(rpn) => self.eval_bool_expr(rpn).try_blame(cmd_expr.span())?,
-			_ => unimplemented!("Unimplemented expression kind: {cmd:?}")
+	pub fn eval_expr(&mut self, is_top_level: bool, cmd_expr: &Expr) -> Result<Val,VicErr> {
+		let Expr { value, accessors, span } = cmd_expr;
+		let eval = match value {
+			ExprKind::WhileBlock {..}  |
+			ExprKind::UntilBlock {..}  => self.eval_loop_block(value)?,
+			ExprKind::WithBlock {..}   => self.eval_with_block(value)?,
+			ExprKind::SwitchBlock {..} => self.eval_switch_block(value)?,
+			ExprKind::IfBlock {..}     => self.eval_if_block(value)?,
+			ExprKind::ForBlock {..}    => self.eval_for_block(value)?,
+			ExprKind::CatchBlock {..}  => self.eval_catch_block(value)?,
+			ExprKind::Value(_)         => self.eval_value(value)?,
+			ExprKind::Opts(exprs)      => self.eval_opts(exprs)?,
+			ExprKind::VarDec {..}      => self.eval_var_dec(value)?,
+			ExprKind::VarMut {..}      => self.eval_var_mutation(value)?,
+			ExprKind::Range {..}       => self.eval_range(value)?,
+			ExprKind::BinExpr(rpn)     => self.eval_bin_expr(rpn)?,
+			ExprKind::BoolExpr(rpn)    => self.eval_bool_expr(rpn)?,
+			ExprKind::BoolNode {..}    => self.eval_bool_node(value)?,
+			ExprKind::FuncDef {..}     => self.eval_func_def(is_top_level, value)?,
+			ExprKind::ClassDef {..}    => self.eval_class_def(value)?,
+			ExprKind::Command(_)       => self.eval_command(is_top_level, span.clone(), value)?,
+			ExprKind::Block(_)         |
+			ExprKind::Vic(_)           |
+			ExprKind::TopLevel(_)      |
+			ExprKind::Opt {..}         |
+			ExprKind::CondBlock {..}   |
+			ExprKind::CaseBlock {..}   => unreachable!(),
 		};
-		eval = self.access_val(eval, accessors)?;
+		// Now apply accessors like indexes, function args, field names, etc
+		let eval = self.access_val(eval, accessors)?;
 		Ok(eval)
 	}
-	fn deep_eval(&mut self, is_top_level: bool, cmd_expr: &Expr) -> Result<RcVal,VicErr> {
-		let mut val = self.eval_expr(is_top_level, cmd_expr)?;
-		loop {
-			let is_still_expr = matches!(*val.borrow(), Val::Expr(_));
-			if is_still_expr {
-				val = {
-					let Val::Expr(ref expr) = *val.borrow() else { unreachable!() };
-					self.eval_expr(false, expr)?
-				}
-			} else { break Ok(val) }
+	fn eval_range(&mut self, range: &ExprKind) -> Result<Val, VicErr> {
+		let ExprKind::Range { start, end } = range else {
+			return Err(VicErr::Simple("Expected a range expression".into()));
+		};
+		let start_eval = self.eval_expr(false, start)
+			.try_blame(start.span())?;
+		let end_eval = self.eval_expr(false, end)
+			.try_blame(end.span())?;
+
+		let Val::Num(start_num) = start_eval else {
+			return Err(VicErr::Simple("Expected a number as the start of the range".into()));
+		};
+		let Val::Num(end_num) = end_eval else {
+			return Err(VicErr::Simple("Expected a number as the end of the range".into()));
+		};
+
+		match start_num.cmp(&end_num) {
+			std::cmp::Ordering::Less => {
+				// Create a range from start to end
+				let range = ((start_num)..=(end_num)).map(Val::Num);
+				let mut range_deque = VecDeque::new();
+				range_deque.extend(range);
+				Ok(Val::new_arr(range_deque))
+			}
+			std::cmp::Ordering::Equal => {
+				Ok(Val::new_arr(VecDeque::new()))
+			}
+			std::cmp::Ordering::Greater => {
+				// Reverse range, we can just swap the start and end
+
+				let range = (end_num..=start_num).rev().map(Val::Num);
+				let mut range_deque = VecDeque::new();
+				range_deque.extend(range);
+				Ok(Val::new_arr(range_deque))
+			}
 		}
 	}
-	fn eval_bool_expr(&mut self, rpn: &[RpnItem]) -> Result<RcVal, VicErr> {
-		let mut stack: Vec<RcVal> = vec![];
+	fn eval_func_def(&mut self, is_top_level: bool, func_def: &ExprKind) -> Result<Val, VicErr> {
+		let ExprKind::FuncDef { name, params, body } = func_def else { unreachable!() };
+
+		// Functions are just fancy variables in vic
+		// 'def function(arg1,arg2) { body }' is desugared into
+		// 'let function = |arg1,arg2| { body }'
+		let val = Val::Closure(params.to_vec().into(), body.to_vec().into());
+		if is_top_level {
+			self.set_var(name.to_string(), val)?;
+			Ok(Val::Null)
+		} else {
+			Ok(val)
+		}
+	}
+	fn eval_class_def(&mut self, class_def: &ExprKind) -> Result<Val, VicErr> {
+		let ExprKind::ClassDef { name, fields } = class_def else { unreachable!() };
+
+		// 'fields' is full of expressions right now
+		// let's evaluate them
+		let mut map_eval = HashMap::new();
+
+		for (k,v) in fields.iter() {
+			let eval = self.eval_expr(false, v)
+				.try_blame(v.span())?;
+
+			map_eval.insert(k.to_string(), eval);
+		}
+
+		// Classes are also just fancy variables
+		// Internally they are just a named dictionary you can easily spawn instances of
+		// Since functions are also just fancy variables, they fit right into the class fields as methods
+		let class = Val::Dict(Rc::new(RefCell::new(map_eval)));
+		self.set_var(name.to_string(), class)?;
+		Ok(Val::Null)
+	}
+	fn eval_bool_node(&mut self, node: &ExprKind) -> Result<Val, VicErr> {
+		let ExprKind::BoolNode { op, left, right } = node else {
+			return Err(VicErr::Simple("Expected a boolean node expression".into()));
+		};
+		let left_val = self.eval_expr(false, left)
+			.try_blame(left.span())?.is_truthy(self);
+
+		if left_val && matches!(op, LogOp::Or) {
+			// Short-circuit OR
+			return Ok(Val::Bool(true));
+		} else if !left_val && matches!(op, LogOp::And) {
+			// Short-circuit AND
+			return Ok(Val::Bool(false));
+		}
+		let right_val = self.eval_expr(false, right)
+			.try_blame(right.span())?.is_truthy(self);
+		Ok(Val::Bool(right_val))
+	}
+	fn eval_var_mutation(&mut self, varmut: &ExprKind) -> Result<Val, VicErr> {
+		let ExprKind::VarMut { name, op, value } = varmut else {
+			return Err(VicErr::Simple("Expected a variable mutation expression".into()));
+		};
+
+		// This is a raw pointer
+		// the compiler really hates grabbing mut borrows
+		// from nested stuff like "dict.field[0]"
+		// so we have to use Evil Rust to cleanly mutate vars
+		let ptr = self.access_val_ptr(name)?;
+		let new_val = self.eval_expr(false, value)
+			.try_blame(value.span())?;
+
+		unsafe {
+			let var = &mut *ptr;
+			let result = if let Some(op) = op {
+				match op {
+					BinOp::Add => var.add(new_val.clone()),
+					BinOp::Sub => var.sub(new_val.clone()),
+					BinOp::Mult => var.mult(new_val.clone()),
+					BinOp::Div => var.div(new_val.clone()),
+					BinOp::Mod => var.modulo(new_val.clone()),
+					BinOp::Pow => var.pow(new_val.clone()),
+					BinOp::Equals => Ok(new_val.clone()),
+				}?
+			} else {
+				new_val
+			};
+			*var = result;
+		}
+
+		Ok(Val::Null)
+	}
+	fn eval_var_dec(&mut self, vardec: &ExprKind) -> Result<Val,VicErr> {
+		let ExprKind::VarDec { name, value } = vardec else {
+			return Err(VicErr::Simple("Expected a variable declaration expression".into()));
+		};
+		let eval = self.eval_expr(false, value)
+			.try_blame(value.span())?;
+		self.set_var(name.to_string(), eval)?;
+
+		Ok(Val::Null)
+	}
+	fn eval_command(&mut self, is_top_level: bool, span: ArcSpan, command: &ExprKind) -> Result<Val, VicErr> {
+		let ExprKind::Command(cmd) = command else {
+			return Err(VicErr::Simple("Expected a command expression".into()));
+		};
+		match cmd {
+			Command::Continue => Err(VicErr::Continue(span)),
+			Command::Break => Err(VicErr::Break(span)),
+			Command::Global { pattern, block } => todo!(),
+			Command::NotGlobal { pattern, block } => todo!(),
+			Command::Move { motion } => self.eval_move(motion),
+			Command::Cut { motion } => self.eval_cut(motion, is_top_level),
+			Command::Repeat { count, block } => self.eval_repeat(count, block),
+			Command::Yank { register, motion } => self.eval_yank(register, motion),
+			Command::Include { path } => self.include_file(path),
+			Command::ShellCmd { cmd } => self.run_shell_cmd(cmd),
+			Command::Next => {
+				self.exec_ctx.field_num = 0;
+				let record = std::mem::take(&mut self.exec_ctx.fields);
+				self.exec_ctx.fmt_lines.push(record);
+				Ok(Val::Null)
+			}
+			Command::New(expr) => {
+				let value = self.eval_expr(is_top_level, expr)
+					.try_blame(expr.span())?;
+
+				Ok(value.deep_clone())
+			}
+			Command::Ref(expr) => {
+				let value = self.access_val_ptr(expr)?;
+				Ok(Val::Ref(Box::new(value))) 
+			}
+			Command::Error(arc_span, expr) => {
+				let err_val = self.eval_expr(is_top_level, expr)
+					.try_blame(expr.span())?;
+				Err(VicErr::Return(arc_span.clone(), Val::Err(arc_span.clone(), Box::new(err_val.into()))))
+			}
+			Command::Return { ret } => {
+				let ret = if let Some(expr) = ret {
+					self.eval_expr(is_top_level, expr)
+						.try_blame(expr.span())?
+				} else { Val::Null };
+				Err(VicErr::Return(span, ret))
+			}
+		}
+	}
+	fn include_file(&mut self, path: &Expr) -> Result<Val, VicErr> {
+		let path = self.eval_expr(false, path)
+			.try_blame(path.span())?
+			.to_string();
+		validate_filename(&path)?;
+		let src = std::fs::read_to_string(&path)
+			.map_err(|e| VicErr::Simple(format!("Failed to read file '{path}': {e}")))?;
+		let ExprKind::Vic(cmds) = Expr::parse_vic(Arc::new(src))?.into_value() else { unreachable!() };
+		for cmd in cmds {
+			self.eval_expr(false, &cmd)
+				.try_blame(cmd.span())?;
+		}
+		Ok(Val::Null)
+	}
+	fn eval_move(&mut self, motion: &Expr) -> Result<Val, VicErr> {
+		let motion_eval = self.eval_expr(false,motion).try_blame(motion.span())?.to_string();
+
+		let start_pos = self.current_buffer().cursor.get();
+		self.move_cursor(&motion_eval)?;
+		let new_pos = self.current_buffer().cursor.get();
+		Ok(Val::Bool(start_pos != new_pos))
+	}
+	fn eval_yank(&mut self, register: &Expr, motion: &Expr) -> Result<Val, VicErr> {
+		let register_eval = self.eval_expr(false, register)
+			.try_blame(register.span())?
+			.to_string();
+		if register_eval.len() != 1 {
+			return Err(VicErr::Simple("Yank register must be a single character".to_string()));
+		}
+		let register = register_eval.chars().next().unwrap();
+
+		let motion_eval = self.eval_expr(false, motion)
+			.try_blame(motion.span())?
+			.to_string();
+		let field = self.read_field(&motion_eval)
+			.map_err(|e| VicErr::Simple(format!("Failed to yank field: {e}")))?;
+		let reg = RegisterName::new(Some(register), None);
+		reg.write_to_register(field.into());
+		Ok(Val::Null)
+	}
+	fn eval_repeat(&mut self, count: &Expr, block: &[Expr]) -> Result<Val, VicErr> {
+		let count_eval = self.eval_expr(false, count)
+			.try_blame(count.span())?
+			.to_int()
+			.map_err(|e| VicErr::Simple(format!("Failed to evaluate repeat count: {e}")))?;
+		let Val::Num(count) = count_eval else { unreachable!() };
+		let mut ret = Val::Null;
+		for _ in 0..count {
+			let _scope = ScopeGuard::new(self);
+			for cmd in block {
+				ret = self.eval_expr(true, cmd)
+					.try_blame(cmd.span())?;
+			}
+		}
+		Ok(ret)
+	}
+	fn eval_cut(&mut self, motion: &Expr, is_top_level: bool) -> Result<Val, VicErr> {
+		let motion_eval = self.eval_expr(false, motion)
+			.try_blame(motion.span())?
+			.to_string();
+		self.exec_ctx.field_num += 1;
+		match self.read_field(&motion_eval) {
+			Ok(field) => {
+				let name = format!("{}",self.exec_ctx.field_num);
+				if is_top_level {
+					self.exec_ctx.fields.push((name, field.clone()));
+					Ok(Val::Null)
+				} else {
+					Ok(Val::new_str(field))
+				}
+			}
+			Err(e) => {
+				eprintln!("vicut: {e}");
+				Ok(Val::Bool(false))
+			}
+		}
+	}
+	fn eval_catch_block(&mut self, block: &ExprKind) -> Result<Val,VicErr> {
+		let ExprKind::CatchBlock { scrutinee, catch_block, err_bind } = block else { unreachable!() };
+		let mut ret = Val::Null;
+
+		let eval = self.eval_expr(false, scrutinee)
+			.try_blame(scrutinee.span())?;
+
+		if let Val::Err(_, val) = eval {
+			let _scope = ScopeGuard::new(self);
+			if let Some(var) = err_bind {
+				let reffed = Val::Ref(Box::new((*val).as_ptr()));
+				self.set_var(var.to_string(),reffed)?;
+			}
+			for cmd in catch_block {
+				ret = self.eval_expr(true, cmd)
+					.try_blame(cmd.span())?;
+			}
+		} else {
+			ret = eval
+		}
+
+		Ok(ret)
+	}
+	fn eval_with_block(&mut self, block: &ExprKind) -> Result<Val,VicErr> {
+		let ExprKind::WithBlock { buffer, body } = block else { unreachable!() };
+		let buffer = self.eval_expr(false, buffer).try_blame(buffer.span())?.to_string();
+		let new_buf = LineBuf::new().with_initial(buffer, 0);
+		self.buffers.push(new_buf);
+
+		let _scope = ScopeGuard::new(self);
+		let mut ret = Val::Null;
+		for cmd in body {
+			ret = self.eval_expr(true, cmd)
+				.try_blame(cmd.span())?;
+			}
+		Ok(ret)
+	}
+	fn eval_loop_block(&mut self, block: &ExprKind) -> Result<Val, VicErr> {
+		let (ExprKind::WhileBlock { cond, body } | ExprKind::UntilBlock { cond, body }) = block else { unreachable!() };
+		let mut ret = Val::Null;
+		let polarity = matches!(block, ExprKind::WhileBlock { .. });
+		let should_run = |v: &mut ViCut,c,p: bool| -> Result<bool,VicErr> {
+			let res = v.eval_expr(false, c)
+				.try_blame(c.span())?
+				.is_truthy(v);
+			Ok(if p { res } else { !res })
+		};
+
+		while should_run(self,cond,polarity)? {
+			let _scope = ScopeGuard::new(self);
+			for cmd in body {
+				ret = self.eval_expr(true, cmd)
+					.try_blame(cmd.span())?;
+				}
+		}
+		Ok(ret)
+	}
+	fn eval_for_block(&mut self, block: &ExprKind) -> Result<Val,VicErr> {
+		let ExprKind::ForBlock { var_name, list, body } = block else { unreachable!() };
+		let mut ret = Val::Null;
+		let list = self.eval_expr(false, list)
+			.try_blame(list.span())?;
+		let list_iter = list.try_into_iter()?;
+
+		for item in list_iter {
+			let _scope = ScopeGuard::new(self);
+			// Set the variable in the current scope
+			self.set_var(var_name.clone(), item.clone())?;
+			for cmd in body {
+				ret = self.eval_expr(true, cmd)
+					.try_blame(cmd.span())?;
+				}
+		}
+
+		Ok(ret)
+	}
+	fn eval_switch_block(&mut self, block: &ExprKind) -> Result<Val,VicErr> {
+		let ExprKind::SwitchBlock { scrutinee, case_blocks, default_block } = block else { unreachable!() };
+		let scrutinee = self.eval_expr(false, scrutinee)
+			.try_blame(scrutinee.span())?;
+		let mut executed = false;
+		let mut ret = Val::Null;
+
+		for block in case_blocks {
+			let ExprKind::CaseBlock { cond, body } = block.value() else { unreachable!() };
+			let should_execute = cond.contains(&scrutinee);
+
+			if should_execute {
+				executed = true;
+				let _scope = ScopeGuard::new(self);
+				for cmd in body {
+					ret = self.eval_expr(true, cmd)
+						.try_blame(cmd.span())?;
+					}
+			}
+		}
+
+		if !executed && let Some(default_block) = default_block {
+			let _scope = ScopeGuard::new(self);
+			for cmd in default_block {
+				ret = self.eval_expr(true, cmd)
+					.try_blame(cmd.span())?;
+				}
+		}
+
+		Ok(ret)
+	}
+	fn eval_if_block(&mut self, block: &ExprKind) -> Result<Val, VicErr> {
+		let ExprKind::IfBlock { cond_blocks, else_block } = block else { unreachable!(); };
+		let mut executed = false;
+		let mut ret = Val::Null;
+		for block in cond_blocks {
+			let ExprKind::CondBlock { cond, body } = block.value() else { unreachable!() };
+
+			let should_execute = self.eval_expr(false, cond)
+				.try_blame(cond.span())?
+				.is_truthy(self);
+
+			if should_execute {
+				executed = true;
+				let _scope = ScopeGuard::new(self);
+				for cmd in body {
+					ret = self.eval_expr(true, cmd)
+						.try_blame(cmd.span())?;
+					}
+			}
+		}
+
+		if !executed && let Some(else_block) = else_block {
+			let _scope = ScopeGuard::new(self);
+			for cmd in else_block {
+				ret = self.eval_expr(true, cmd)
+					.try_blame(cmd.span())?;
+				}
+		}
+		Ok(ret)
+	}
+	fn eval_bool_expr(&mut self, rpn: &[RpnItem]) -> Result<Val, VicErr> {
+		let mut stack: Vec<Val> = vec![];
 		for item in rpn {
 			match item {
 				RpnItem::Val(expr) => {
@@ -1643,26 +1430,24 @@ impl ViCut {
 				}
 				RpnItem::Not(expr) => {
 					let val = self.eval_expr(false, expr).try_blame(expr.span())?;
-					let truthy = !val.borrow().is_truthy(self);
-					stack.push(Val::Bool(truthy).into());
+					let truthy = !val.is_truthy(self);
+					stack.push(Val::Bool(truthy));
 				}
 				RpnItem::BoolOp(op) => {
 					let right = stack.pop().ok_or("Expected a value on the stack for boolean operation")?;
 					let left = stack.pop().ok_or("Expected a value on the stack for boolean operation")?;
 
 					let result = match op {
-						BoolOp::Ne => left.borrow().cmp(&right.borrow(), self) != Some(std::cmp::Ordering::Equal),
-						BoolOp::Eq => left.borrow().cmp(&right.borrow(), self) == Some(std::cmp::Ordering::Equal),
-						BoolOp::Lt => left.borrow().cmp(&right.borrow(), self) == Some(std::cmp::Ordering::Less),
-						BoolOp::Gt => left.borrow().cmp(&right.borrow(), self) == Some(std::cmp::Ordering::Greater),
-						BoolOp::Lte => left.borrow().cmp(&right.borrow(), self) != Some(std::cmp::Ordering::Greater),
-						BoolOp::Gte => left.borrow().cmp(&right.borrow(), self) != Some(std::cmp::Ordering::Less),
-						BoolOp::And => left.borrow().is_truthy(self) && right.borrow().is_truthy(self),
-						BoolOp::Or => left.borrow().is_truthy(self) || right.borrow().is_truthy(self),
+						BoolOp::Ne => left.cmp(&right, self) != Some(std::cmp::Ordering::Equal),
+						BoolOp::Eq => left.cmp(&right, self) == Some(std::cmp::Ordering::Equal),
+						BoolOp::Lt => left.cmp(&right, self) == Some(std::cmp::Ordering::Less),
+						BoolOp::Gt => left.cmp(&right, self) == Some(std::cmp::Ordering::Greater),
+						BoolOp::Lte => left.cmp(&right, self) != Some(std::cmp::Ordering::Greater),
+						BoolOp::Gte => left.cmp(&right, self) != Some(std::cmp::Ordering::Less),
 						BoolOp::Not => unreachable!(),
 					};
 
-					stack.push(Val::Bool(result).into());
+					stack.push(Val::Bool(result));
 				}
 				_ => unreachable!(),
 			}
@@ -1671,7 +1456,7 @@ impl ViCut {
 		assert_eq!(stack.len(), 1, "RPN Stack did not fold into a single value: {stack:?}");
 		Ok(stack.pop().unwrap())
 	}
-	fn eval_bin_expr(&mut self, rpn: &[RpnItem]) -> Result<RcVal,VicErr> {
+	fn eval_bin_expr(&mut self, rpn: &[RpnItem]) -> Result<Val,VicErr> {
 		// Luckily pest does most of the invariant enforcing for this on it's own
 		let mut stack = vec![];
 		for item in rpn {
@@ -1682,9 +1467,9 @@ impl ViCut {
 				}
 				RpnItem::BinOp(op) => {
 					let right = stack.pop().ok_or("Expected a value on the stack for binary operation")?;
-					let right = right.borrow().clone();
+					let right = right.clone();
 					let left = stack.pop().ok_or("Expected a value on the stack for binary operation")?;
-					let left = left.borrow().clone();
+					let left = left.clone();
 					let result = match op {
 						BinOp::Add => left.add(right)?,
 						BinOp::Sub => left.sub(right)?,
@@ -1694,7 +1479,7 @@ impl ViCut {
 						BinOp::Pow => left.pow(right)?,
 						_ => unreachable!()
 					};
-					stack.push(result.into());
+					stack.push(result);
 				}
 				_ => unreachable!()
 			}
@@ -1704,7 +1489,7 @@ impl ViCut {
 		}
 		Ok(stack.pop().unwrap())
 	}
-	fn eval_opts(&mut self, opts: &[Expr]) -> Result<(),VicErr> {
+	fn eval_opts(&mut self, opts: &[Expr]) -> Result<Val,VicErr> {
 		for opt in opts {
 			let ExprKind::Opt { set, name, arg } = opt.value() else { unreachable!("Expected an Opt expression") };
 			match name.as_str() {
@@ -1722,11 +1507,11 @@ impl ViCut {
 				"file" => {
 					if let Some(arg) = arg {
 						let file_path = self.eval_expr(false,arg).try_blame(arg.span())?;
-						if let Val::Str(ref path) = *file_path.borrow() {
-							let path = PathBuf::from(path);
+						if let Val::Str(path) = file_path {
+							let path = PathBuf::from(path.borrow().clone());
 							self.push_file(path);
 						} else {
-							return Err(VicErr::Simple(format!("Expected a string for file path, found {}", file_path.borrow().display_type())))
+							return Err(VicErr::Simple(format!("Expected a string for file path, found {}", file_path.display_type())))
 						}
 					} else {
 						return Err(VicErr::Simple("Expected a file path argument for 'file' option".into()))
@@ -1735,10 +1520,10 @@ impl ViCut {
 				"template" => {
 					if let Some(arg) = arg {
 						let template = self.eval_expr(false,arg).try_blame(arg.span())?;
-						if let Val::Str(ref template) = *template.borrow() {
-							self.opts_mut().template = Some(template.to_string());
+						if let Val::Str(template) = template {
+							self.opts_mut().template = Some(template.borrow().to_string());
 						} else {
-							return Err(VicErr::Simple(format!("Expected a string for template, found {}", template.borrow().display_type())))
+							return Err(VicErr::Simple(format!("Expected a string for template, found {}", template.display_type())))
 						}
 					} else {
 						return Err(VicErr::Simple("Expected a template argument for 'template' option".into()))
@@ -1747,10 +1532,10 @@ impl ViCut {
 				"delimiter" => {
 					if let Some(arg) = arg {
 						let delimiter = self.eval_expr(false,arg).try_blame(arg.span())?;
-						if let Val::Str(ref delimiter) = *delimiter.borrow() {
-							self.opts_mut().delimiter = Some(delimiter.to_string());
+						if let Val::Str(delimiter) = delimiter {
+							self.opts_mut().delimiter = Some(delimiter.borrow().to_string());
 						} else {
-							return Err(VicErr::Simple(format!("Expected a string for delimiter, found {}", delimiter.borrow().display_type())))
+							return Err(VicErr::Simple(format!("Expected a string for delimiter, found {}", delimiter.display_type())))
 						}
 					} else {
 						return Err(VicErr::Simple("Expected a delimiter argument for 'delimiter' option".into()))
@@ -1759,13 +1544,13 @@ impl ViCut {
 				"max_jobs" => {
 					if let Some(arg) = arg {
 						let max_jobs = self.eval_expr(false,arg).try_blame(arg.span())?;
-						if let Val::Num(num) = *max_jobs.borrow() {
+						if let Val::Num(num) = max_jobs {
 							if num < 1 {
 								return Err(VicErr::Simple("vicut: max jobs must be at least 1".into()));
 							}
 							self.opts_mut().max_jobs = Some(num as u32);
 						} else {
-							return Err(VicErr::Simple(format!("Expected a number for max jobs, found {}", max_jobs.borrow().display_type())))
+							return Err(VicErr::Simple(format!("Expected a number for max jobs, found {}", max_jobs.display_type())))
 						}
 					} else {
 						return Err(VicErr::Simple("Expected a max jobs argument for 'max_jobs' option".into()))
@@ -1774,10 +1559,10 @@ impl ViCut {
 				"backup_ext" => {
 					if let Some(arg) = arg {
 						let backup_ext = self.eval_expr(false,arg).try_blame(arg.span())?;
-						if let Val::Str(ref ext) = *backup_ext.borrow() {
-							self.opts_mut().backup_extension = Some(ext.to_string());
+						if let Val::Str(ext) = backup_ext {
+							self.opts_mut().backup_extension = Some(ext.borrow().to_string());
 						} else {
-							return Err(VicErr::Simple(format!("Expected a string for backup extension, found {}", backup_ext.borrow().display_type())))
+							return Err(VicErr::Simple(format!("Expected a string for backup extension, found {}", backup_ext.display_type())))
 						}
 					} else {
 						return Err(VicErr::Simple("vicut: expected a backup extension argument for 'backup_ext' option".into()));
@@ -1789,73 +1574,165 @@ impl ViCut {
 				_ => unreachable!("Unknown option: {name}"),
 			}
 		}
-		Ok(())
+		Ok(Val::Null)
 	}
-	fn access_val(&mut self, val: RcVal, accessors: &[Accessor]) -> Result<RcVal,VicErr> {
+	/// Access a value as a raw mutable pointer
+	///
+	/// Be careful! :)
+	///
+	/// This is safe because the ScopeGuard struct ensures variables stay alive for the entire duration of a scope
+	fn access_val_ptr(&mut self, val: &Expr) -> Result<*mut Val, VicErr> {
+		let Expr { value, accessors, span } = val;
+		let ExprKind::Value(Val::Var(var)) = value else {
+			return Err(VicErr::Full(span.clone(), "Invalid expression for variable assignment".into()))
+		};
+		let var_mut = self.get_var_mut(var).ok_or(VicErr::Full(span.clone(), format!("Variable '{var}' not found")))?;
+		let mut val_mut = var_mut as *mut Val;
+		val_mut = self.peel_refs(val_mut);
+		for accessor in accessors {
+			val_mut = self.peel_refs(val_mut);
+			match accessor {
+				Accessor::Field(field) => {
+					let deref = unsafe { &mut *val_mut };
+					let Val::Dict(map) = deref else {
+						return Err(VicErr::Simple(format!("Expected a dictionary for field access, found {}", deref.display_type())))
+					};
+					let mut map = map.borrow_mut();
+					let field_val = map.get_mut(field)
+						.ok_or_else(|| VicErr::Simple(format!("Field '{field}' not found in dictionary")))?;
+					val_mut = field_val as *mut Val;
+				}
+				Accessor::Index(idx) => {
+					let deref = unsafe { &mut *val_mut };
+					let Val::Arr(arr) = deref else {
+						return Err(VicErr::Simple(format!("Expected an array for index access, found {}", deref.display_type())))
+					};
+					let Index::Single(idx) = idx else {
+						return Err(VicErr::Simple("Invalid index value for assignment".into()))
+					};
+					let idx_eval = self.eval_expr(false, idx)
+						.try_blame(idx.span())?.to_int()?;
+					let Val::Num(idx) = idx_eval else {
+						return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx_eval.display_type())))
+					};
+
+					let mut arr = arr.borrow_mut();
+					let len = arr.len();
+					let index_val = arr.get_mut(idx as usize)
+						.ok_or_else(|| VicErr::Simple(format!("Index '{idx}' out of bounds for array of length {len}")))?;
+					val_mut = index_val as *mut Val;
+				}
+				_ => {
+					return Err(VicErr::Simple(format!("Cannot access a variable with accessor '{accessor:?}'")))
+				}
+			}
+		}
+		Ok(val_mut)
+	}
+	fn peel_refs(&mut self, mut val_ptr: *mut Val) -> *mut Val {
+		loop {
+			let val = unsafe { &mut *val_ptr };
+			match val {
+				Val::Ref(inner) => {
+					val_ptr = **inner
+				}
+				_ => return val_ptr,
+			}
+		}
+	}
+	fn access_val(&mut self, val: Val, accessors: &[Accessor]) -> Result<Val,VicErr> {
 		if accessors.is_empty() {
 			return Ok(val);
 		}
-		let mut eval = val.clone();
-		let mut last_eval;
+		let mut eval = val;
+		let mut last_self: Option<Val> = None;
 		for accessor in accessors {
-			last_eval = Some(eval.clone());
 			eval = match accessor {
 				Accessor::ErrProp => {
-					let is_err = matches!(*eval.borrow(), Val::Err(_,_));
+					let is_err = matches!(eval, Val::Err(_,_));
 					if is_err {
-						let Val::Err(ref span,_) = *eval.borrow() else { unreachable!() };
-						return Err(VicErr::Return(span.clone(), eval.clone()))
+						let Val::Err(ref span,_) = eval else { unreachable!() };
+						return Err(VicErr::Return(span.clone(), eval))
 					} else {
 						eval
 					}
 				}
-				Accessor::Call(accessor, args) => {
-					let (self_val,method_name) = if matches!(**accessor, Accessor::Field(_)) {
-						let Accessor::Field(field_name) = &**accessor else { unreachable!() };
-						let method_name = Some(field_name.clone());
-						(last_eval.clone(),method_name) // evaluate the new last accessor
-					} else {
-						(None,None)
-					};
-					if let Ok(func) = self.access_val(val.clone(), std::slice::from_ref(accessor)) {
-						let Val::Closure(ref arg_names, ref body) = *func.borrow() else {
-							return Err(VicErr::Simple(format!("Cannot call non-function value of type '{}'", func.borrow().display_type())))
-						};
-						let given_args: Result<Vec<RcVal>, VicErr> = args
-							.iter()
-							.map(|arg| self.eval_expr(false,arg).try_blame(arg.span()))
-							.collect();
-						let res = self.eval_closure(self_val, given_args?, arg_names.to_vec(), body.to_vec());
-						match res {
-							Ok(val) => val,
-							Err(VicErr::Return(_,val)) => val,
-							Err(e) => return Err(e)
+				Accessor::Call(args) => {
+					match eval {
+						Val::Var(var) => {
+							// If the value is a variable, we need to read it first
+							let Some(var_val) = self.get_var(&var) else {
+								return Err(VicErr::Simple(format!("Variable '{var}' not found")))
+							};
+							eval = var_val;
+
 						}
-					} else if let Some(val) = self_val {
-						let func_args: Result<Vec<RcVal>, VicErr> = args
-							.iter()
-							.map(|arg| self.eval_expr(false,arg).try_blame(arg.span()))
-							.collect();
-						self.dispatch_builtin_method(val, &method_name.unwrap(), func_args?)?
-					} else {
-						return Err(VicErr::Simple(
-								format!("Function '{}' not found", method_name.unwrap_or_default())
-						))
+						Val::BuiltinHandle(Builtin::Fn(Func::Method(method_name))) => {
+							let Some(self_val) = last_self.as_mut() else {
+								return Err(VicErr::Simple("Method call without a self value".into()));
+							};
+							let mut arg_eval = vec![];
+							for arg in args.iter() {
+								let eval = self.eval_expr(false, arg)
+									.try_blame(arg.span())?;
+								arg_eval.push(eval);
+							}
+							eval = self.dispatch_builtin_method(self_val, &method_name, arg_eval.into())?;
+							continue
+						}
+						_ => {}
+					}
+					match eval {
+						Val::Closure(_, _) => {
+							let args = args.clone();
+							let call = match last_self {
+								Some(ref self_val) => Call::Method { self_val: self_val.clone(), args, func: eval.clone() },
+								None => Call::Function { args, func: eval }
+							};
+							self.eval_call(call)?
+						}
+						Val::BuiltinHandle(Builtin::Fn(func)) => {
+							let mut arg_eval = vec![];
+							for arg in args.iter() {
+								let eval = self.eval_expr(false, arg)
+									.try_blame(arg.span())?;
+								arg_eval.push(eval);
+							}
+							self.try_builtin_function(func, arg_eval.into())?
+						}
+						_ => {
+							return Err(VicErr::Simple(format!("Type '{}' is not callable", eval.display_type())));
+						}
 					}
 				}
 				Accessor::Field(field) => {
-					let Val::Dict(ref map) = *eval.borrow() else {
-						return Err(VicErr::Simple(format!("Cannot access field '{}' on type '{}'", field, eval.borrow().display_type())))
-					};
-					if let Some(v) = map.get(field) {
-						let is_closure = matches!(*v.borrow(), Val::Closure(_,_));
-						if is_closure {
-							Val::MethodClosure(Box::new(eval.clone()), Box::new(v.clone())).into()
-						} else {
-							v.clone()
+					match eval {
+						Val::Dict(ref map) => {
+							last_self = Some(eval.clone());
+							let map = map.borrow();
+							let field = map.get(field)
+								.ok_or_else(|| VicErr::Simple(format!("Field '{field}' not found in dictionary")))?;
+							field.clone()
 						}
-					} else {
-						return Err(VicErr::Simple(format!("Field '{}' not found in value of type '{}'", field, eval.borrow().display_type())))
+						Val::Ref(ref val) => {
+							match unsafe { &***val } {
+								Val::Dict(map) => {
+									last_self = Some(eval.clone());
+									let map = map.borrow();
+									let field = map.get(field)
+										.ok_or_else(|| VicErr::Simple(format!("Field '{field}' not found in dictionary")))?;
+									field.clone()
+								}
+								_ => {
+									last_self = Some(eval.clone());
+									Val::BuiltinHandle(Builtin::Fn(Func::Method(field.to_string())))
+								}
+							}
+						}
+						_ => {
+							last_self = Some(eval.clone());
+							Val::BuiltinHandle(Builtin::Fn(Func::Method(field.to_string())))
+						}
 					}
 				}
 				Accessor::Index(index) => {
@@ -1865,53 +1742,149 @@ impl ViCut {
 		}
 		Ok(eval)
 	}
-	fn index_val(&mut self, val: RcVal, index: &Index) -> Result<RcVal,VicErr> {
-		match *val.borrow() {
+	fn eval_call(&mut self, call: Call) -> Result<Val,VicErr> {
+		match call {
+			Call::Method {
+				self_val,
+				args,
+				func 
+			} => {
+				let Val::Closure(params, body) = func else {
+					return Err(VicErr::Simple(format!("Expected a closure for method call, found {}", func.display_type())))
+				};
+
+				let self_pos = params.iter().position(|p| p == "self");
+				let expected_given = if self_pos.is_some() {
+					params.len() - 1 
+				} else {
+					params.len()
+				};
+				if expected_given != args.len() {
+					return Err(VicErr::Simple(format!("Expected {} arguments, found {}", expected_given, args.len())));
+				}
+				let mut arg_eval = vec![];
+				for arg in args.iter() {
+					let eval = self.eval_expr(false, arg)
+						.try_blame(arg.span())?;
+					arg_eval.push(eval);
+				}
+				let _scope = ScopeGuard::new(self);
+				// Set the parameters in the current scope
+				if let Some(pos) = self_pos {
+					self.set_var("self".to_string(), Val::Ref(Box::new(Box::into_raw(Box::new(self_val)))))?;
+					let remaining = params
+						.iter()
+						.enumerate()
+						.filter(|(i,_)| *i != pos)
+						.map(|(_,p)| p)
+						.collect::<Vec<_>>();
+
+					for (param, arg) in remaining.iter().zip(arg_eval.iter()) {
+						self.set_var(param.to_string(), arg.clone())?;
+					}
+				} else {
+					for (param, arg) in params.iter().zip(arg_eval.iter()) {
+						self.set_var(param.to_string(), arg.clone())?;
+					}
+				}
+
+				let mut ret = Val::Null;
+				for cmd in body.iter() {
+					let result = self.eval_expr(true, cmd)
+						.try_blame(cmd.span());
+					match result {
+						Ok(val) => ret = val,
+						Err(VicErr::Return(_, val)) => return Ok(val),
+						Err(e) => return Err(e),
+					}
+				}
+				Ok(ret)
+			}
+
+			Call::Function { 
+				args,
+				func
+			} => {
+				let Val::Closure(params, body) = func else {
+					return Err(VicErr::Simple(format!("Expected a closure for function call, found {}", func.display_type())))
+				};
+				if params.len() != args.len() {
+					return Err(VicErr::Simple(format!("Expected {} arguments, found {}", params.len(), args.len())));
+				}
+				let mut arg_eval = vec![];
+				for arg in args.iter() {
+					let eval = self.eval_expr(false, arg)
+						.try_blame(arg.span())?;
+					arg_eval.push(eval);
+				}
+
+				let _scope = ScopeGuard::new(self);
+				// Set the parameters in the current scope
+				for (param, arg) in params.iter().zip(arg_eval.iter()) {
+					self.set_var(param.to_string(), arg.clone())?;
+				}
+				let mut ret = Val::Null;
+				for cmd in body.iter() {
+					let result = self.eval_expr(true, cmd)
+						.try_blame(cmd.span());
+					match result {
+						Ok(val) => ret = val,
+						Err(VicErr::Return(_, val)) => return Ok(val),
+						Err(e) => return Err(e),
+					}
+				}
+				Ok(ret)
+			}
+		}
+	}
+	fn index_val(&mut self, val: Val, index: &Index) -> Result<Val,VicErr> {
+		match val {
 			Val::Str(ref str) => {
+				let str = str.borrow();
 				let graphemes = str.graphemes(true).collect::<Vec<&str>>();
 				match index {
 					Index::Single(idx) => {
 						let idx = self.eval_expr(false, idx).try_blame(idx.span())?;
-						let Val::Num(idx) = *idx.borrow() else {
-							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.borrow().display_type())))
+						let Val::Num(idx) = idx else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.display_type())))
 						};
 						let Some(gr) = graphemes.get(idx as usize) else {
 							return Err(VicErr::Simple(format!("Index {idx} out of bounds for string of length {}", str.len())))
 						};
-						Ok(Val::Str(gr.to_string()).into())
+						Ok(Val::new_str(gr.to_string()))
 					}
 					Index::To(idx) => {
 						let idx = self.eval_expr(false, idx).try_blame(idx.span())?;
-						let Val::Num(idx) = *idx.borrow() else {
-							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.borrow().display_type())))
+						let Val::Num(idx) = idx else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.display_type())))
 						};
 						let idx = idx as usize;
 						if idx > str.len() {
 							return Err(VicErr::Simple(format!("Index {idx} out of bounds for string of length {}", str.len())))
 						}
 						let slice = graphemes.get(..idx).unwrap().join("");
-						Ok(Val::Str(slice).into())
+						Ok(Val::new_str(slice))
 					}
 					Index::From(idx) => {
 						let idx = self.eval_expr(false, idx).try_blame(idx.span())?;
-						let Val::Num(idx) = *idx.borrow() else {
-							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.borrow().display_type())))
+						let Val::Num(idx) = idx else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.display_type())))
 						};
 						let idx = idx as usize;
 						if idx >= str.len() {
 							return Err(VicErr::Simple(format!("Index {idx} out of bounds for string of length {}", str.len())))
 						}
 						let slice = graphemes.get(idx..).unwrap().join("");
-						Ok(Val::Str(slice).into())
+						Ok(Val::new_str(slice))
 					}
 					Index::Slice(start, end) => {
 						let start = self.eval_expr(false, start).try_blame(start.span())?;
-						let Val::Num(start) = *start.borrow() else {
-							return Err(VicErr::Simple(format!("Expected a number for index, found {}", start.borrow().display_type())))
+						let Val::Num(start) = start else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", start.display_type())))
 						};
 						let end = self.eval_expr(false, end).try_blame(end.span())?;
-						let Val::Num(end) = *end.borrow() else {
-							return Err(VicErr::Simple(format!("Expected a number for index, found {}", end.borrow().display_type())))
+						let Val::Num(end) = end else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", end.display_type())))
 						};
 						let mut start = start as usize;
 						let mut end = end as usize;
@@ -1924,7 +1897,7 @@ impl ViCut {
 									return Err(VicErr::Simple(format!("Index {start} out of bounds for string of length {}", str.len())))
 								}
 								let slice = graphemes.get(start..end).unwrap().join("");
-								Ok(Val::Str(slice).into())
+								Ok(Val::new_str(slice))
 							}
 							Ordering::Greater => {
 								std::mem::swap(&mut start, &mut end);
@@ -1941,20 +1914,21 @@ impl ViCut {
 									.skip(start)
 									.take(len)
 									.collect::<Vec<_>>().join("");
-								Ok(Val::Str(slice).into())
+								Ok(Val::new_str(slice))
 							}
-							Ordering::Equal => Ok(Val::Str(String::new()).into()),
+							Ordering::Equal => Ok(Val::new_str(String::new())),
 						}
 					}
 					_ => unimplemented!()
 				}
 			}
 			Val::Arr(ref arr) => {
+				let arr = arr.borrow();
 				match index {
 					Index::Single(idx) => {
 						let idx = self.eval_expr(false, idx).try_blame(idx.span())?;
-						let Val::Num(idx) = *idx.borrow() else {
-							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.borrow().display_type())))
+						let Val::Num(idx) = idx else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.display_type())))
 						};
 						let idx = idx as usize;
 						if idx >= arr.len() {
@@ -1964,36 +1938,36 @@ impl ViCut {
 					}
 					Index::To(idx) => {
 						let idx = self.eval_expr(false, idx).try_blame(idx.span())?;
-						let Val::Num(idx) = *idx.borrow() else {
-							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.borrow().display_type())))
+						let Val::Num(idx) = idx else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.display_type())))
 						};
 						let idx = idx as usize;
 						if idx > arr.len() {
 							return Err(VicErr::Simple(format!("Index {idx} out of bounds for array of length {}", arr.len())))
 						}
 						let slice = arr.iter().take(idx).cloned().collect::<VecDeque<_>>();
-						Ok(Val::Arr(slice).into())
+						Ok(Val::new_arr(slice))
 					}
 					Index::From(idx) => {
 						let idx = self.eval_expr(false, idx).try_blame(idx.span())?;
-						let Val::Num(idx) = *idx.borrow() else {
-							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.borrow().display_type())))
+						let Val::Num(idx) = idx else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", idx.display_type())))
 						};
 						let idx = idx as usize;
 						if idx >= arr.len() {
 							return Err(VicErr::Simple(format!("Index {idx} out of bounds for array of length {}", arr.len())))
 						}
 						let slice = arr.iter().skip(idx).cloned().collect::<VecDeque<_>>();
-						Ok(Val::Arr(slice).into())
+						Ok(Val::new_arr(slice))
 					}
 					Index::Slice(start, end) => {
 						let start = self.eval_expr(false, start).try_blame(start.span())?;
-						let Val::Num(start) = *start.borrow() else {
-							return Err(VicErr::Simple(format!("Expected a number for index, found {}", start.borrow().display_type())))
+						let Val::Num(start) = start else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", start.display_type())))
 						};
 						let end = self.eval_expr(false, end).try_blame(end.span())?;
-						let Val::Num(end) = *end.borrow() else {
-							return Err(VicErr::Simple(format!("Expected a number for index, found {}", end.borrow().display_type())))
+						let Val::Num(end) = end else {
+							return Err(VicErr::Simple(format!("Expected a number for index, found {}", end.display_type())))
 						};
 						let mut start = start as usize;
 						let mut end = end as usize;
@@ -2008,7 +1982,7 @@ impl ViCut {
 								}
 								let len = end - start;
 								let slice = arr.iter().skip(start).take(len).cloned().collect::<VecDeque<_>>();
-								Ok(Val::Arr(slice).into())
+								Ok(Val::new_arr(slice))
 							}
 							Ordering::Greater => {
 								std::mem::swap(&mut start, &mut end);
@@ -2026,38 +2000,47 @@ impl ViCut {
 									.take(len)
 									.cloned()
 									.collect::<VecDeque<_>>();
-								Ok(Val::Arr(slice).into())
+								Ok(Val::new_arr(slice))
 							}
-							Ordering::Equal => Ok(Val::Arr(VecDeque::new()).into()),
+							Ordering::Equal => Ok(Val::new_arr(VecDeque::new())),
 						}
 					}
 					_ => unimplemented!()
 				}
 			}
-			_ => Err(VicErr::Simple(format!("Cannot index into type '{}'", val.borrow().display_type()))),
+			_ => Err(VicErr::Simple(format!("Cannot index into type '{}'", val.display_type()))),
 		}
 	}
-	/// Evaluate all contained values of an RcVal
-	pub fn deep_eval_value(&mut self, val: RcVal) -> Result<(),VicErr> {
+	/// Evaluate all contained values of a Val
+	pub fn deep_eval_value(&mut self, val: &mut Val) -> Result<(),VicErr> {
 		// Most of the time, Val::Expr(_) is evaluated lazily
 		// but sometimes we want to know everything about a value like an Array or Dictionary
 		// In this case we do our best to resolve all expressions inside the value
 		let mut is_expr = false;
-		match *val.borrow_mut() {
+		match val {
 			Val::Expr(_) => {
 				// can't do any mutation while we are in this scope
 				// at least we know it's a Val::Expr
 				is_expr = true;
 			}
-			Val::Arr(ref mut arr) => {
-				for item in arr.iter() {
-					self.deep_eval_value(item.clone())?;
+			Val::Arr(arr) => {
+				let mut arr = arr.borrow_mut();
+				for item in arr.iter_mut() {
+					self.deep_eval_value(item)?;
 				}
 			}
-			Val::Dict(ref mut dict) => {
+			Val::Dict(dict) => {
+				let mut dict = dict.borrow_mut();
 				for (_key, value) in dict.iter_mut() {
-					self.deep_eval_value(value.clone())?;
+					self.deep_eval_value(value)?;
 				}
+			}
+			Val::Var(var) => {
+				// If we have a variable, we need to resolve it
+				let Some(value) = self.get_var(var) else {
+					return Err(VicErr::Simple(format!("Variable '{var}' not found")))
+				};
+				*val = value;
 			}
 			_ => {}
 		}
@@ -2065,49 +2048,56 @@ impl ViCut {
 		// we defer the evaluation until here
 		// since the condition for reaching this branch doesn't require a mutable borrow
 		if is_expr {
+
 			// borrow scoping tricks
 			let eval = {
-				let Val::Expr(ref expr) = *val.borrow() else { unreachable!() };
-				self.deep_eval(false, expr)?
+				let Val::Expr(expr) = val else { unreachable!() };
+				self.eval_expr(false, expr)?
 			}; // borrow is dropped here
 
 			// now we mutate
-			*val.borrow_mut() = eval.borrow().clone();
+			*val = eval.clone();
 		}
 		Ok(())
 	}
 	/// A little bit redundant, but variables are kept in the Val enum
-	fn eval_value(&mut self, val: RcVal) -> Result<RcVal,VicErr> {
-		match *val.borrow_mut() {
-			Val::Var(ref name) => {
+	fn eval_value(&mut self, val: &ExprKind) -> Result<Val,VicErr> {
+		let ExprKind::Value(val) = val else {
+			return Err(VicErr::Simple("Expected a value expression".into()));
+		};
+		match val {
+			Val::Var(name) => {
 				if name == "_buffer" {
-					return Ok(Val::Str(self.current_buffer().buffer.clone()).into())
+					return Ok(Val::new_str(self.current_buffer().buffer.clone()))
 				}
 				let val = self.get_var(name).ok_or_else(|| format!("Variable '{name}' not found"))?;
 				Ok(val)
 			}
-			Val::Str(ref str) => {
-				let val = self.expand_literal(str)?;
-				Ok(Val::Str(val).into())
+			Val::Str(str) => {
+				let val = self.expand_literal(&str.borrow())?;
+				Ok(Val::new_str(val))
 			}
-			Val::Expr(ref expr) => {
+			Val::Expr(expr) => {
 				let eval = self.eval_expr(false, expr)?;
 				Ok(eval)
 			}
-			Val::Dict(ref map) => {
-				for (_key, value) in map.iter() {
-					self.deep_eval_value(value.clone())?;
+			Val::Dict(map) => {
+				let mut map = map.borrow_mut();
+				for (_, value) in map.iter_mut() {
+					self.deep_eval_value(value)?;
 				}
 				Ok(val.clone())
 			}
-			Val::Arr(ref arr) => {
-				for item in arr.iter() {
-					self.deep_eval_value(item.clone())?;
+			Val::Arr(arr) => {
+				let mut arr = arr.borrow_mut();
+				for item in arr.iter_mut() {
+					self.deep_eval_value(item)?;
 				}
 				Ok(val.clone())
 			}
-			Val::Err(_, ref expr) => {
-				self.deep_eval_value((**expr).clone())?;
+			Val::Err(_, expr) => {
+				let mut expr = expr.borrow_mut();
+				self.deep_eval_value(&mut expr)?;
 				Ok(val.clone())
 			}
 			_ => Ok(val.clone())

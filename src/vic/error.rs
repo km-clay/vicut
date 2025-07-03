@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use crate::vic::parse::{ArcSpan, RcVal, Rule};
+use crate::vic::parse::{ArcSpan, RcVal, Rule, Val};
 
 /// Leverage `pest`'s pretty error reporting
 pub fn expr_error(message: String, span: ArcSpan) -> String {
@@ -45,7 +45,7 @@ pub enum VicErr {
 	// this pattern allows for signals to flow upwards easily through nested contexts
 	Continue(ArcSpan),
 	Break(ArcSpan),
-	Return(ArcSpan,RcVal)
+	Return(ArcSpan,Val)
 }
 
 impl VicErr {

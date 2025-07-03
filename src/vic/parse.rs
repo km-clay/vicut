@@ -1,11 +1,11 @@
-use std::{boxed, cell::RefCell, cmp::Ordering, collections::{HashMap, VecDeque}, fmt::Display, ops::Deref, rc::Rc, sync::Arc};
+use std::{boxed, cell::RefCell, cmp::Ordering, collections::{HashMap, VecDeque}, fmt::{Debug, Display}, ops::Deref, rc::Rc, sync::Arc};
 
 use pest::{iterators::{Pair, Pairs}, Parser};
 use pest_derive::Parser;
 use regex::Regex;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::{exec::ViCut, linebuf::LineBuf, register::read_register, vic::error::{expr_error, VicErr, VicErrResult}, Opts};
+use crate::{exec::ViCut, linebuf::LineBuf, register::read_register, vic::{error::{expr_error, VicErr, VicErrResult}, libvic::Builtin}, Opts};
 
 #[derive(Parser)]
 #[grammar = "vic/vic.pest"] // relative to src
@@ -22,11 +22,17 @@ pub struct VicParser;
  * Worth noting that converting `ArcSpan` back to `pest::Span` is a trivial operation.
  */
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct ArcSpan {
 	input: Arc<String>,
 	start: usize,
 	end: usize
+}
+
+impl Debug for ArcSpan {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+	  write!(f, "{{ arc span }}")
+	}
 }
 
 impl ArcSpan {
@@ -126,6 +132,11 @@ pub struct Expr {
 }
 
 impl Expr {
+	pub fn debug(&self) -> String {
+		let mut debug_str = format!("Expr: {:?}\n", self.value);
+		debug_str.push_str(&format!("Accessors: {:?}\n", self.accessors));
+		debug_str
+	}
 	pub fn parse_vic(src: Arc<String>) -> Result<Self,VicErr> {
 		let mut vic = VicParser::parse(Rule::vic, &src).map_err(|e| e.to_string())?;
 		let cmd_pairs = vic.next().unwrap();
@@ -162,13 +173,7 @@ impl Expr {
 			Rule::var_div |
 			Rule::var_pow |
 			Rule::var_mod => Self::parse_var_cmd(cmd),
-			Rule::with_block => Self::parse_with_block(cmd),
-			Rule::for_block => Self::parse_for_block(cmd),
-			Rule::if_block => Self::parse_if_block(cmd),
-			Rule::switch_block => Self::parse_switch_block(cmd),
-			Rule::while_block => Self::parse_loop_block(cmd,true),
-			Rule::until_block => Self::parse_loop_block(cmd,false),
-			Rule::func_call |
+			Rule::block_struct => Self::parse_block_struct(cmd),
 			Rule::command => Self::parse_expr(cmd),
 			Rule::func_def => Self::parse_func_def(cmd),
 			Rule::class_def => Self::parse_class_def(cmd),
@@ -185,6 +190,18 @@ impl Expr {
 				// unhandled rules, as there basically aren't any.
 				unreachable!("Unhandled rule: {:?}", cmd.as_rule())
 			}
+		}
+	}
+	fn parse_block_struct(cmd: ArcPair) -> Result<Self,VicErr> {
+		let inner = cmd.into_inner().next().unwrap();
+		match inner.as_rule() {
+			Rule::with_block => Self::parse_with_block(inner),
+			Rule::if_block => Self::parse_if_block(inner),
+			Rule::while_block => Self::parse_loop_block(inner, true),
+			Rule::until_block => Self::parse_loop_block(inner, false),
+			Rule::switch_block => Self::parse_switch_block(inner),
+			Rule::for_block => Self::parse_for_block(inner),
+			_ => unreachable!()
 		}
 	}
 	fn parse_with_block(cmd: ArcPair) -> Result<Self,VicErr> {
@@ -249,9 +266,8 @@ impl Expr {
 			ExprKind::VarDec { name, value }
 		} else {
 			let name_val = Val::Var(inner.next().unwrap().as_str().to_string());
-			dbg!(span.as_str());
 			let mut val_or_accessor = inner.next().unwrap();
-			while val_or_accessor.as_rule() == Rule::accessor || val_or_accessor.as_rule() == Rule::accessor_call {
+			while val_or_accessor.as_rule() == Rule::accessor {
 				let accessor = Self::parse_accessor(val_or_accessor.clone())?;
 				accessors.push(accessor);
 				val_or_accessor = inner.next().unwrap();
@@ -388,32 +404,22 @@ impl Expr {
 		Ok(cmds)
 	}
 	fn parse_accessor(accessor: ArcPair) -> Result<Accessor,VicErr> {
-		if accessor.as_rule() == Rule::accessor_call {
-			let mut accessor_and_args = accessor.into_inner();
-			let accessor = {
-				let accessor_kind = accessor_and_args.next().unwrap();
-				match accessor_kind.as_rule() {
-					Rule::field => Self::parse_field(accessor_kind)?,
-					Rule::index => Self::parse_index(accessor_kind)?,
-					_ => unreachable!("Unexpected rule in accessor: {:?}", accessor_kind.as_rule())
-				}
-			};
-			let mut args = vec![];
-			let arg_pairs = accessor_and_args.next().unwrap().into_inner()
-				.next().unwrap().into_inner();
-			for arg in arg_pairs {
-				args.push(Self::parse_expr(arg)?);
-			}
-			Ok(Accessor::Call(Box::new(accessor), args))
-		} else {
-			let accessor_kind = accessor.into_inner().next().unwrap();
-			match accessor_kind.as_rule() {
-				Rule::field => Self::parse_field(accessor_kind),
-				Rule::index => Self::parse_index(accessor_kind),
-				Rule::err_prop => Ok(Accessor::ErrProp),
-				_ => unreachable!("Unexpected rule in accessor: {:?}", accessor_kind.as_rule())
-			}
+		let accessor_kind = accessor.into_inner().next().unwrap();
+		match accessor_kind.as_rule() {
+			Rule::field => Self::parse_field(accessor_kind),
+			Rule::index => Self::parse_index(accessor_kind),
+			Rule::call => Self::parse_call(accessor_kind),
+			Rule::err_prop => Ok(Accessor::ErrProp),
+			_ => unreachable!("Unexpected rule in accessor: {:?}", accessor_kind.as_rule())
 		}
+	}
+	fn parse_call(call: ArcPair) -> Result<Accessor,VicErr> {
+		let mut arg_list = call.into_inner().next().unwrap().into_inner();
+		let mut args = vec![];
+		while let Some(arg) = arg_list.next() {
+			args.push(Self::parse_expr(arg)?);
+		}
+		Ok(Accessor::Call(args.into()))
 	}
 	fn parse_field(field: ArcPair) -> Result<Accessor,VicErr> {
 		let var_name = field.into_inner().next().unwrap();
@@ -448,14 +454,13 @@ impl Expr {
 		};
 		Ok(Accessor::Index(index))
 	}
-	#[track_caller]
 	fn parse_expr(expr: ArcPair) -> Result<Expr,VicErr> {
 		match expr.as_rule() {
 			Rule::value => Self::parse_value(expr),
 			Rule::command => Self::parse_command(expr),
 			Rule::bin_expr => Self::parse_bin_expr(expr),
 			Rule::bool_expr => Self::parse_bool_expr(expr),
-			Rule::with_block => Self::parse_with_block(expr),
+			Rule::block_struct => Self::parse_block_struct(expr),
 			Rule::expr => {
 				let mut inner = expr.into_inner();
 				let mut eval = Self::parse_expr(inner.next().unwrap())?;
@@ -467,28 +472,6 @@ impl Expr {
 					eval.accessors = accessors;
 				}
 				Ok(eval)
-			}
-			Rule::func_call => {
-				let span = expr.as_span();
-				let mut inner = expr.into_inner();
-				let name = Box::new(Self::parse_expr(inner.next().unwrap())?);
-				let mut args = vec![];
-				let arg_pairs = inner.next().unwrap().into_inner()
-					.next().unwrap().into_inner();
-				for arg in arg_pairs {
-					args.push(Self::parse_expr(arg)?);
-				}
-				let mut accessors = vec![];
-				while let Some(accessor) = inner.next() {
-					let accessor = Self::parse_accessor(accessor)?;
-					accessors.push(accessor);
-				}
-				let value = ExprKind::FuncCall { name, args };
-				Ok(Self {
-					value,
-					accessors,
-					span
-				})
 			}
 			Rule::bool => {
 				let span = expr.as_span();
@@ -511,6 +494,18 @@ impl Expr {
 					_ => unreachable!()
 				}
 			}
+			Rule::bool_node => {
+				let span = expr.as_span();
+				let mut inner = expr.into_inner();
+				let left = Self::parse_expr(inner.next().unwrap())?;
+				let op = LogOp::from_rule(inner.next().unwrap().into_inner().next().unwrap().as_rule()).unwrap();
+				let right = Self::parse_expr(inner.next().unwrap())?;
+				Ok(Self {
+					value: ExprKind::BoolNode { left: Box::new(left), op, right: Box::new(right) },
+					accessors: vec![],
+					span
+				})
+			}
 			Rule::var => {
 				let var_name = expr.as_str().to_string();
 				let span = expr.as_span();
@@ -519,18 +514,6 @@ impl Expr {
 					accessors: vec![],
 					span
 				})
-			}
-			Rule::func_call_name => {
-				let mut inner = expr.into_inner();
-				let mut name = Self::parse_value(inner.next().unwrap())?;
-				let mut accessors = vec![];
-				while let Some(accessor) = inner.next() {
-					accessors.push(Self::parse_accessor(accessor)?);
-				}
-				if name.accessors.is_empty() {
-					name.accessors = accessors;
-				}
-				Ok(name)
 			}
 			// All of these are rules that we have to unwrap further
 			// before we can continue processing. So we just unwrap
@@ -546,7 +529,7 @@ impl Expr {
 				let next = inner.next().unwrap();
 				let mut expr = Self::parse_expr(next)?;
 				while let Some(pair) = inner.next() {
-					if let Rule::accessor | Rule::accessor_call = pair.as_rule() {
+					if let Rule::accessor = pair.as_rule() {
 						let accessor = Self::parse_accessor(pair)?;
 						accessors.push(accessor);
 					}
@@ -556,7 +539,7 @@ impl Expr {
 				}
 				Ok(expr)
 			}
-			_ => unreachable!("Unexpected rule: {:?}, caller '{}'", expr.as_rule(), std::panic::Location::caller())
+			_ => unreachable!("Unexpected rule: {:?}", expr.as_rule())
 		}
 	}
 	fn parse_bool_expr(expr: ArcPair) -> Result<Expr,VicErr> {
@@ -646,12 +629,12 @@ impl Expr {
 		Ok(expr)
 	}
 	fn parse_command(cmd: ArcPair) -> Result<Expr,VicErr> {
+		let span = cmd.as_span();
 		let cmd = cmd.into_inner().next().unwrap();
 		let cmd_raw = cmd.as_str().split(" ").next().unwrap();
 
 		match cmd_raw.trim() {
 			"next" => {
-				let span = cmd.as_span();
 				Ok(Self {
 					value: ExprKind::Command(Command::Next),
 					accessors: vec![],
@@ -659,7 +642,6 @@ impl Expr {
 				})
 			}
 			"continue" => {
-				let span = cmd.as_span();
 				Ok(Self {
 					value: ExprKind::Command(Command::Continue),
 					accessors: vec![],
@@ -667,7 +649,6 @@ impl Expr {
 				})
 			}
 			"break" => {
-				let span = cmd.as_span();
 				Ok(Self {
 					value: ExprKind::Command(Command::Break),
 					accessors: vec![],
@@ -675,7 +656,6 @@ impl Expr {
 				})
 			}
 			"new" => {
-				let span = cmd.as_span();
 				let mut inner = cmd.into_inner();
 				let var = Self::parse_expr(inner.next().unwrap())?;
 				Ok(Self {
@@ -684,8 +664,16 @@ impl Expr {
 					span
 				})
 			}
+			"ref" => {
+				let mut inner = cmd.into_inner();
+				let var = Self::parse_expr(inner.next().unwrap())?;
+				Ok(Self {
+					value: ExprKind::Command(Command::Ref(Box::new(var))),
+					accessors: vec![],
+					span
+				})
+			}
 			"global" | "g" => {
-				let span = cmd.as_span();
 				let mut inner = cmd.into_inner();
 				let pattern = Box::new(Self::parse_expr(inner.next().unwrap())?);
 				let block = Self::parse_block(inner.next().unwrap())?;
@@ -696,18 +684,23 @@ impl Expr {
 				})
 			}
 			"catch" => {
-				let span = cmd.as_span();
 				let mut inner = cmd.into_inner();
 				let scrutinee = Box::new(Self::parse_expr(inner.next().unwrap())?);
-				let catch_block = Self::parse_block(inner.next().unwrap())?;
+				let (err_bind,catch_block) = {
+					let next = inner.next().unwrap();
+					match next.as_rule() {
+						Rule::block => (None, Self::parse_block(next)?),
+						Rule::var => (Some(next.as_str().to_string()), Self::parse_block(inner.next().unwrap())?),
+						_ => unreachable!(),
+					}
+				};
 				Ok(Self {
-					value: ExprKind::CatchBlock { scrutinee, catch_block },
+					value: ExprKind::CatchBlock { scrutinee, err_bind, catch_block },
 					accessors: vec![],
 					span: span.clone()
 				})
 			}
 			"not_global" | "!global" | "v" => {
-				let span = cmd.as_span();
 				let mut inner = cmd.into_inner();
 				let pattern = Box::new(Self::parse_expr(inner.next().unwrap())?);
 				let block = Self::parse_block(inner.next().unwrap())?;
@@ -718,17 +711,15 @@ impl Expr {
 				})
 			}
 			"error!" => {
-				let span = cmd.as_span();
 				let mut inner = cmd.into_inner();
-				let msg = Box::new(Val::try_from_pair(inner.next().unwrap())?.into());
+				let msg = Box::new(Self::parse_expr(inner.next().unwrap())?);
 				Ok(Self {
-					value: ExprKind::Value(Val::Err(span.clone(),msg).into()),
+					value: ExprKind::Command(Command::Error(span.clone(),msg)),
 					accessors: vec![],
 					span
 				})
 			}
 			"move" | "m" => {
-				let span = cmd.as_span();
 				let mut inner = cmd.into_inner();
 				let motion = Box::new(Self::parse_expr(inner.next().unwrap())?);
 				Ok(Self {
@@ -738,7 +729,6 @@ impl Expr {
 				})
 			}
 			"cut" | "c" => {
-				let span = cmd.as_span();
 				let mut inner = cmd.into_inner();
 				let motion = Box::new(Self::parse_expr(inner.next().unwrap())?);
 				Ok(Self {
@@ -748,7 +738,6 @@ impl Expr {
 				})
 			}
 			"repeat" | "r" => {
-				let span = cmd.as_span();
 				let mut inner = cmd.into_inner();
 				let count = Box::new(Self::parse_expr(inner.next().unwrap())?);
 				let block = Self::parse_block(inner.next().unwrap())?;
@@ -759,7 +748,6 @@ impl Expr {
 				})
 			}
 			"return" => {
-				let span = cmd.as_span();
 				let mut inner = cmd.into_inner();
 				let ret = if let Some(ret_expr) = inner.next() {
 					Some(Box::new(Self::parse_expr(ret_expr)?))
@@ -773,7 +761,6 @@ impl Expr {
 				})
 			}
 			"include" => {
-				let span = cmd.as_span();
 				let mut inner = cmd.into_inner();
 				let path = Box::new(Self::parse_expr(inner.next().unwrap())?);
 				Ok(Self {
@@ -864,7 +851,7 @@ pub enum ExprKind {
 	Vic(Vec<Expr>), // Root node of AST
 	TopLevel(Box<Expr>),
 	Block(Vec<Expr>),
-	Value(RcVal),
+	Value(Val),
 	Command(Command),
 	Opts(Vec<Expr>), // Always contains 'ExprKind::Opt'
 	/// `set` is whether or not the opt is passed with a leading '!'
@@ -881,47 +868,37 @@ pub enum ExprKind {
 	WhileBlock { cond: Box<Expr>, body: Vec<Expr> },
 	UntilBlock { cond: Box<Expr>, body: Vec<Expr> },
 	WithBlock { buffer: Box<Expr>, body: Vec<Expr> },
-	CatchBlock { scrutinee: Box<Expr>, catch_block: Vec<Expr> },
+	CatchBlock { scrutinee: Box<Expr>, err_bind: Option<String>, catch_block: Vec<Expr> },
 	Range { start: Box<Expr>, end: Box<Expr> },
 	BinExpr(Vec<RpnItem>),
 	BoolExpr(Vec<RpnItem>),
-	MethodCall { name: String }, // Accessors are included in the Expr itself
-	FuncCall { name: Box<Expr>, args: Vec<Expr> },
+	BoolNode { left: Box<Expr>, op: LogOp, right: Box<Expr> },
 	FuncDef { name: String, params: Vec<String>, body: Vec<Expr> },
 	ClassDef { name: String, fields: HashMap<String, Expr> },
-}
-
-impl ExprKind {
-	pub fn string(str: impl ToString) -> Self {
-		Self::Value(Val::Str(str.to_string()).into())
-	}
 }
 
 #[derive(Debug,Clone,PartialEq)]
 pub enum Command {
 	Next,
 	New(Box<Expr>), // constructor for classes
+	Ref(Box<Expr>), // reference to a value
+	Error(ArcSpan,Box<Expr>),
 	Continue,
 	Break,
-	BufId,
 	Return { ret: Option<Box<Expr>> },
 	Global { pattern: Box<Expr>, block: Vec<Expr>, },
 	NotGlobal { pattern: Box<Expr>, block: Vec<Expr>, },
 	Move { motion: Box<Expr> },
 	Cut { motion: Box<Expr> },
-	Echo { args: Vec<Expr> },
 	Repeat { count: Box<Expr>, block: Vec<Expr> },
 	Yank { register: Box<Expr>, motion: Box<Expr> },
 	ShellCmd { cmd: Box<Expr> },
-	Push { stack: Box<Expr>, value: Box<Expr> },
-	Pop { stack: Box<Expr> },
-	BufSwitch { id: Box<Expr> },
 	Include { path: Box<Expr> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Accessor {
-	Call(Box<Accessor>,Vec<Expr>),
+	Call(Rc<[Expr]>),
 	Field(String),
 	Index(Index),
 	ErrProp
@@ -1004,6 +981,22 @@ impl BinOp {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum LogOp {
+	And,
+	Or
+}
+
+impl LogOp {
+	pub fn from_rule(rule: Rule) -> Option<Self> {
+		match rule {
+			Rule::and => Some(Self::And),
+			Rule::or => Some(Self::Or),
+			_ => None
+		}
+	}
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum BoolOp {
 	Ne,
 	Eq,
@@ -1012,16 +1005,12 @@ pub enum BoolOp {
 	Lte,
 	Gte,
 	Not,
-	And,
-	Or,
 }
 
 impl BoolOp {
 	pub fn precedence(&self) -> usize {
 		match self {
 			Self::Not => 1,
-			Self::And => 3,
-			Self::Or => 4,
 			_ => 2
 		}
 	}
@@ -1034,12 +1023,11 @@ impl BoolOp {
 			Rule::le => Some(Self::Lte),
 			Rule::ge => Some(Self::Gte),
 			Rule::not => Some(Self::Not),
-			Rule::and => Some(Self::And),
-			Rule::or => Some(Self::Or),
 			_ => None
 		}
 	}
 }
+
 
 pub type RcVal = Rc<RefCell<Val>>;
 
@@ -1049,14 +1037,15 @@ pub enum Val {
 	#[default]
 	Null,
 	Err(ArcSpan,Box<RcVal>),
-	Str(String),
+	Ref(Box<*mut Val>), // oooo spooooooky
+	Str(Rc<RefCell<String>>),
 	Var(String),
-	Arr(VecDeque<RcVal>),
+	Arr(Rc<RefCell<VecDeque<Val>>>),
 	Num(isize),
 	Register(char),
-	MethodClosure(Box<RcVal>, Box<RcVal>), // holds the Closure and the 'self' value
-	Closure(Vec<String>, Vec<Expr>),
-	Dict(HashMap<String,RcVal>),
+	BoundClosure(Box<RcVal>, Box<RcVal>), // holds the Closure and the 'self' value
+	Closure(Rc<[String]>, Rc<[Expr]>),
+	Dict(Rc<RefCell<HashMap<String,Val>>>),
 	Bool(bool),
 	Regex(Regex),
 	Expr(Box<Expr>),
@@ -1069,7 +1058,8 @@ pub enum Val {
 
 	/// This one is *only* used internally, and not exposed to the user directly
 	/// Used as a value that represents the currently selected buffer
-	BufferHandle
+	BuiltinHandle(Builtin)
+
 }
 
 impl From<Val> for RcVal {
@@ -1086,32 +1076,85 @@ impl Val {
 		if let Self::Null = self { panic!("Called unwrap on a Null value") }
 		self
 	}
+
+	pub fn new_str(str: String) -> Self {
+		Self::Str(Rc::new(RefCell::new(str)))
+	}
+	pub fn new_arr(arr: VecDeque<Val>) -> Self {
+		Self::Arr(Rc::new(RefCell::new(arr)))
+	}
+	pub fn new_dict(dict: HashMap<String, Val>) -> Self {
+		Self::Dict(Rc::new(RefCell::new(dict)))
+	}
+	pub fn to_int(self) -> Result<Self,VicErr> {
+		self.to_string().parse::<isize>().map_err(|_| {
+			VicErr::Simple(format!("Could not convert value to integer: {}", self))
+		}).map(Self::Num)
+	}
 	/// Unwrap implementation for `Val` with a default value
 	pub fn unwrap_or_else<F: FnOnce() -> Self>(self, default: F) -> Self { 
 		if let Self::Null = self { return default() }
 		self
 	}
+	pub fn into_ref(self) -> Self {
+		match self {
+			Self::Ref(_) => self,
+			_ => Self::Ref(Box::new(Box::into_raw(Box::new(self))))
+		}
+	}
+	pub fn try_as_ref(&self) -> Option<&Val> {
+		match self {
+			Val::Ref(val) => {
+				let unboxed = *val.clone();
+				let val_ref = unsafe { &*unboxed };
+				Some(val_ref)
+			}
+			_ => None
+		}
+	}
+	#[allow(clippy::mut_from_ref)]
+	pub fn try_as_mut(&self) -> Option<&mut Val> {
+		match self {
+			Val::Ref(val) => {
+				let unboxed = *val.clone();
+				let val_ref = unsafe { &mut *unboxed };
+				Some(val_ref)
+			}
+			_ => None
+		}
+	}
 	pub fn deep_clone(&self) -> Self {
 		match self {
 			Val::Dict(map) => {
-				let new_map = map.iter()
-					.map(|(k, v)| (k.clone(), Rc::new(RefCell::new(v.borrow().deep_clone()))))
+				let new_map = map.borrow().iter()
+					.map(|(k, v)| (k.clone(), v.deep_clone()))
 					.collect();
-				Val::Dict(new_map)
+				Val::Dict(Rc::new(RefCell::new(new_map)))
 			}
 			Val::Arr(arr) => {
-				let new_arr = arr.iter()
-					.map(|v| Rc::new(RefCell::new(v.borrow().deep_clone())))
+				let new_arr = arr.borrow().iter()
+					.map(|v| v.deep_clone())
 					.collect();
-				Val::Arr(new_arr)
+				Val::Arr(Rc::new(RefCell::new(new_arr)))
+			}
+			Val::Str(str) => {
+				Val::Str(Rc::new(RefCell::new(str.borrow().clone())))
+			}
+			Val::Ref(val) => {
+				Val::Ref(val.clone())
 			}
 			_ => self.clone()
 		}
 	}
 	pub fn cmp(&self, other: &Val, vicut: &mut ViCut) -> Option<Ordering> {
 		match self {
-			Val::BufferHandle => unreachable!(),
+			Val::BuiltinHandle(handle) => unreachable!(),
 			Val::Err(_, _) => None,
+			Val::Ref(val) => {
+				let unboxed = *val.clone();
+				let val_ref = unsafe { &*unboxed };
+				val_ref.cmp(other,vicut)
+			}
 			Val::Break |
 			Val::Continue |
 			Val::Null => {
@@ -1121,7 +1164,7 @@ impl Val {
 				if let Val::Str(str2) = other {
 					Some(str1.cmp(str2))
 				} else if let Val::Regex(regex) = other {
-					if regex.is_match(str1) {
+					if regex.is_match(&*str1.borrow()) {
 						Some(Ordering::Equal)
 					} else {
 						None
@@ -1132,16 +1175,18 @@ impl Val {
 			}
 			Val::Var(var) => {
 				let val = vicut.read_var(var)?;
-				val.borrow().cmp(other, vicut)
+				val.cmp(other, vicut)
 			}
 			Val::Arr(ref_cells) => {
 				if let Val::Arr(other_cells) = other {
-					let mut iter1 = ref_cells.iter();
-					let mut iter2 = other_cells.iter();
+					let this_arr = ref_cells.borrow();
+					let other_arr = other_cells.borrow();
+					let mut iter1 = this_arr.iter();
+					let mut iter2 = other_arr.iter();
 					loop {
 						match (iter1.next(), iter2.next()) {
 							(Some(val1), Some(val2)) => {
-								if let Some(ordering) = val1.borrow().cmp(&val2.borrow(), vicut) {
+								if let Some(ordering) = val1.cmp(&val2, vicut) {
 									if ordering != Ordering::Equal { return Some(ordering) }
 								} else {
 									return None;
@@ -1166,24 +1211,26 @@ impl Val {
 			Val::Register(reg) => {
 				let content = read_register(Some(*reg))?.to_string();
 				if let Val::Str(other_str) = other {
-					Some(content.cmp(other_str))
+					Some(content.cmp(&other_str.borrow()))
 				} else {
 					None
 				}
 			}
-			Val::MethodClosure(_, _) |
+			Val::BoundClosure(_, _) |
 			Val::Closure(_, _) => {
 				panic!("this should have already been evaluated")
 			}
 			Val::Dict(hash_map) => {
 				if let Val::Dict(other_map) = other {
-					let mut iter1 = hash_map.iter();
+					let this_map = hash_map.borrow();
+					let other_map = other_map.borrow();
+					let mut iter1 = this_map.iter();
 					let mut iter2 = other_map.iter();
 					loop {
 						match (iter1.next(), iter2.next()) {
 							(Some((key1, val1)), Some((key2, val2))) => {
 								if key1 != key2 { return None }
-								if let Some(ordering) = val1.borrow().cmp(&val2.borrow(), vicut) {
+								if let Some(ordering) = val1.cmp(&val2, vicut) {
 									if ordering != Ordering::Equal { return Some(ordering) }
 								} else {
 									return None;
@@ -1207,7 +1254,7 @@ impl Val {
 			}
 			Val::Regex(regex) => {
 				if let Val::Str(other_str) = other {
-					if regex.is_match(other_str) {
+					if regex.is_match(&*other_str.borrow()) {
 						Some(Ordering::Equal)
 					} else {
 						None
@@ -1226,19 +1273,19 @@ impl Val {
 	}
 	pub fn try_iter(&self) -> Result<impl Iterator, VicErr> {
 		match self {
-			Self::Arr(arr) => Ok(arr.clone().into_iter()),
+			Self::Arr(arr) => Ok(arr.borrow().clone().into_iter()),
 			Self::Str(s) => {
-				let graphemes = s.graphemes(true).map(|g| Val::Str(g.to_string()).into()).collect::<VecDeque<_>>();
+				let graphemes = s.borrow().graphemes(true).map(|g| Val::Str(Rc::new(RefCell::new(g.to_string()))).into()).collect::<VecDeque<_>>();
 				Ok(graphemes.into_iter())
 			}
 			_ => Err(VicErr::Simple(format!("Value of type '{}' is not iterable", self.display_type())))
 		}
 	}
-	pub fn try_into_iter(self) -> Result<impl Iterator<Item=RcVal>, VicErr> {
+	pub fn try_into_iter(self) -> Result<impl Iterator<Item=Val>, VicErr> {
 		match self {
-			Self::Arr(arr) => Ok(arr.into_iter()),
+			Self::Arr(arr) => Ok(arr.borrow().clone().into_iter()),
 			Self::Str(s) => {
-				let graphemes = s.graphemes(true).map(|g| Val::Str(g.to_string()).into()).collect::<VecDeque<_>>();
+				let graphemes = s.borrow().graphemes(true).map(|g| Val::Str(Rc::new(RefCell::new(g.to_string()))).into()).collect::<VecDeque<_>>();
 				Ok(graphemes.into_iter())
 			}
 			_ => Err(VicErr::Simple(format!("Value of type '{}' is not iterable", self.display_type())))
@@ -1252,7 +1299,7 @@ impl Val {
 				for elem in elem_list {
 					elements.push_back(Self::Expr(Box::new(Expr::parse_expr(elem)?)).into());
 				}
-				Ok(Self::Arr(elements))
+				Ok(Self::Arr(Rc::new(RefCell::new(elements))))
 			}
 			Rule::null => Ok(Self::Null),
 			Rule::int => {
@@ -1268,12 +1315,11 @@ impl Val {
 					let val = Val::Expr(Box::new(Expr::parse_expr(inner.next().unwrap())?));
 					map.insert(name, val.into());
 				}
-				Ok(Self::Dict(map))
-
+				Ok(Self::Dict(Rc::new(RefCell::new(map))))
 			}
 			Rule::str_literal => {
 				let text = pair.into_inner().next().unwrap().as_str().to_string();
-				Ok(Self::Str(text))
+				Ok(Self::Str(Rc::new(RefCell::new(text))))
 			}
 			Rule::var => {
 				let var_name = pair.as_str().to_string();
@@ -1291,7 +1337,7 @@ impl Val {
 
 				let block = inner.next().unwrap();
 				let parsed = Expr::parse_block(block)?;
-				Ok(Self::Closure(closure_args, parsed))
+				Ok(Self::Closure(closure_args.into(), parsed.into()))
 			}
 			Rule::bool => {
 				let boolean = pair.as_str().parse::<bool>().unwrap();
@@ -1316,12 +1362,12 @@ impl Val {
 	pub fn add(&self, other: Val) -> Result<Self,VicErr> {
 		match (self, &other) {
 			(Self::Num(n1), Self::Num(n2)) => Ok(Self::Num(n1 + n2)),
-			(Self::Str(s1), s2) => Ok(Self::Str(s1.to_string() + &s2.to_string())),
-			(s1, Self::Str(s2)) => Ok(Self::Str(s1.to_string() + &s2.to_string())),
+			(Self::Str(s1), s2) => Ok(Self::Str(Rc::new(RefCell::new(s1.borrow().to_string() + &s2.to_string())))),
+			(s1, Self::Str(s2)) => Ok(Self::Str(Rc::new(RefCell::new(s2.borrow().to_string() + &s1.to_string())))),
 			(Self::Arr(arr), val) => {
-				let mut arr = arr.clone();
-				arr.push_back(val.clone().into());
-				Ok(Self::Arr(arr))
+				let mut arr_ref = arr.borrow_mut();
+				arr_ref.push_back(val.clone().into());
+				Ok(Self::Arr(arr.clone()))
 			}
 			_ => Err(VicErr::Simple(format!("Cannot add values of type '{}' and '{}'", self.display_type(), other.display_type())))
 		}
@@ -1336,8 +1382,8 @@ impl Val {
 		match (self, &other) {
 			(Self::Num(n1), Self::Num(n2)) => Ok(Self::Num(n1 * n2)),
 			(Self::Str(s1), Self::Num(n2)) => {
-				let repeated = s1.repeat(*n2 as usize);
-				Ok(Self::Str(repeated))
+				let repeated = s1.borrow().repeat(*n2 as usize);
+				Ok(Self::Str(Rc::new(RefCell::new(repeated))))
 			}
 			_ => Err(VicErr::Simple(format!("Cannot multiply values of type '{}' and '{}'", self.display_type(), other.display_type())))
 		}
@@ -1372,14 +1418,18 @@ impl Val {
 	}
 	pub fn display_type(&self) -> String {
 		match self {
+			Self::Ref(_) => {
+				let val = self.try_as_ref().unwrap();
+				val.display_type()
+			}
 			Self::Err(_, _) => "error".to_string(),
-			Self::BufferHandle => "buffer_handle".to_string(),
+			Self::BuiltinHandle(_) => "buffer_handle".to_string(),
 			Self::Dict(_) => "dictionary".to_string(),
 			Self::Str(_) => "string".to_string(),
 			Self::Num(_) => "number".to_string(),
 			Self::Register(_) => "register".to_string(),
 			Self::Var(_) => "variable".to_string(),
-			Self::MethodClosure(_,_) |
+			Self::BoundClosure(_,_) |
 			Self::Closure(_,_) => "closure".to_string(),
 			Self::Arr(_) => "array".to_string(),
 			Self::Bool(_) => "boolean".to_string(),
@@ -1392,28 +1442,32 @@ impl Val {
 	}
 	pub fn is_truthy(&self, vicut: &mut ViCut) -> bool {
 		match self {
+			Self::Ref(_) => {
+				// If the value is a reference, we need to dereference it
+				self.try_as_ref().unwrap().is_truthy(vicut)
+			}
 			Self::Err(_,_) => false,
-			Self::BufferHandle => {
+			Self::BuiltinHandle(_) => {
 				// This is a special case, we consider the buffer handle to be truthy
 				// if it exists, which it always does.
 				true
 			}
-			Self::Dict(dict) => !dict.is_empty(),
-			Self::Str(s) => !s.is_empty(),
+			Self::Dict(dict) => !dict.borrow().is_empty(),
+			Self::Str(s) => !s.borrow().is_empty(),
 			Self::Num(n) => *n != 0,
 			Self::Expr(e) => {
-				vicut.eval_expr(false, e).is_ok_and(|eval| eval.borrow().is_truthy(vicut))
+				vicut.eval_expr(false, e).is_ok_and(|eval| eval.is_truthy(vicut))
 			}
 			Self::Register(ch) => {
 				read_register(Some(*ch)).is_some_and(|content| !content.is_empty())
 			}
 			Self::Var(v) => {
 				let Some(var) = vicut.read_var(v).clone() else { return false };
-				var.borrow().is_truthy(vicut)
+				var.is_truthy(vicut)
 			}
-			Self::MethodClosure(_,_) => todo!(),
+			Self::BoundClosure(_,_) => todo!(),
 			Self::Closure(args, body) => todo!(),
-			Self::Arr(arr) => !arr.is_empty(),
+			Self::Arr(arr) => !arr.borrow().is_empty(),
 			Self::Bool(b) => *b,
 			Self::Break |
 			Self::Continue |
@@ -1450,25 +1504,30 @@ impl PartialEq for Val {
 impl Display for Val {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
+			Self::Ref(_) => {
+				let val = self.try_as_ref().unwrap();
+				write!(f, "{val}")
+			}
 			Self::Err(span, msg) => {
 				let msg = msg.borrow().to_string();
 				let pest_err = expr_error(msg, span.clone());
 				write!(f, "{pest_err}")
 			}
-			Self::BufferHandle => {
+			Self::BuiltinHandle(_) => {
 				write!(f, "{{ buffer handle }}")
 			}
 			Self::Arr(arr) => {
-				let inner = arr.iter()
-					.map(|val| val.borrow().to_string())
+				let inner = arr.borrow().iter()
+					.map(|val| val.to_string())
 					.collect::<Vec<_>>()
 					.join(", ");
 				write!(f, "[{inner}]")
 			}
 			Self::Dict(dict) => {
 				let mut key_values = vec![];
-				for (key,value) in dict {
-					key_values.push(format!("{key}: {}",value.borrow()))
+				let dict_ref = dict.borrow();
+				for (key,value) in &*dict_ref {
+					key_values.push(format!("{key}: {}",value))
 				}
 				let joined = key_values.join(", ");
 				write!(f, "{{{joined}}}")
@@ -1478,11 +1537,11 @@ impl Display for Val {
 			}
 			Self::Register(ch) => write!(f, "@{ch}"),
 			Self::Var(v) => write!(f, "{v}"),
-			Self::MethodClosure(_, _) |
+			Self::BoundClosure(_, _) |
 			Self::Closure(_, _) => {
 				write!(f, "{{ closure }}")
 			}
-			Self::Str(s) => write!(f, "{s}"),
+			Self::Str(s) => write!(f, "{}",s.borrow()),
 			Self::Num(n) => write!(f, "{n}"),
 			Self::Bool(b) => write!(f, "{b}"),
 			Self::Regex(r) => write!(f, "{r}"),

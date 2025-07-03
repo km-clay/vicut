@@ -1,7 +1,7 @@
 //! This module contains logic for emulation of Vim's registers feature.
 //!
 //! It contains the `Registers` struct, which is held in a thread local, global variable.
-use std::{cell::RefCell, fmt::Display};
+use std::{cell::RefCell, fmt::Display, str::FromStr};
 
 thread_local! {
 	/// The global state for all registers.
@@ -170,6 +170,12 @@ pub enum RegisterContent {
 	Block(Vec<String>),
 	#[default]
 	Empty
+}
+
+impl From<String> for RegisterContent {
+	fn from(value: String) -> Self {
+		Self::Span(value)
+	}
 }
 
 impl RegisterContent {

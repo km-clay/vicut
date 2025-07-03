@@ -349,9 +349,9 @@ pub enum Motion {
 	PatternSearch(String),
 	PatternSearchRev(String),
 	/// The first field should *always* be `Line(_)` or `LineRange(_,_)`
-	Global(Box<Motion>,RcVal),
+	Global(Box<Motion>,Val),
 	/// The first field should *always* be `Line(_)` or `LineRange(_,_)`
-	NotGlobal(Box<Motion>,RcVal),
+	NotGlobal(Box<Motion>,Val),
 	NextMatch,
 	PrevMatch,
 	BackwardChar,

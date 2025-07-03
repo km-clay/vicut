@@ -51,28 +51,28 @@ opts = { "opt" ~ "{" ~ (((not* ~ opt) ~ ",")* ~ (not* ~ opt)?)? ~ "}" }
 // Script Commands
 // Whitespace positioning needs to be enforced strictly here
 
-global        = ${ ("global" | "g") ~ " "+ ~ expr ~ WHITESPACE* ~ block ~ WHITESPACE* }
-not_global    = ${ ("v" | "not_global" | "!global") ~ " "+ ~ expr ~ WHITESPACE* ~ block ~ WHITESPACE* }
-move          = ${ ("move" | "m") ~ " "+ ~ expr ~ WHITESPACE* }
-cut           = ${ ("cut" | "c") ~ " "+ ~ expr ~ WHITESPACE* }
+global        = ${ not? ~ ("global") ~ " "+ ~ expr ~ WHITESPACE* ~ block ~ WHITESPACE* }
+move          = ${ ("move") ~ " "+ ~ expr ~ WHITESPACE* }
+cut           = ${ ("cut") ~ " "+ ~ expr ~ WHITESPACE* }
 next          = ${ "next" ~ WHITESPACE+ }
-catch         =  { "catch" ~ expr ~ block }
+catch         =  { "catch" ~ expr ~ ("as" ~ var)? ~ block }
 repeat        = ${ ("repeat") ~ " "+ ~ expr ~ " "+ ~ block }
 break_loop    = ${ ("break") ~ WHITESPACE* }
 new           = ${ "new" ~ WHITESPACE+ ~ expr ~ WHITESPACE* }
+ref           = ${ "ref" ~ WHITESPACE+ ~ expr ~ WHITESPACE* }
 continue_loop = ${ ("continue") ~ WHITESPACE* }
 error         =  { "error!" ~ expr }
-return        = ${ ("return" | "ret") ~ " "+ ~ expr }
+return        = ${ "return" ~ " "+ ~ expr }
 include       = ${ ("include") ~ " "+ ~ expr ~ WHITESPACE* }
 
 command = {
     global
-  | not_global
   | error
   | catch
   | move
   | cut
   | new
+  | ref
   | next
   | repeat
   | break_loop
@@ -97,7 +97,7 @@ if_block           = { "if" ~ expr_bool_priority ~ block ~ elif_block* ~ else_bl
 elif_block         = { "elif" ~ expr_bool_priority ~ block }
 else_block         = { "else" ~ block }
 default_block      = { "default" ~ block }
-expr_bool_priority = { bool_expr | bool | expr }
+expr_bool_priority = { bool_node | bool_expr | bool | expr }
 
 // Expressions
 // We will just allow indexes on these
@@ -114,12 +114,14 @@ modulo   = { "%" }
 pow      = { "**" }
 negative = { "-" }
 
-bool_expr           = { bool_atom ~ (bool_op ~ bool_atom)+ | (not+ ~ bool_atom) }
+bool_expr           = { bool_atom ~ (bool_op ~ bool_atom)+ | (not+ ~ bool_atom) | "(" ~ bool_expr_single_ok ~ ")" }
 bool_expr_single_ok = { not* ~ bool_atom ~ (bool_op ~ bool_atom)* }
 bool_atom           = { not* ~ (bool_lit | ("(" ~ bool_expr_single_ok ~ ")")) }
 bool_lit            = { (expr_not_recursive | ("(" ~ bin_expr ~ ")")) }
+bool_node           = { (bool_expr | bool_atom) ~ log_op ~ (bool_node | bool_expr | bool_atom) }
 
-bool_op = { eq | ne | lt | le | ge | gt | and | or }
+log_op  = { and | or }
+bool_op = { eq | ne | lt | le | ge | gt }
 eq      = { "==" }
 ne      = { "!=" }
 lt      = { "<" }
@@ -133,14 +135,13 @@ not     = { "!" }
 // I'm not sure why I need to nest these rules like this
 // but it didn't work right until I did
 expr               = !{
-    (with_block | (bin_expr | func_call | (bool_expr | (command | value)))) ~ accessor*
+    ("(" ~ expr ~ ")" | (block_struct | (bin_expr | ((bool_node | bool_expr) | (command | value))))) ~ accessor*
 }
 expr_not_recursive = !{
-    (command | func_call | value) ~ accessor*
+    (block_struct | command | value) ~ accessor*
 }
 
-accessor      = { field | index | err_prop }
-accessor_call = { (field | index | err_prop) ~ func_call_args }
+accessor = { field | index | err_prop | call }
 
 err_prop = { "?" }
 
@@ -177,14 +178,9 @@ var_list = { (var ~ ",")* ~ var? }
 closure_def_args = { "|" ~ var_list ~ "|" }
 
 func_def_args = { "(" ~ var_list ~ ")" }
+call          = { "(" ~ expr_list ~ ")" }
 func_name     = { var ~ func_def_args }
 func_def      = { "def" ~ func_name ~ block }
-
-func_call_args =  { "(" ~ expr_list ~ ")" }
-func_call      =  { func_call_name ~ func_call_args ~ (accessor_call | accessor)* }
-func_call_name = !{
-    value ~ accessor*
-}
 
 // Primitives
 
@@ -229,6 +225,15 @@ value = {
   | regex
 }
 
+block_struct = {
+    with_block
+  | switch_block
+  | for_block
+  | if_block
+  | while_block
+  | until_block
+}
+
 literal = {
     array
   | dict
@@ -250,16 +255,9 @@ top_level_cmd = {
   | var_div
   | var_pow
   | var_mod
-  | with_block
-  | switch_block
-  | for_block
-  | if_block
-  | while_block
-  | until_block
   | command
   | class_def
   | func_def
-  | func_call
   | expr
 }
 
