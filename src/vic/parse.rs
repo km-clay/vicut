@@ -1,5 +1,6 @@
 use std::{boxed, cell::RefCell, cmp::Ordering, collections::{HashMap, VecDeque}, fmt::{Debug, Display}, ops::Deref, rc::Rc, sync::Arc};
 
+use log::debug;
 use pest::{iterators::{Pair, Pairs}, Parser};
 use pest_derive::Parser;
 use regex::Regex;
@@ -160,6 +161,9 @@ impl Expr {
 	pub fn value(&self) -> &ExprKind {
 		&self.value
 	}
+	pub fn value_mut(&mut self) -> &mut ExprKind {
+		&mut self.value
+	}
 	pub fn into_value(self) -> ExprKind {
 		self.value
 	}
@@ -197,12 +201,34 @@ impl Expr {
 		match inner.as_rule() {
 			Rule::with_block => Self::parse_with_block(inner),
 			Rule::if_block => Self::parse_if_block(inner),
-			Rule::while_block => Self::parse_loop_block(inner, true),
-			Rule::until_block => Self::parse_loop_block(inner, false),
+			Rule::loop_block => Self::parse_loop_block(inner),
+			Rule::do_while_block => Self::parse_postfix_loop_block(inner, true),
+			Rule::do_until_block => Self::parse_postfix_loop_block(inner, false),
+			Rule::while_block => Self::parse_prefix_loop_block(inner, true),
+			Rule::until_block => Self::parse_prefix_loop_block(inner, false),
 			Rule::switch_block => Self::parse_switch_block(inner),
 			Rule::for_block => Self::parse_for_block(inner),
 			_ => unreachable!()
 		}
+	}
+	fn parse_loop_block(cmd: ArcPair) -> Result<Self,VicErr> {
+		let span = cmd.as_span();
+		let mut inner = cmd.into_inner();
+		let body = Self::parse_block(inner.next().unwrap())?;
+		let value = ExprKind::LoopBlock { body };
+		Ok(Self { value, accessors: vec![], span })
+	}
+	fn parse_postfix_loop_block(cmd: ArcPair, polarity: bool) -> Result<Self,VicErr> {
+		let span = cmd.as_span();
+		let mut inner = cmd.into_inner();
+		let body = Self::parse_block(inner.next().unwrap())?;
+		let cond = Self::parse_expr(inner.next().unwrap())?;
+		let value = if polarity {
+			ExprKind::DoWhileBlock { body, cond: Box::new(cond) }
+		} else {
+			ExprKind::DoUntilBlock { body, cond: Box::new(cond) }
+		};
+		Ok(Self { value, accessors: vec![], span })
 	}
 	fn parse_with_block(cmd: ArcPair) -> Result<Self,VicErr> {
 		let span = cmd.as_span();
@@ -328,7 +354,7 @@ impl Expr {
 		let body = Self::parse_block(inner.next().unwrap())?;
 		let value = ExprKind::FuncDef { name, params, body };
 		Ok(Self { value, accessors: vec![], span })
-	}	
+	}
 	fn parse_for_block(cmd: ArcPair) -> Result<Self,VicErr> {
 		let span = cmd.as_span();
 		let mut inner = cmd.into_inner();
@@ -383,7 +409,7 @@ impl Expr {
 			span
 		})
 	}
-	fn parse_loop_block(cmd: ArcPair, polarity: bool) -> Result<Self,VicErr> {
+	fn parse_prefix_loop_block(cmd: ArcPair, polarity: bool) -> Result<Self,VicErr> {
 		let span = cmd.as_span();
 		let mut inner = cmd.into_inner();
 		let cond = Self::parse_expr(inner.next().unwrap())?;
@@ -580,7 +606,7 @@ impl Expr {
 			}
 
 			ops.push(op);
-		}	
+		}
 		rpn_stack.extend(ops.into_iter().map(RpnItem::BoolOp));
 		let expr = Expr {
 			value: ExprKind::BoolExpr(rpn_stack),
@@ -601,7 +627,7 @@ impl Expr {
 
 		let first = inner.next().unwrap();
 		rpn_stack.push(RpnItem::Val(Self::parse_expr(first)?));
-		
+
 		while let Some(op) = inner.next() {
 			let op = op.into_inner().next().unwrap();
 			let next = inner.next().unwrap();
@@ -620,7 +646,7 @@ impl Expr {
 		}
 
 		rpn_stack.extend(ops.into_iter().map(RpnItem::BinOp));
-		
+
 		let expr = Expr {
 			value: ExprKind::BinExpr(rpn_stack),
 			accessors: vec![],
@@ -864,7 +890,10 @@ pub enum ExprKind {
 	CaseBlock { cond: Vec<Val>, body: Vec<Expr> },
 	SwitchBlock { scrutinee: Box<Expr>, case_blocks: Vec<Expr>, default_block: Option<Vec<Expr>> },
 	IfBlock { cond_blocks: Vec<Expr>, else_block: Option<Vec<Expr>>, },
+	LoopBlock { body: Vec<Expr> },
 	ForBlock { var_name: String, list: Box<Expr>, body: Vec<Expr> },
+	DoWhileBlock { cond: Box<Expr>, body: Vec<Expr> },
+	DoUntilBlock { cond: Box<Expr>, body: Vec<Expr> },
 	WhileBlock { cond: Box<Expr>, body: Vec<Expr> },
 	UntilBlock { cond: Box<Expr>, body: Vec<Expr> },
 	WithBlock { buffer: Box<Expr>, body: Vec<Expr> },
@@ -1031,13 +1060,55 @@ impl BoolOp {
 
 pub type RcVal = Rc<RefCell<Val>>;
 
+/// A runtime-checked reference to a value in the interpreter
+///
+/// `ValRef` represents a reference to a `Val` within the interpreter, using a raw pointer.
+/// To ensure the reference does not outlive the scope of the value it refers to,
+/// the `min_depth` field tracks the deepest scope in which the reference is valid.
+/// If the reference is accessed in a scope with depth less than `min_depth`,
+/// a runtime error is thrown to prevent use-after-free behavior.
+///
+/// # Safety
+/// The `ptr` field is a raw pointer and must only point to values that are guaranteed
+/// to live until at least `min_depth`. The interpreter's scope stack is already managed
+/// automatically by the use of the `ScopeGuard` struct, which pops the current scope when it is dropped.
+/// This means that `ValRef` can be safely used as long as the interpreter's scope management is respected.
+#[derive(Default, Debug, Clone)]
+pub struct ValRef {
+    pub ptr: *mut Val, // oooo spooooooky
+    pub min_depth: usize,
+}
+
+impl ValRef {
+	pub fn as_borrow(&self) -> &Val {
+		unsafe { &*self.ptr }
+	}
+	pub fn as_mut_borrow(&mut self) -> &mut Val {
+		unsafe { &mut *self.ptr }
+	}
+	pub fn peel_refs(&self) -> &Val {
+		let mut current = self.as_borrow();
+		while let Val::Ref(val_ref) = current {
+			current = val_ref.as_borrow();
+		}
+		current
+	}
+	pub fn peel_refs_mut(&mut self) -> &mut Val {
+		let mut current = self.as_mut_borrow();
+		while let Val::Ref(val_ref) = current {
+			current = val_ref.as_mut_borrow();
+		}
+		current
+	}
+}
+
 // Evaluated expressions
 #[derive(Default, Debug, Clone)]
 pub enum Val {
 	#[default]
 	Null,
 	Err(ArcSpan,Box<RcVal>),
-	Ref(Box<*mut Val>), // oooo spooooooky
+	Ref(ValRef),
 	Str(Rc<RefCell<String>>),
 	Var(String),
 	Arr(Rc<RefCell<VecDeque<Val>>>),
@@ -1092,36 +1163,16 @@ impl Val {
 		}).map(Self::Num)
 	}
 	/// Unwrap implementation for `Val` with a default value
-	pub fn unwrap_or_else<F: FnOnce() -> Self>(self, default: F) -> Self { 
+	pub fn unwrap_or_else<F: FnOnce() -> Self>(self, default: F) -> Self {
 		if let Self::Null = self { return default() }
 		self
 	}
-	pub fn into_ref(self) -> Self {
-		match self {
-			Self::Ref(_) => self,
-			_ => Self::Ref(Box::new(Box::into_raw(Box::new(self))))
-		}
+	pub fn into_ref(&mut self, min_depth: usize) -> Self {
+		let ptr = self as *mut Val;
+		Self::Ref(ValRef { ptr, min_depth })
 	}
-	pub fn try_as_ref(&self) -> Option<&Val> {
-		match self {
-			Val::Ref(val) => {
-				let unboxed = *val.clone();
-				let val_ref = unsafe { &*unboxed };
-				Some(val_ref)
-			}
-			_ => None
-		}
-	}
-	#[allow(clippy::mut_from_ref)]
-	pub fn try_as_mut(&self) -> Option<&mut Val> {
-		match self {
-			Val::Ref(val) => {
-				let unboxed = *val.clone();
-				let val_ref = unsafe { &mut *unboxed };
-				Some(val_ref)
-			}
-			_ => None
-		}
+	pub fn into_ref_from_ptr(ptr: *mut Val, min_depth: usize) -> Self {
+		Self::Ref(ValRef { ptr, min_depth })
 	}
 	pub fn deep_clone(&self) -> Self {
 		match self {
@@ -1151,7 +1202,7 @@ impl Val {
 			Val::BuiltinHandle(handle) => unreachable!(),
 			Val::Err(_, _) => None,
 			Val::Ref(val) => {
-				let unboxed = *val.clone();
+				let unboxed = val.ptr;
 				let val_ref = unsafe { &*unboxed };
 				val_ref.cmp(other,vicut)
 			}
@@ -1162,6 +1213,7 @@ impl Val {
 			}
 			Val::Str(str1) => {
 				if let Val::Str(str2) = other {
+					debug!("Comparing strings: '{}' and '{}'", str1.borrow(), str2.borrow());
 					Some(str1.cmp(str2))
 				} else if let Val::Regex(regex) = other {
 					if regex.is_match(&*str1.borrow()) {
@@ -1418,10 +1470,7 @@ impl Val {
 	}
 	pub fn display_type(&self) -> String {
 		match self {
-			Self::Ref(_) => {
-				let val = self.try_as_ref().unwrap();
-				val.display_type()
-			}
+			Self::Ref(val) => format!("ref<{}>", val.peel_refs().display_type()),
 			Self::Err(_, _) => "error".to_string(),
 			Self::BuiltinHandle(_) => "buffer_handle".to_string(),
 			Self::Dict(_) => "dictionary".to_string(),
@@ -1442,9 +1491,9 @@ impl Val {
 	}
 	pub fn is_truthy(&self, vicut: &mut ViCut) -> bool {
 		match self {
-			Self::Ref(_) => {
+			Self::Ref(val) => {
 				// If the value is a reference, we need to dereference it
-				self.try_as_ref().unwrap().is_truthy(vicut)
+				val.peel_refs().is_truthy(vicut)
 			}
 			Self::Err(_,_) => false,
 			Self::BuiltinHandle(_) => {
@@ -1504,8 +1553,8 @@ impl PartialEq for Val {
 impl Display for Val {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
-			Self::Ref(_) => {
-				let val = self.try_as_ref().unwrap();
+			Self::Ref(val) => {
+				let val = val.peel_refs();
 				write!(f, "{val}")
 			}
 			Self::Err(span, msg) => {
@@ -1527,7 +1576,7 @@ impl Display for Val {
 				let mut key_values = vec![];
 				let dict_ref = dict.borrow();
 				for (key,value) in &*dict_ref {
-					key_values.push(format!("{key}: {}",value))
+					key_values.push(format!("{key}: {value}"))
 				}
 				let joined = key_values.join(", ");
 				write!(f, "{{{joined}}}")
@@ -1541,7 +1590,7 @@ impl Display for Val {
 			Self::Closure(_, _) => {
 				write!(f, "{{ closure }}")
 			}
-			Self::Str(s) => write!(f, "{}",s.borrow()),
+			Self::Str(s) => write!(f, "{}",unsafe{&*s.as_ptr()}),
 			Self::Num(n) => write!(f, "{n}"),
 			Self::Bool(b) => write!(f, "{b}"),
 			Self::Regex(r) => write!(f, "{r}"),

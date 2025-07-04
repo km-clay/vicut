@@ -24,7 +24,7 @@ use crate::reader::{KeyReader, RawReader};
 use crate::register::{append_register, read_register, write_register, RegisterContent};
 use crate::vic::error::{VicErr, VicErrResult};
 use crate::vic::libvic::{Builtin, Func, Var};
-use crate::vic::parse::{Accessor, ArcSpan, BinOp, BoolOp, Command, Expr, ExprKind, Index, LogOp, RcVal, RpnItem, Val};
+use crate::vic::parse::{Accessor, ArcSpan, BinOp, BoolOp, Command, Expr, ExprKind, Index, LogOp, RcVal, RpnItem, Val, ValRef};
 use crate::vicmd::{Bound, LineAddr, Word};
 use crate::{complain_and_exit, validate_filename, ExecCtx, Opts};
 
@@ -39,7 +39,7 @@ use super::modes::{CmdReplay, ModeReport, insert::ViInsert, ViMode, normal::ViNo
 /// This guarantee is leveraged by Rust's `Drop` trait.
 /// When the `ScopeGuard` is dropped, it will call `ascend` on the `ViCut` instance,
 ///
-/// Note: This struct holds a **raw pointer** to the `ViCut` instance (`*mut ViCut`). 
+/// Note: This struct holds a **raw pointer** to the `ViCut` instance (`*mut ViCut`).
 /// This is safe **only under the assumption** that:
 /// - The `ScopeGuard` is created and dropped entirely within the lifetime of a `&mut ViCut`
 /// - The `ViCut` instance is not moved or deallocated while the guard is alive
@@ -54,13 +54,19 @@ pub struct ScopeGuard {
 }
 
 impl ScopeGuard {
-	pub fn new(vicut: &mut ViCut) -> Self {
+	pub fn new(vicut: &mut ViCut, scope_kind: ScopeKind) -> Self {
 		// You don't need to do `*mut vicut`, just cast
 		let ptr = vicut as *mut ViCut;
 		unsafe {
-			(*ptr).descend();
+			(*ptr).descend(scope_kind);
 		}
 		Self { vicut: ptr }
+	}
+	pub fn block(vicut: &mut ViCut) -> Self {
+		Self::new(vicut, ScopeKind::Block)
+	}
+	pub fn func(vicut: &mut ViCut) -> Self {
+		Self::new(vicut, ScopeKind::Func)
 	}
 }
 
@@ -73,8 +79,50 @@ impl Drop for ScopeGuard {
 	}
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopeKind {
+	Func,
+	Block,
+	Global,
+	Builtin
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Scope {
+	pub kind: ScopeKind,
+	pub vars: HashMap<String, Val>,
+}
+
+impl Scope {
+	pub fn func() -> Self {
+		Self {
+			kind: ScopeKind::Func,
+			vars: HashMap::new(),
+		}
+	}
+	pub fn block() -> Self {
+		Self {
+			kind: ScopeKind::Block,
+			vars: HashMap::new(),
+		}
+	}
+	pub fn global() -> Self {
+		Self {
+			kind: ScopeKind::Global,
+			vars: HashMap::new(),
+		}
+	}
+	pub fn builtin(vars: HashMap<String,Val>) -> Self {
+		Self {
+			kind: ScopeKind::Builtin,
+			vars
+		}
+	}
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Call {
-	Method { 
+	Method {
 		self_val: Val,
 		args: Rc<[Expr]>,
 		func: Val,
@@ -97,7 +145,7 @@ pub struct ViCut {
 	/// It starts with two hashmaps: one contains built-in variables
 	/// and the other is the global scope accessible to the user
 	/// This stack should never dip below length 2.
-	pub variables: Vec<HashMap<String, Val>>,
+	pub scopes: Vec<Scope>,
 
 	/// We also scope the runtime options
 	/// This allows for scoped 'opts' blocks, e.g.
@@ -125,6 +173,7 @@ impl ViCut {
 		let ExprKind::Vic(cmds) = Expr::parse_vic(Arc::new(vic_src))?.into_value() else { unreachable!() };
 		// i am hacker man
 		let builtins = Self::init_builtins();
+		let globals = Scope::builtin(builtins);
 
 		let mut new = Self {
 			reader: RawReader::new(),
@@ -141,7 +190,7 @@ impl ViCut {
 																						 // The second is the "global" scope, which is where user-defined variables and functions go
 																						 // User definitions can shadow built-ins this way.
 																						 // Never allow these vectors to dip below length 2.
-			variables: vec![builtins, HashMap::new()],
+			scopes: vec![globals, Scope::block()],
 			opts: vec![opts],
 			exec_ctx: ExecCtx::default(),
 			cmds,
@@ -151,6 +200,9 @@ impl ViCut {
 	}
 	pub fn empty() -> Self {
 		Self::new(Opts::default(),String::new(),0).unwrap()
+	}
+	pub fn depth(&self) -> usize {
+		self.scopes.len()
 	}
 	pub fn opts(&self) -> &Opts {
 		self.opts.last().expect("There is always at least one opts frame")
@@ -198,7 +250,7 @@ impl ViCut {
 	pub fn buffers_mut(&mut self) -> &mut Vec<LineBuf> {
 		&mut self.buffers
 	}
-	
+
 	pub fn buffers(&self) -> &[LineBuf] {
 		&self.buffers
 	}
@@ -586,14 +638,19 @@ impl ViCut {
 		std::mem::swap(&mut self.mode, &mut mode);
 		Ok(())
 	}
-	pub fn descend(&mut self) {
-		self.variables.push(HashMap::new());
+	pub fn descend(&mut self, scope_kind: ScopeKind) {
+		let scope = match scope_kind {
+			ScopeKind::Func => Scope::func(),
+			ScopeKind::Block => Scope::block(),
+			_ => unreachable!() // Global and Builtin scopes are never created here
+		};
+		self.scopes.push(scope);
 		self.opts.push(Opts::default());
 	}
 	pub fn ascend(&mut self) {
 		// Never pop the built-in/global scopes
-		if self.variables.len() > 2 {
-			self.variables.pop();
+		if self.scopes.len() > 2 {
+			self.scopes.pop();
 		}
 		if self.opts.len() > 1 {
 			self.opts.pop();
@@ -608,12 +665,39 @@ impl ViCut {
 			_ => false
 		}
 	}
+	pub fn visible_scopes(&self) -> Vec<&Scope> {
+		let mut visible: Vec<&Scope> = self.scopes.iter().take(2).collect();
+
+		// Find the index of the most recent function scope (from the end)
+		if let Some(func_idx) = self.scopes.iter().rposition(|s| s.kind == ScopeKind::Func) {
+			visible.extend(self.scopes[func_idx..].iter());
+		}
+
+		visible
+	}
+	pub fn visible_scopes_mut(&mut self) -> Vec<&mut Scope> {
+		let mut visible = vec![];
+		let mut hit_func = false;
+		for scope in self.scopes.iter_mut().rev() {
+			let kind = scope.kind.clone();
+			if !hit_func || scope.kind == ScopeKind::Global || scope.kind == ScopeKind::Builtin {
+				visible.push(scope);
+			}
+			if kind == ScopeKind::Func {
+				hit_func = true;
+			}
+		}
+		visible.reverse();
+		visible
+	}
 	pub fn read_var(&self, name: &str) -> Option<Val> {
 		// Search the stack frames for the variable
 		// We do this in reverse order, so that we get the most local variable
-		for frame in self.variables.iter().rev() {
-			if frame.contains_key(name) {
-				return frame.get(name).cloned()
+		let scopes = self.visible_scopes();
+		let scopes = scopes.iter().rev();
+		for frame in scopes {
+			if frame.vars.contains_key(name) {
+				return frame.vars.get(name).cloned()
 			}
 		}
 		None
@@ -622,9 +706,11 @@ impl ViCut {
 		// Search the stack frames for the variable
 		// We do this in reverse order, so that we get the most local variable
 		let mut ret = None;
-		for frame in self.variables.iter().rev() {
-			if frame.contains_key(name) {
-				ret = frame.get(name).cloned()
+		let scopes = self.visible_scopes();
+		let scopes = scopes.iter().rev();
+		for frame in scopes {
+			if frame.vars.contains_key(name) {
+				ret = frame.vars.get(name).cloned()
 			}
 		}
 		if let Some(Val::BuiltinHandle(Builtin::Var(var))) = ret {
@@ -633,28 +719,39 @@ impl ViCut {
 			ret
 		}
 	}
+	pub fn get_var_depth(&mut self, name: &str) -> Option<usize> {
+		// Search the stack frames for the variable
+		// We do this in reverse order, so that we get the most local variable
+		for (i, frame) in self.scopes.iter().rev().enumerate() {
+			if frame.vars.contains_key(name) {
+				return Some(self.scopes.len() - 1 - i)
+			}
+		}
+		None
+	}
 	pub fn get_var_mut(&mut self, name: &str,) -> Option<&mut Val> {
 		// Search the stack frames for the variable
 		// We do this in reverse order, so that we get the most local variable
-		for frame in self.variables.iter_mut().rev() {
-			if frame.contains_key(name) {
-				return frame.get_mut(name)
+		let scopes = self.visible_scopes_mut();
+		for frame in scopes {
+			if frame.vars.contains_key(name) {
+				return frame.vars.get_mut(name)
 			}
 		}
 		None
 	}
 	pub fn set_var(&mut self, name: String, value: Val) -> Result<(),VicErr> {
-		let Some(frame) = self.variables.last_mut() else {
+		let Some(frame) = self.scopes.last_mut() else {
 			panic!("There is supposed to be a stack frame here")
 		};
-		frame.insert(name, value);
+		frame.vars.insert(name, value);
 		Ok(())
 	}
 	pub fn clear_var(&mut self, name: &str) {
-		let Some(frame) = self.variables.last_mut() else {
+		let Some(frame) = self.scopes.last_mut() else {
 			panic!("There is supposed to be a stack frame here")
 		};
-		frame.remove(name);
+		frame.vars.remove(name);
 	}
 	pub fn run_shell_cmd(&mut self, cmd: &Expr) -> Result<Val,VicErr> {
 		let cmd = self.eval_expr(false, cmd).try_blame(cmd.span())?.to_string();
@@ -695,11 +792,15 @@ impl ViCut {
 								continue
 							}
 							't' => {
-								expanded.push('\t'); 
+								expanded.push('\t');
 								continue
 							}
 							'r' => {
 								expanded.push('\r');
+								continue
+							}
+							'\\' => {
+								expanded.push('\\');
 								continue
 							}
 							_ => {
@@ -882,8 +983,8 @@ impl ViCut {
 		});
 	}
 	pub fn debug_vars<F: FnMut(usize, &HashMap<String, String>)>(&self, mut f: F) {
-		for (i, frame) in self.variables.iter().enumerate() {
-			let map = frame.iter()
+		for (i, frame) in self.scopes.iter().enumerate() {
+			let map = frame.vars.iter()
 				.map(|(k, v)| (k.to_string(), v.to_string()))
 				.collect::<HashMap<_, _>>();
 			f(i, &map);
@@ -978,7 +1079,7 @@ impl ViCut {
 		Ok(output)
 	}
 	pub fn eval_prelude(&mut self) -> Result<(),VicErr> {
-		// We want to evaluate options and imports as basically 
+		// We want to evaluate options and imports as basically
 		// the first thing we do after constructing a ViCut instance
 		// So let's go ahead and do that
 
@@ -999,8 +1100,11 @@ impl ViCut {
 	pub fn eval_expr(&mut self, is_top_level: bool, cmd_expr: &Expr) -> Result<Val,VicErr> {
 		let Expr { value, accessors, span } = cmd_expr;
 		let eval = match value {
+			ExprKind::LoopBlock {..} => self.eval_loop_block(value)?,
 			ExprKind::WhileBlock {..}  |
-			ExprKind::UntilBlock {..}  => self.eval_loop_block(value)?,
+			ExprKind::UntilBlock {..}  => self.eval_prefix_loop_block(value)?,
+			ExprKind::DoWhileBlock {..} |
+			ExprKind::DoUntilBlock {..} => self.eval_postfix_loop_block(value)?,
 			ExprKind::WithBlock {..}   => self.eval_with_block(value)?,
 			ExprKind::SwitchBlock {..} => self.eval_switch_block(value)?,
 			ExprKind::IfBlock {..}     => self.eval_if_block(value)?,
@@ -1127,7 +1231,7 @@ impl ViCut {
 		// the compiler really hates grabbing mut borrows
 		// from nested stuff like "dict.field[0]"
 		// so we have to use Evil Rust to cleanly mutate vars
-		let ptr = self.access_val_ptr(name)?;
+		let (ptr,_) = self.access_val_ptr(name)?;
 		let new_val = self.eval_expr(false, value)
 			.try_blame(value.span())?;
 
@@ -1189,8 +1293,8 @@ impl ViCut {
 				Ok(value.deep_clone())
 			}
 			Command::Ref(expr) => {
-				let value = self.access_val_ptr(expr)?;
-				Ok(Val::Ref(Box::new(value))) 
+				let (ptr,min_depth) = self.access_val_ptr(expr)?;
+				Ok(Val::into_ref_from_ptr(ptr, min_depth))
 			}
 			Command::Error(arc_span, expr) => {
 				let err_val = self.eval_expr(is_top_level, expr)
@@ -1202,9 +1306,75 @@ impl ViCut {
 					self.eval_expr(is_top_level, expr)
 						.try_blame(expr.span())?
 				} else { Val::Null };
+
+				// Validate references in the return value before we return
+				self.validate_references(&ret, Some(span.clone()))?;
+
 				Err(VicErr::Return(span, ret))
 			}
 		}
+	}
+	fn validate_references(&mut self, val: &Val, span: Option<ArcSpan>) -> Result<(), VicErr> {
+		// We need to ensure that all references are valid
+		// This means that the min_depth of the reference must be less than or equal to the current depth
+		match val {
+			Val::Arr(arr) => {
+				// We have an array, so we need to check each element
+				for elem in arr.borrow().iter() {
+					self.validate_references(elem,span.clone())?;
+				}
+			}
+			Val::Dict(dict) => {
+				// We have a dictionary, so we need to check each value
+				for (_, val) in dict.borrow().iter() {
+					self.validate_references(val,span.clone())?;
+				}
+			}
+			Val::Ref(val_ref) => {
+				/*
+				 * We've reached a reference value. To ensure safety, we must verify that all
+				 * values in the reference chain are still in scope.
+				 *
+				 * References can be nested (e.g., a reference to another reference), and each
+				 * carries a `min_depth` — the depth at which the referenced value was defined.
+				 *
+				 * To ensure validity, we walk through all layers of indirection and find the
+				 * lowest (earliest) `min_depth` in the chain. If our current depth is higher
+				 * than that — i.e., `depth() - 1 <= min_depth` — then at least one value being
+				 * referenced has gone out of scope, and using this reference would result in
+				 * a dangling pointer.
+				 *
+				 * We throw a runtime error in this case to avoid undefined behavior.
+				 */
+				let mut ref_val = val_ref.as_borrow();
+				let mut min_depth = val_ref.min_depth;
+				while let Val::Ref(inner_ref) = ref_val {
+					// We have a reference, so we need to check its min_depth
+					let new_min = {
+						let ValRef { min_depth, .. } = inner_ref;
+						*min_depth
+					};
+					ref_val = inner_ref.as_borrow();
+					if new_min < min_depth {
+						min_depth = new_min;
+					}
+				}
+				// If this returns to self.depth() - 1, then whatever this reference points to
+				// will fall out of scope, leading to a dangling pointer
+				if self.depth() - 1 <= min_depth {
+					if let Some(span) = span {
+						return Err(VicErr::Full(span, "The data this reference points to has fallen out of scope".to_string()));
+					} else {
+						return Err(VicErr::Simple("Attempt to return a reference to a variable that has fallen out of scope".to_string()));
+					}
+				}
+			}
+			_ => {
+				// We have a normal value, so we don't need to do anything
+				// This is just a base case for our recursion
+			}
+		}
+		Ok(())
 	}
 	fn include_file(&mut self, path: &Expr) -> Result<Val, VicErr> {
 		let path = self.eval_expr(false, path)
@@ -1254,7 +1424,7 @@ impl ViCut {
 		let Val::Num(count) = count_eval else { unreachable!() };
 		let mut ret = Val::Null;
 		for _ in 0..count {
-			let _scope = ScopeGuard::new(self);
+			let _scope = ScopeGuard::block(self);
 			for cmd in block {
 				ret = self.eval_expr(true, cmd)
 					.try_blame(cmd.span())?;
@@ -1291,9 +1461,11 @@ impl ViCut {
 			.try_blame(scrutinee.span())?;
 
 		if let Val::Err(_, val) = eval {
-			let _scope = ScopeGuard::new(self);
+			let _scope = ScopeGuard::block(self);
 			if let Some(var) = err_bind {
-				let reffed = Val::Ref(Box::new((*val).as_ptr()));
+				let min_depth = self.depth();
+				let ptr = val.as_ptr();
+				let reffed = Val::into_ref_from_ptr(ptr, min_depth);
 				self.set_var(var.to_string(),reffed)?;
 			}
 			for cmd in catch_block {
@@ -1312,7 +1484,7 @@ impl ViCut {
 		let new_buf = LineBuf::new().with_initial(buffer, 0);
 		self.buffers.push(new_buf);
 
-		let _scope = ScopeGuard::new(self);
+		let _scope = ScopeGuard::block(self);
 		let mut ret = Val::Null;
 		for cmd in body {
 			ret = self.eval_expr(true, cmd)
@@ -1321,6 +1493,57 @@ impl ViCut {
 		Ok(ret)
 	}
 	fn eval_loop_block(&mut self, block: &ExprKind) -> Result<Val, VicErr> {
+		let ExprKind::LoopBlock { body } = block else { unreachable!() };
+		let mut ret = Val::Null;
+		// In a loop block, we execute
+		// the body repeatedly until we hit a break or return
+		'main: loop {
+			let _scope = ScopeGuard::block(self);
+			for cmd in body {
+				let res = self.eval_expr(true, cmd)
+					.try_blame(cmd.span());
+				match res {
+					Ok(val) => ret = val,
+					Err(VicErr::Continue(_)) => continue 'main, // Skip to the next iteration
+					Err(VicErr::Break(_)) => break 'main, // Break out of the loop
+					Err(e) => return Err(e), // Propagate other errors
+				}
+			}
+		}
+		Ok(ret)
+	}
+	fn eval_postfix_loop_block(&mut self, block: &ExprKind) -> Result<Val, VicErr> {
+		let (ExprKind::DoWhileBlock { cond, body } | ExprKind::DoUntilBlock { cond, body }) = block else { unreachable!() };
+		// In a do-while or do-until block, the body is executed at least once
+		// And the condition is checked after the body
+		let mut ret = Val::Null;
+		let polarity = matches!(block, ExprKind::DoWhileBlock { .. });
+		let keep_running = |v: &mut ViCut,c,p: bool| -> Result<bool,VicErr> {
+			let res = v.eval_expr(false, c)
+				.try_blame(c.span())?
+				.is_truthy(v);
+			Ok(if p { res } else { !res })
+		};
+
+		'main: loop {
+			let _scope = ScopeGuard::block(self);
+			for cmd in body {
+				let res = self.eval_expr(true, cmd)
+					.try_blame(cmd.span());
+				match res {
+					Ok(val) => ret = val,
+					Err(VicErr::Continue(_)) => continue 'main, // Skip to the next iteration
+					Err(VicErr::Break(_)) => break 'main, // Break out of the loop
+					Err(e) => return Err(e), // Propagate other errors
+				}
+			}
+			if !keep_running(self, cond, polarity)? {
+				break
+			}
+		}
+		Ok(ret)
+	}
+	fn eval_prefix_loop_block(&mut self, block: &ExprKind) -> Result<Val, VicErr> {
 		let (ExprKind::WhileBlock { cond, body } | ExprKind::UntilBlock { cond, body }) = block else { unreachable!() };
 		let mut ret = Val::Null;
 		let polarity = matches!(block, ExprKind::WhileBlock { .. });
@@ -1331,12 +1554,18 @@ impl ViCut {
 			Ok(if p { res } else { !res })
 		};
 
-		while should_run(self,cond,polarity)? {
-			let _scope = ScopeGuard::new(self);
+		'main: while should_run(self,cond,polarity)? {
+			let _scope = ScopeGuard::block(self);
 			for cmd in body {
-				ret = self.eval_expr(true, cmd)
-					.try_blame(cmd.span())?;
+				let res = self.eval_expr(true, cmd)
+					.try_blame(cmd.span());
+				match res {
+					Ok(val) => ret = val,
+					Err(VicErr::Continue(_)) => continue 'main, // Skip to the next iteration
+					Err(VicErr::Break(_)) => break 'main, // Break out of the loop
+					Err(e) => return Err(e), // Propagate other errors
 				}
+			}
 		}
 		Ok(ret)
 	}
@@ -1347,14 +1576,20 @@ impl ViCut {
 			.try_blame(list.span())?;
 		let list_iter = list.try_into_iter()?;
 
-		for item in list_iter {
-			let _scope = ScopeGuard::new(self);
+		'main: for item in list_iter {
+			let _scope = ScopeGuard::block(self);
 			// Set the variable in the current scope
 			self.set_var(var_name.clone(), item.clone())?;
 			for cmd in body {
-				ret = self.eval_expr(true, cmd)
-					.try_blame(cmd.span())?;
+				let res = self.eval_expr(true, cmd)
+					.try_blame(cmd.span());
+				match res {
+					Ok(val) => ret = val,
+					Err(VicErr::Continue(_)) => continue 'main, // Skip to the next iteration
+					Err(VicErr::Break(_)) => break 'main, // Break out of the loop
+					Err(e) => return Err(e), // Propagate other errors
 				}
+			}
 		}
 
 		Ok(ret)
@@ -1368,11 +1603,19 @@ impl ViCut {
 
 		for block in case_blocks {
 			let ExprKind::CaseBlock { cond, body } = block.value() else { unreachable!() };
-			let should_execute = cond.contains(&scrutinee);
+			let expanded_cond = cond.iter().map(|c| {
+				if let Val::Str(s) = c {
+					let expanded = self.expand_literal(s.borrow().as_str()).unwrap_or(s.borrow().to_string());
+					Val::new_str(expanded)
+				} else {
+					c.clone() // wrap this in Ok(...)
+				}
+			}).collect::<Vec<_>>();
+			let should_execute = expanded_cond.contains(&scrutinee);
 
 			if should_execute {
 				executed = true;
-				let _scope = ScopeGuard::new(self);
+				let _scope = ScopeGuard::block(self);
 				for cmd in body {
 					ret = self.eval_expr(true, cmd)
 						.try_blame(cmd.span())?;
@@ -1381,7 +1624,7 @@ impl ViCut {
 		}
 
 		if !executed && let Some(default_block) = default_block {
-			let _scope = ScopeGuard::new(self);
+			let _scope = ScopeGuard::block(self);
 			for cmd in default_block {
 				ret = self.eval_expr(true, cmd)
 					.try_blame(cmd.span())?;
@@ -1403,7 +1646,7 @@ impl ViCut {
 
 			if should_execute {
 				executed = true;
-				let _scope = ScopeGuard::new(self);
+				let _scope = ScopeGuard::block(self);
 				for cmd in body {
 					ret = self.eval_expr(true, cmd)
 						.try_blame(cmd.span())?;
@@ -1412,7 +1655,7 @@ impl ViCut {
 		}
 
 		if !executed && let Some(else_block) = else_block {
-			let _scope = ScopeGuard::new(self);
+			let _scope = ScopeGuard::block(self);
 			for cmd in else_block {
 				ret = self.eval_expr(true, cmd)
 					.try_blame(cmd.span())?;
@@ -1581,14 +1824,19 @@ impl ViCut {
 	/// Be careful! :)
 	///
 	/// This is safe because the ScopeGuard struct ensures variables stay alive for the entire duration of a scope
-	fn access_val_ptr(&mut self, val: &Expr) -> Result<*mut Val, VicErr> {
+	fn access_val_ptr(&mut self, val: &Expr) -> Result<(*mut Val,usize), VicErr> {
 		let Expr { value, accessors, span } = val;
 		let ExprKind::Value(Val::Var(var)) = value else {
 			return Err(VicErr::Full(span.clone(), "Invalid expression for variable assignment".into()))
 		};
-		let var_mut = self.get_var_mut(var).ok_or(VicErr::Full(span.clone(), format!("Variable '{var}' not found")))?;
+		let var_depth = self.get_var_depth(var)
+			.ok_or(VicErr::Full(span.clone(), format!("Variable '{var}' not found")))?;
+		let var_mut = self.get_var_mut(var)
+			.ok_or(VicErr::Full(span.clone(), format!("Variable '{var}' not found")))?;
+
 		let mut val_mut = var_mut as *mut Val;
 		val_mut = self.peel_refs(val_mut);
+
 		for accessor in accessors {
 			val_mut = self.peel_refs(val_mut);
 			match accessor {
@@ -1627,14 +1875,15 @@ impl ViCut {
 				}
 			}
 		}
-		Ok(val_mut)
+		Ok((val_mut,var_depth))
 	}
 	fn peel_refs(&mut self, mut val_ptr: *mut Val) -> *mut Val {
 		loop {
 			let val = unsafe { &mut *val_ptr };
 			match val {
 				Val::Ref(inner) => {
-					val_ptr = **inner
+					let ValRef { ptr, min_depth: _ } = inner;
+					val_ptr = *ptr
 				}
 				_ => return val_ptr,
 			}
@@ -1715,7 +1964,7 @@ impl ViCut {
 							field.clone()
 						}
 						Val::Ref(ref val) => {
-							match unsafe { &***val } {
+							match val.peel_refs() {
 								Val::Dict(map) => {
 									last_self = Some(eval.clone());
 									let map = map.borrow();
@@ -1747,7 +1996,7 @@ impl ViCut {
 			Call::Method {
 				self_val,
 				args,
-				func 
+				func
 			} => {
 				let Val::Closure(params, body) = func else {
 					return Err(VicErr::Simple(format!("Expected a closure for method call, found {}", func.display_type())))
@@ -1755,7 +2004,7 @@ impl ViCut {
 
 				let self_pos = params.iter().position(|p| p == "self");
 				let expected_given = if self_pos.is_some() {
-					params.len() - 1 
+					params.len() - 1
 				} else {
 					params.len()
 				};
@@ -1768,10 +2017,15 @@ impl ViCut {
 						.try_blame(arg.span())?;
 					arg_eval.push(eval);
 				}
-				let _scope = ScopeGuard::new(self);
+				let _scope = ScopeGuard::func(self);
 				// Set the parameters in the current scope
 				if let Some(pos) = self_pos {
-					self.set_var("self".to_string(), Val::Ref(Box::new(Box::into_raw(Box::new(self_val)))))?;
+					let self_ptr = Box::into_raw(Box::new(self_val));
+
+					// FIXME: This means that references to self cannot be returned from this scope
+					// but that is actually incorrect, self always outlives the method call
+					// so we need to find a way to figure out the scope depth of the actual self value, somehow
+					self.set_var("self".to_string(), Val::into_ref_from_ptr(self_ptr, self.depth()))?;
 					let remaining = params
 						.iter()
 						.enumerate()
@@ -1801,7 +2055,7 @@ impl ViCut {
 				Ok(ret)
 			}
 
-			Call::Function { 
+			Call::Function {
 				args,
 				func
 			} => {
@@ -1818,7 +2072,7 @@ impl ViCut {
 					arg_eval.push(eval);
 				}
 
-				let _scope = ScopeGuard::new(self);
+				let _scope = ScopeGuard::func(self);
 				// Set the parameters in the current scope
 				for (param, arg) in params.iter().zip(arg_eval.iter()) {
 					self.set_var(param.to_string(), arg.clone())?;
@@ -2060,7 +2314,6 @@ impl ViCut {
 		}
 		Ok(())
 	}
-	/// A little bit redundant, but variables are kept in the Val enum
 	fn eval_value(&mut self, val: &ExprKind) -> Result<Val,VicErr> {
 		let ExprKind::Value(val) = val else {
 			return Err(VicErr::Simple("Expected a value expression".into()));

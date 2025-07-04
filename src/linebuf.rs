@@ -1648,6 +1648,10 @@ impl LineBuf {
 				while let Some(idx) = fwd_indices.next() {
 					let gr = self.read_grapheme_at(idx)?;
 					match gr {
+						"\\" if last_quote.is_some() => {
+							// If we are inside a quote, skip the next grapheme
+							fwd_indices.next();
+						}
 						"\"" => {
 							if last_quote == Some("\"") {
 								last_quote = None;
@@ -1680,6 +1684,10 @@ impl LineBuf {
 				while let Some(idx) = bkwd_indices.next() {
 					let gr = self.read_grapheme_at(idx)?;
 					match gr {
+						"\\" if last_quote.is_some() => {
+							// If we are inside a quote, skip the next grapheme
+							fwd_indices.next();
+						}
 						"\"" => {
 							if last_quote == Some("\"") {
 								last_quote = None;
@@ -4061,5 +4069,3 @@ pub fn ordered_signed(start: isize, end: isize) -> (isize,isize) {
 		(start,end)
 	}
 }
-
-

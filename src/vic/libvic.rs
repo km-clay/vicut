@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
 
-use crate::{exec::ViCut, linebuf::ClampedUsize, register::{read_register, write_register, RegisterContent}, vic::{error::VicErr, parse::{RcVal, Val}}, vicmd::{Bound, Word}};
+use crate::{exec::ViCut, linebuf::ClampedUsize, register::{read_register, write_register, RegisterContent}, vic::{error::VicErr, parse::{RcVal, Val, ValRef}}, vicmd::{Bound, Word}};
 
 #[derive(Debug, Clone)]
 pub enum Func {
@@ -174,18 +174,18 @@ impl ViCut {
 				};
 				let var_name = var_name.borrow();
 				let env_value = std::env::var(var_name.trim()).unwrap_or_default();
-				Ok(Val::new_str(env_value).into())
+				Ok(Val::new_str(env_value))
 			}
 			Func::Print => {
 				let mut output = String::new();
 				for arg in args.iter() {
-					let mut arg_clone: Val = arg.deep_clone().into();
+					let mut arg_clone: Val = arg.deep_clone();
 					self.deep_eval_value(&mut arg_clone)?;
 					let arg_str = arg_clone.to_string();
 					output.push_str(&arg_str);
 				}
 				println!("{output}");
-				Ok(Val::Null.into())
+				Ok(Val::Null)
 			}
 			Func::Format => {
 				let mut format = String::new();
@@ -223,10 +223,10 @@ impl ViCut {
 					.map(|slice| Val::new_str(slice.to_string()))
 					.unwrap_or(Val::new_str(String::new()))
 			}
-			Var::IsEndofFile => Val::Bool(cur_buf.cursor_at_max()).into(),
-			Var::IsEndofLine => Val::Bool(cur_buf.cursor_at_eol()).into(),
-			Var::IsStartofFile => Val::Bool(cur_buf.cursor.get() == 0).into(),
-			Var::IsStartofLine => Val::Bool(cur_buf.cursor.get() == 0).into(),
+			Var::IsEndofFile => Val::Bool(cur_buf.cursor_at_max()),
+			Var::IsEndofLine => Val::Bool(cur_buf.cursor_at_eol()),
+			Var::IsStartofFile => Val::Bool(cur_buf.cursor.get() == 0),
+			Var::IsStartofLine => Val::Bool(cur_buf.cursor.get() == 0),
 			Var::Char => {
 				cur_buf.grapheme_at_cursor()
 					.map(|gr| Val::new_str(gr.to_string()))
@@ -288,10 +288,8 @@ impl ViCut {
 			Val::Regex(_) => todo!(),
 			Val::Expr(_) => todo!(),
 			Val::Ref(val) => {
-				unsafe {
-					let val_ptr = &mut (***val);
+					let val_ptr = val.peel_refs_mut();
 					self.dispatch_builtin_method(val_ptr, method_name, args)
-				}
 			}
 			Val::BuiltinHandle(Builtin::Var(Var::Buffer)) => self.buffer_builtins(method_name, args),
 			_ => Err(VicErr::Simple(format!("Cannot call method '{}' on value of type {}", method_name, self_val.display_type()))),
@@ -305,7 +303,7 @@ impl ViCut {
 				}
 				let Val::Err(_, msg) = self_val else { unreachable!() };
 
-				Ok(msg.borrow().deep_clone().into())
+				Ok(msg.borrow().deep_clone())
 			}
 			_ => Err(VicErr::Simple(format!("Unknown error method: {method_name}"))),
 		}
@@ -324,7 +322,7 @@ impl ViCut {
 				let content = RegisterContent::Span(args[0].to_string());
 				let Val::Register(reg) = self_val else { unreachable!() };
 				write_register(Some(*reg), content);
-				Ok(Val::Null.into())
+				Ok(Val::Null)
 			}
 			"put" => {
 				if !args.is_empty() {
@@ -332,7 +330,7 @@ impl ViCut {
 				}
 				let Val::Register(reg) = self_val else { unreachable!() };
 				let content = read_register(Some(*reg)).unwrap_or_default().to_string();
-				Ok(Val::new_str(content).into())
+				Ok(Val::new_str(content))
 			}
 			_ => Err(VicErr::Simple(format!("Unknown register method: {}", method_name))),
 		}
@@ -344,7 +342,7 @@ impl ViCut {
 					return Err(VicErr::Simple("abs does not take any arguments".to_string()));
 				}
 				if let Val::Num(num) = self_val {
-					Ok(Val::Num(num.abs()).into())
+					Ok(Val::Num(num.abs()))
 				} else {
 					Err(VicErr::Simple("abs can only be called on numbers".to_string()))
 				}
@@ -357,7 +355,7 @@ impl ViCut {
 					if *num < 0 {
 						return Err(VicErr::Simple("Cannot compute square root of a negative number".to_string()));
 					}
-					Ok(Val::Num(num.isqrt()).into())
+					Ok(Val::Num(num.isqrt()))
 				} else {
 					Err(VicErr::Simple("sqrt can only be called on numbers".to_string()))
 				}
@@ -375,7 +373,7 @@ impl ViCut {
 					Val::Arr(arr) => arr.borrow().len(),
 					_ => return Err(VicErr::Simple("len can only be called on arrays".to_string())),
 				};
-				Ok(Val::Num(len as isize).into())
+				Ok(Val::Num(len as isize))
 			},
 			"is_empty" => {
 				if !args.is_empty() {
@@ -385,7 +383,7 @@ impl ViCut {
 					Val::Arr(arr) => arr.borrow().is_empty(),
 					_ => return Err(VicErr::Simple("is_empty can only be called on arrays".to_string())),
 				};
-				Ok(Val::Bool(is_empty).into())
+				Ok(Val::Bool(is_empty))
 			},
 			"push" => {
 				if args.len() != 1 {
@@ -394,8 +392,8 @@ impl ViCut {
 				if let Val::Arr(arr) = self_val {
 					let mut arr = arr.borrow_mut();
 					let val_copy = args[0].clone();
-					arr.push_back(val_copy.into());
-					Ok(Val::Null.into())
+					arr.push_back(val_copy);
+					Ok(Val::Null)
 				} else {
 					Err(VicErr::Simple("push can only be called on arrays".to_string()))
 				}
@@ -407,8 +405,8 @@ impl ViCut {
 				if let Val::Arr(arr) = self_val {
 					let mut arr = arr.borrow_mut();
 					let val_copy = args[0].clone();
-					arr.push_front(val_copy.into());
-					Ok(Val::Null.into())
+					arr.push_front(val_copy);
+					Ok(Val::Null)
 				} else {
 					Err(VicErr::Simple("fpush can only be called on arrays".to_string()))
 				}
@@ -422,7 +420,7 @@ impl ViCut {
 					if let Some(val) = arr.pop_front() {
 						Ok(val)
 					} else {
-						Ok(Val::Null.into())
+						Ok(Val::Null)
 					}
 				} else {
 					Err(VicErr::Simple("fpop can only be called on arrays".to_string()))
@@ -437,7 +435,7 @@ impl ViCut {
 					if let Some(val) = arr.pop_back() {
 						Ok(val)
 					} else {
-						Ok(Val::Null.into())
+						Ok(Val::Null)
 					}
 				} else {
 					Err(VicErr::Simple("pop can only be called on arrays".to_string()))
@@ -487,7 +485,7 @@ impl ViCut {
 					Val::Arr(arr) => arr.borrow().len(),
 					_ => return Err(VicErr::Simple("len can only be called on strings or arrays".to_string())),
 				};
-				Ok(Val::Num(len as isize).into())
+				Ok(Val::Num(len as isize))
 			},
 			"push" => {
 				if args.len() != 1 {
@@ -496,7 +494,7 @@ impl ViCut {
 				if let Val::Str(s) = self_val {
 					let mut s = s.borrow_mut();
 					s.push_str(&args[0].to_string());
-					Ok(Val::Null.into())
+					Ok(Val::Null)
 				} else {
 					Err(VicErr::Simple("push can only be called on strings".to_string()))
 				}
@@ -509,7 +507,7 @@ impl ViCut {
 					let mut s = s.borrow_mut();
 					if !s.is_empty() {
 						let last_char = s.pop().unwrap();
-						Ok(Val::new_str(last_char.to_string()).into())
+						Ok(Val::new_str(last_char.to_string()))
 					} else {
 						Err(VicErr::Simple("pop called on an empty string".to_string()))
 					}
@@ -523,7 +521,7 @@ impl ViCut {
 				}
 				if let Val::Str(s) = self_val {
 					let s = s.borrow();
-					Ok(Val::new_str(s.to_uppercase()).into())
+					Ok(Val::new_str(s.to_uppercase()))
 				} else {
 					Err(VicErr::Simple("to_upper can only be called on strings".to_string()))
 				}
@@ -534,7 +532,7 @@ impl ViCut {
 				}
 				if let Val::Str(s) = self_val {
 					let s = s.borrow();
-					Ok(Val::new_str(s.to_lowercase()).into())
+					Ok(Val::new_str(s.to_lowercase()))
 				} else {
 					Err(VicErr::Simple("to_lower can only be called on strings".to_string()))
 				}
@@ -545,7 +543,7 @@ impl ViCut {
 				}
 				if let Val::Str(s) = self_val {
 					let s = s.borrow();
-					Ok(Val::new_str(s.trim().to_string()).into())
+					Ok(Val::new_str(s.trim().to_string()))
 				} else {
 					Err(VicErr::Simple("trim can only be called on strings".to_string()))
 				}
@@ -579,7 +577,7 @@ impl ViCut {
 						}
 						_ => return Err(VicErr::Simple("Expected string or array of single-character strings".to_string())),
 					};
-					Ok(Val::new_str(trimmed.to_string()).into())
+					Ok(Val::new_str(trimmed.to_string()))
 				} else {
 					Err(VicErr::Simple("trim_matches can only be called on strings".to_string()))
 				}
