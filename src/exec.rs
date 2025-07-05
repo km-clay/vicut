@@ -1,31 +1,27 @@
 //! This module contains the `ViCut` struct, which is the central container for state in the program.
 //!
 //! Everything that moves through this program passes through the `ViCut` struct at some point.
-use std::cell::{Ref, RefCell, RefMut};
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
-use std::fmt::Display;
 use std::fs;
-use std::io::{self, BufRead, Write as IoWrite};
 use std::fmt::Write;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use log::{debug, trace};
-use regex::Regex;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::keys::{KeyCode, KeyEvent, ModKeys};
-use crate::linebuf::{ordered, ordered_signed, ClampedUsize, MotionKind};
+use crate::linebuf::{ordered, ClampedUsize, MotionKind};
 use crate::modes::ex::ViEx;
 use crate::modes::search::ViSearch;
 use crate::reader::{KeyReader, RawReader};
-use crate::register::{append_register, read_register, write_register, RegisterContent};
 use crate::vic::error::{VicErr, VicErrResult};
-use crate::vic::libvic::{Builtin, Func, Var};
-use crate::vic::parse::{Accessor, ArcSpan, BinOp, BoolOp, Command, Expr, ExprKind, Index, LogOp, RcVal, RpnItem, Val, ValRef};
-use crate::vicmd::{Bound, LineAddr, Word};
+use crate::vic::libvic::{Builtin, Func};
+use crate::vic::parse::{Accessor, ArcSpan, BinOp, BoolOp, Command, Expr, ExprKind, Index, LogOp, RpnItem, Val, ValRef};
+use crate::vicmd::LineAddr;
 use crate::{complain_and_exit, validate_filename, ExecCtx, Opts};
 
 use super::linebuf::{LineBuf, SelectAnchor, SelectMode};
@@ -190,7 +186,7 @@ impl ViCut {
 																						 // The second is the "global" scope, which is where user-defined variables and functions go
 																						 // User definitions can shadow built-ins this way.
 																						 // Never allow these vectors to dip below length 2.
-			scopes: vec![globals, Scope::block()],
+			scopes: vec![globals, Scope::global()],
 			opts: vec![opts],
 			exec_ctx: ExecCtx::default(),
 			cmds,
@@ -666,13 +662,18 @@ impl ViCut {
 		}
 	}
 	pub fn visible_scopes(&self) -> Vec<&Scope> {
-		let mut visible: Vec<&Scope> = self.scopes.iter().take(2).collect();
-
-		// Find the index of the most recent function scope (from the end)
-		if let Some(func_idx) = self.scopes.iter().rposition(|s| s.kind == ScopeKind::Func) {
-			visible.extend(self.scopes[func_idx..].iter());
+		let mut visible = vec![];
+		let mut hit_func = false;
+		for scope in self.scopes.iter().rev() {
+			let kind = scope.kind.clone();
+			if !hit_func || scope.kind == ScopeKind::Global || scope.kind == ScopeKind::Builtin {
+				visible.push(scope);
+			}
+			if kind == ScopeKind::Func {
+				hit_func = true;
+			}
 		}
-
+		visible.reverse();
 		visible
 	}
 	pub fn visible_scopes_mut(&mut self) -> Vec<&mut Scope> {
@@ -707,7 +708,7 @@ impl ViCut {
 		// We do this in reverse order, so that we get the most local variable
 		let mut ret = None;
 		let scopes = self.visible_scopes();
-		let scopes = scopes.iter().rev();
+		let scopes = scopes.iter();
 		for frame in scopes {
 			if frame.vars.contains_key(name) {
 				ret = frame.vars.get(name).cloned()
@@ -1099,38 +1100,52 @@ impl ViCut {
 	}
 	pub fn eval_expr(&mut self, is_top_level: bool, cmd_expr: &Expr) -> Result<Val,VicErr> {
 		let Expr { value, accessors, span } = cmd_expr;
-		let eval = match value {
-			ExprKind::LoopBlock {..} => self.eval_loop_block(value)?,
-			ExprKind::WhileBlock {..}  |
-			ExprKind::UntilBlock {..}  => self.eval_prefix_loop_block(value)?,
+		let mut eval = match value {
+			ExprKind::LoopBlock {..}    => self.eval_loop_block(value)?,
+			ExprKind::WhileBlock {..}   |
+			ExprKind::UntilBlock {..}   => self.eval_prefix_loop_block(value)?,
 			ExprKind::DoWhileBlock {..} |
 			ExprKind::DoUntilBlock {..} => self.eval_postfix_loop_block(value)?,
-			ExprKind::WithBlock {..}   => self.eval_with_block(value)?,
-			ExprKind::SwitchBlock {..} => self.eval_switch_block(value)?,
-			ExprKind::IfBlock {..}     => self.eval_if_block(value)?,
-			ExprKind::ForBlock {..}    => self.eval_for_block(value)?,
-			ExprKind::CatchBlock {..}  => self.eval_catch_block(value)?,
-			ExprKind::Value(_)         => self.eval_value(value)?,
-			ExprKind::Opts(exprs)      => self.eval_opts(exprs)?,
-			ExprKind::VarDec {..}      => self.eval_var_dec(value)?,
-			ExprKind::VarMut {..}      => self.eval_var_mutation(value)?,
-			ExprKind::Range {..}       => self.eval_range(value)?,
-			ExprKind::BinExpr(rpn)     => self.eval_bin_expr(rpn)?,
-			ExprKind::BoolExpr(rpn)    => self.eval_bool_expr(rpn)?,
-			ExprKind::BoolNode {..}    => self.eval_bool_node(value)?,
-			ExprKind::FuncDef {..}     => self.eval_func_def(is_top_level, value)?,
-			ExprKind::ClassDef {..}    => self.eval_class_def(value)?,
-			ExprKind::Command(_)       => self.eval_command(is_top_level, span.clone(), value)?,
-			ExprKind::Block(_)         |
-			ExprKind::Vic(_)           |
-			ExprKind::TopLevel(_)      |
-			ExprKind::Opt {..}         |
-			ExprKind::CondBlock {..}   |
-			ExprKind::CaseBlock {..}   => unreachable!(),
+			ExprKind::WithBlock {..}    => self.eval_with_block(value)?,
+			ExprKind::SwitchBlock {..}  => self.eval_switch_block(value)?,
+			ExprKind::IfBlock {..}      => self.eval_if_block(value)?,
+			ExprKind::ForBlock {..}     => self.eval_for_block(value)?,
+			ExprKind::CatchBlock {..}   => self.eval_catch_block(value)?,
+			ExprKind::TryBlock {..} 	  => self.eval_try_block(value)?,
+			ExprKind::Value(_)          => self.eval_value(value)?,
+			ExprKind::Opts(exprs)       => self.eval_opts(exprs)?,
+			ExprKind::VarDec {..}       => self.eval_var_dec(value)?,
+			ExprKind::VarMut {..}       => self.eval_var_mutation(value)?,
+			ExprKind::Range {..}        => self.eval_range(value)?,
+			ExprKind::BinExpr(rpn)      => self.eval_bin_expr(rpn)?,
+			ExprKind::BoolExpr(rpn)     => self.eval_bool_expr(rpn)?,
+			ExprKind::BoolNode {..}     => self.eval_bool_node(value)?,
+			ExprKind::FuncDef {..}      => self.eval_func_def(is_top_level, value)?,
+			ExprKind::ClassDef {..}     => self.eval_class_def(value)?,
+			ExprKind::Command(_)        => self.eval_command(is_top_level, span.clone(), value)?,
+			ExprKind::Block(_)          => self.eval_block(value)?,
+			ExprKind::Vic(_)            |
+			ExprKind::TopLevel(_)       |
+			ExprKind::Opt {..}          |
+			ExprKind::CondBlock {..}    |
+			ExprKind::CaseBlock {..}    => unreachable!(),
 		};
+
 		// Now apply accessors like indexes, function args, field names, etc
 		let eval = self.access_val(eval, accessors)?;
 		Ok(eval)
+	}
+	fn eval_block(&mut self, block: &ExprKind) -> Result<Val, VicErr> {
+		let ExprKind::Block(exprs) = block else {
+			return Err(VicErr::Simple("Expected a block expression".into()));
+		};
+		let mut result = Val::Null;
+		let _scope = ScopeGuard::block(self);
+		for expr in exprs {
+			result = self.eval_expr(false, expr)
+				.try_blame(expr.span())?;
+		}
+		Ok(result)
 	}
 	fn eval_range(&mut self, range: &ExprKind) -> Result<Val, VicErr> {
 		let ExprKind::Range { start, end } = range else {
@@ -1185,8 +1200,14 @@ impl ViCut {
 	}
 	fn eval_class_def(&mut self, class_def: &ExprKind) -> Result<Val, VicErr> {
 		let ExprKind::ClassDef { name, fields } = class_def else { unreachable!() };
+		let constructor = Val::Constructor(name.into(), fields.clone());
 
-		// 'fields' is full of expressions right now
+		self.set_var(name.to_string(), constructor)?;
+		Ok(Val::Null)
+	}
+	fn construct_class_instance(&mut self, class_name: &str, fields: HashMap<String,Expr>) -> Result<Val, VicErr> {
+
+		// 'class_fields' is full of expressions right now
 		// let's evaluate them
 		let mut map_eval = HashMap::new();
 
@@ -1197,12 +1218,14 @@ impl ViCut {
 			map_eval.insert(k.to_string(), eval);
 		}
 
+		map_eval.insert("_classname".to_string(), Val::new_str(class_name.to_string()));
+
 		// Classes are also just fancy variables
 		// Internally they are just a named dictionary you can easily spawn instances of
 		// Since functions are also just fancy variables, they fit right into the class fields as methods
 		let class = Val::Dict(Rc::new(RefCell::new(map_eval)));
-		self.set_var(name.to_string(), class)?;
-		Ok(Val::Null)
+		self.validate_references(&class, None)?;
+		Ok(class)
 	}
 	fn eval_bool_node(&mut self, node: &ExprKind) -> Result<Val, VicErr> {
 		let ExprKind::BoolNode { op, left, right } = node else {
@@ -1227,11 +1250,10 @@ impl ViCut {
 			return Err(VicErr::Simple("Expected a variable mutation expression".into()));
 		};
 
-		// This is a raw pointer
-		// the compiler really hates grabbing mut borrows
-		// from nested stuff like "dict.field[0]"
+		// This next line creates (gasp!) a *raw pointer*
+		// the rust compiler really hates grabbing mut borrows from nested stuff like "dict.field[0]"
 		// so we have to use Evil Rust to cleanly mutate vars
-		let (ptr,_) = self.access_val_ptr(name)?;
+		let (ptr,_) = self.access_val_ptr(name, /*refs_ok:*/false)?;
 		let new_val = self.eval_expr(false, value)
 			.try_blame(value.span())?;
 
@@ -1256,9 +1278,8 @@ impl ViCut {
 		Ok(Val::Null)
 	}
 	fn eval_var_dec(&mut self, vardec: &ExprKind) -> Result<Val,VicErr> {
-		let ExprKind::VarDec { name, value } = vardec else {
-			return Err(VicErr::Simple("Expected a variable declaration expression".into()));
-		};
+		let ExprKind::VarDec { name, value } = vardec else { unreachable!() };
+
 		let eval = self.eval_expr(false, value)
 			.try_blame(value.span())?;
 		self.set_var(name.to_string(), eval)?;
@@ -1266,9 +1287,8 @@ impl ViCut {
 		Ok(Val::Null)
 	}
 	fn eval_command(&mut self, is_top_level: bool, span: ArcSpan, command: &ExprKind) -> Result<Val, VicErr> {
-		let ExprKind::Command(cmd) = command else {
-			return Err(VicErr::Simple("Expected a command expression".into()));
-		};
+		let ExprKind::Command(cmd) = command else { unreachable!() };
+
 		match cmd {
 			Command::Continue => Err(VicErr::Continue(span)),
 			Command::Break => Err(VicErr::Break(span)),
@@ -1280,6 +1300,31 @@ impl ViCut {
 			Command::Yank { register, motion } => self.eval_yank(register, motion),
 			Command::Include { path } => self.include_file(path),
 			Command::ShellCmd { cmd } => self.run_shell_cmd(cmd),
+			Command::Debug(expr) => {
+				let val = self.eval_expr(is_top_level, expr)
+					.try_blame(expr.span())?;
+				match val {
+					Val::Arr(ref arr) => {
+						eprintln!("[\x1b[1;34mDEBUG\x1b[0m] {val:?}");
+					}
+					_ => {
+						eprintln!("[\x1b[1;34mDEBUG\x1b[0m] {val:?}");
+					}
+				}
+				Ok(val)
+			}
+			Command::Exit { code } => {
+				let val = if let Some(expr) = code {
+					self.eval_expr(is_top_level, expr)
+						.try_blame(expr.span())?
+				} else { Val::Num(0) };
+				let code = if let Val::Num(num) = val {
+					num as i32
+				} else {
+					0
+				};
+				Err(VicErr::Exit(code))
+			}
 			Command::Next => {
 				self.exec_ctx.field_num = 0;
 				let record = std::mem::take(&mut self.exec_ctx.fields);
@@ -1289,11 +1334,22 @@ impl ViCut {
 			Command::New(expr) => {
 				let value = self.eval_expr(is_top_level, expr)
 					.try_blame(expr.span())?;
-
-				Ok(value.deep_clone())
+				if let Val::Constructor(name, fields) = value {
+					// Create a new instance of the class
+					let instance = self.construct_class_instance(&name, fields)?;
+					// Validate references in the instance before returning
+					Ok(instance)
+				} else if let Val::Ref(val_ref) = value {
+					// Peel off any nested references
+					let inner = val_ref.peel_refs();
+					// Borrow the inner value
+					Ok(inner.deep_clone())
+				} else {
+					Ok(value.deep_clone())
+				}
 			}
 			Command::Ref(expr) => {
-				let (ptr,min_depth) = self.access_val_ptr(expr)?;
+				let (ptr,min_depth) = self.access_val_ptr(expr,/*refs_ok:*/true)?;
 				Ok(Val::into_ref_from_ptr(ptr, min_depth))
 			}
 			Command::Error(arc_span, expr) => {
@@ -1314,6 +1370,23 @@ impl ViCut {
 			}
 		}
 	}
+	/// Recursively validates all references within a return value to ensure they will remain valid after returning.
+	///
+	/// This function walks through the entire structure of a given `Val`, traversing
+	/// arrays, dictionaries, and nested references. If any reference (direct or indirect)
+	/// has a `min_depth` greater than or equal to the current execution depth,
+	/// the reference is considered invalid and a runtime error is returned.
+	///
+	/// This is a core part of Vic's dynamic borrow-checking system and prevents
+	/// use-after-free and other unsafe behaviors in the interpreter by ensuring
+	/// that all returned or stored references remain within valid scope.
+	///
+	/// # Parameters
+	/// - `val`: The value to validate, which may contain nested structures and references.
+	/// - `span`: Optional source location used to annotate errors with source context.
+	///
+	/// # Errors
+	/// Returns `VicErr::Full` or `VicErr::Simple` if an invalid (dangling) reference is found.
 	fn validate_references(&mut self, val: &Val, span: Option<ArcSpan>) -> Result<(), VicErr> {
 		// We need to ensure that all references are valid
 		// This means that the min_depth of the reference must be less than or equal to the current depth
@@ -1332,7 +1405,8 @@ impl ViCut {
 			}
 			Val::Ref(val_ref) => {
 				/*
-				 * We've reached a reference value. To ensure safety, we must verify that all
+				 * We've reached a reference value, the object of our recursion.
+				 * To ensure memory safety without a garbage collector, we must verify that all
 				 * values in the reference chain are still in scope.
 				 *
 				 * References can be nested (e.g., a reference to another reference), and each
@@ -1340,26 +1414,23 @@ impl ViCut {
 				 *
 				 * To ensure validity, we walk through all layers of indirection and find the
 				 * lowest (earliest) `min_depth` in the chain. If our current depth is higher
-				 * than that — i.e., `depth() - 1 <= min_depth` — then at least one value being
-				 * referenced has gone out of scope, and using this reference would result in
-				 * a dangling pointer.
+				 * than that — i.e., `depth() - 1 <= min_depth` — then the chain has been broken somewhere,
+				 * and using this reference would result in a dangling pointer.
 				 *
 				 * We throw a runtime error in this case to avoid undefined behavior.
 				 */
 				let mut ref_val = val_ref.as_borrow();
-				let mut min_depth = val_ref.min_depth;
+				let mut min_depth = val_ref.min_depth();
+
+				// Traversal
 				while let Val::Ref(inner_ref) = ref_val {
-					// We have a reference, so we need to check its min_depth
-					let new_min = {
-						let ValRef { min_depth, .. } = inner_ref;
-						*min_depth
-					};
+					let new_min = inner_ref.min_depth();
 					ref_val = inner_ref.as_borrow();
 					if new_min < min_depth {
 						min_depth = new_min;
 					}
 				}
-				// If this returns to self.depth() - 1, then whatever this reference points to
+				// If this returns to the scope 'min_depth - 1', then whatever this reference points to
 				// will fall out of scope, leading to a dangling pointer
 				if self.depth() - 1 <= min_depth {
 					if let Some(span) = span {
@@ -1453,6 +1524,27 @@ impl ViCut {
 			}
 		}
 	}
+	fn eval_try_block(&mut self, try_block: &ExprKind) -> Result<Val, VicErr> {
+		let ExprKind::TryBlock { scrutinee, try_bind, try_block } = try_block else {
+			return Err(VicErr::Simple("Expected a try block expression".into()));
+		};
+		let mut ret = Val::Null;
+		let eval = self.eval_expr(false, scrutinee)
+			.try_blame(scrutinee.span())?;
+
+		if !matches!(eval, Val::Err(_, _) | Val::Null) {
+			let _scope = ScopeGuard::block(self);
+			if let Some(var) = try_bind {
+				self.set_var(var.to_string(), eval)?;
+			}
+			for cmd in try_block {
+				ret = self.eval_expr(true, cmd)
+					.try_blame(cmd.span())?;
+			}
+		}
+
+		Ok(ret)
+	}
 	fn eval_catch_block(&mut self, block: &ExprKind) -> Result<Val,VicErr> {
 		let ExprKind::CatchBlock { scrutinee, catch_block, err_bind } = block else { unreachable!() };
 		let mut ret = Val::Null;
@@ -1460,13 +1552,10 @@ impl ViCut {
 		let eval = self.eval_expr(false, scrutinee)
 			.try_blame(scrutinee.span())?;
 
-		if let Val::Err(_, val) = eval {
+		if let Val::Err(_, _) = eval {
 			let _scope = ScopeGuard::block(self);
 			if let Some(var) = err_bind {
-				let min_depth = self.depth();
-				let ptr = val.as_ptr();
-				let reffed = Val::into_ref_from_ptr(ptr, min_depth);
-				self.set_var(var.to_string(),reffed)?;
+				self.set_var(var.to_string(),eval)?;
 			}
 			for cmd in catch_block {
 				ret = self.eval_expr(true, cmd)
@@ -1545,6 +1634,8 @@ impl ViCut {
 	}
 	fn eval_prefix_loop_block(&mut self, block: &ExprKind) -> Result<Val, VicErr> {
 		let (ExprKind::WhileBlock { cond, body } | ExprKind::UntilBlock { cond, body }) = block else { unreachable!() };
+		// standard while/until loop
+		// condition is evaluated, and then runs the body if truthy
 		let mut ret = Val::Null;
 		let polarity = matches!(block, ExprKind::WhileBlock { .. });
 		let should_run = |v: &mut ViCut,c,p: bool| -> Result<bool,VicErr> {
@@ -1571,6 +1662,7 @@ impl ViCut {
 	}
 	fn eval_for_block(&mut self, block: &ExprKind) -> Result<Val,VicErr> {
 		let ExprKind::ForBlock { var_name, list, body } = block else { unreachable!() };
+		// for loop, iterates over any iterable type
 		let mut ret = Val::Null;
 		let list = self.eval_expr(false, list)
 			.try_blame(list.span())?;
@@ -1823,8 +1915,9 @@ impl ViCut {
 	///
 	/// Be careful! :)
 	///
-	/// This is safe because the ScopeGuard struct ensures variables stay alive for the entire duration of a scope
-	fn access_val_ptr(&mut self, val: &Expr) -> Result<(*mut Val,usize), VicErr> {
+	/// This is safe because the `ScopeGuard` struct ensures variables stay alive for the entire duration of a scope
+	/// And the `validate_references` function ensures that references are valid before returning them.
+	fn access_val_ptr(&mut self, val: &Expr, refs_ok: bool) -> Result<(*mut Val,usize), VicErr> {
 		let Expr { value, accessors, span } = val;
 		let ExprKind::Value(Val::Var(var)) = value else {
 			return Err(VicErr::Full(span.clone(), "Invalid expression for variable assignment".into()))
@@ -1835,10 +1928,16 @@ impl ViCut {
 			.ok_or(VicErr::Full(span.clone(), format!("Variable '{var}' not found")))?;
 
 		let mut val_mut = var_mut as *mut Val;
-		val_mut = self.peel_refs(val_mut);
+		if !refs_ok {
+			// In this case, we want to access the referenced value directly
+			// so we will peel off references until we get to the actual value
+			unsafe { val_mut = self.peel_refs(val_mut) };
+		}
 
 		for accessor in accessors {
-			val_mut = self.peel_refs(val_mut);
+			if !refs_ok {
+				unsafe { val_mut = self.peel_refs(val_mut) };
+			}
 			match accessor {
 				Accessor::Field(field) => {
 					let deref = unsafe { &mut *val_mut };
@@ -1877,13 +1976,13 @@ impl ViCut {
 		}
 		Ok((val_mut,var_depth))
 	}
-	fn peel_refs(&mut self, mut val_ptr: *mut Val) -> *mut Val {
+	unsafe fn peel_refs(&mut self, mut val_ptr: *mut Val) -> *mut Val {
 		loop {
 			let val = unsafe { &mut *val_ptr };
 			match val {
 				Val::Ref(inner) => {
-					let ValRef { ptr, min_depth: _ } = inner;
-					val_ptr = *ptr
+					let ptr = inner.as_mut_borrow();
+					val_ptr = ptr as *mut Val;
 				}
 				_ => return val_ptr,
 			}
@@ -1940,6 +2039,13 @@ impl ViCut {
 							};
 							self.eval_call(call)?
 						}
+						Val::BoundClosure(self_val, closure) => {
+							let self_val = *self_val;
+							let closure = closure.clone().borrow().clone();
+							let args = args.clone();
+							let call = Call::Method { self_val, args, func: closure.clone() };
+							self.eval_call(call)?
+						}
 						Val::BuiltinHandle(Builtin::Fn(func)) => {
 							let mut arg_eval = vec![];
 							for arg in args.iter() {
@@ -1961,7 +2067,13 @@ impl ViCut {
 							let map = map.borrow();
 							let field = map.get(field)
 								.ok_or_else(|| VicErr::Simple(format!("Field '{field}' not found in dictionary")))?;
-							field.clone()
+							match field {
+								Val::Closure(_, _) => {
+									// If the field is a closure, we need to return it as a bound closure
+									Val::BoundClosure(Box::new(eval.clone()), Box::new(field.clone().into()))
+								}
+								_ => field.clone()
+							}
 						}
 						Val::Ref(ref val) => {
 							match val.peel_refs() {
@@ -1970,7 +2082,13 @@ impl ViCut {
 									let map = map.borrow();
 									let field = map.get(field)
 										.ok_or_else(|| VicErr::Simple(format!("Field '{field}' not found in dictionary")))?;
-									field.clone()
+									match field {
+										Val::Closure(_, _) => {
+											// If the field is a closure, we need to return it as a bound closure
+											Val::BoundClosure(Box::new(eval.clone()), Box::new(field.clone().into()))
+										}
+										_ => field.clone()
+									}
 								}
 								_ => {
 									last_self = Some(eval.clone());
@@ -2323,7 +2441,11 @@ impl ViCut {
 				if name == "_buffer" {
 					return Ok(Val::new_str(self.current_buffer().buffer.clone()))
 				}
-				let val = self.get_var(name).ok_or_else(|| format!("Variable '{name}' not found"))?;
+				let mut val = self.get_var(name).ok_or_else(|| format!("Variable '{name}' not found"))?;
+				if let Val::Constructor(name, fields) = val {
+					// If the value is a constructor, we need to evaluate it
+					val = self.construct_class_instance(&name, fields)?;
+				}
 				Ok(val)
 			}
 			Val::Str(str) => {
@@ -2340,6 +2462,9 @@ impl ViCut {
 					self.deep_eval_value(value)?;
 				}
 				Ok(val.clone())
+			}
+			Val::Constructor(name, fields) => {
+				self.construct_class_instance(name, fields.clone())
 			}
 			Val::Arr(arr) => {
 				let mut arr = arr.borrow_mut();

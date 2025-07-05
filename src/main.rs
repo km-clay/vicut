@@ -193,7 +193,7 @@ impl Opts {
 				std::process::exit(1);
 			} else {
 				self.vic_raw = Some(arg);
-				return 
+				return
 			}
 		}
 		let path = PathBuf::from(arg.trim().to_string());
@@ -525,7 +525,14 @@ fn execute(mut vicut: ViCut, args: &Opts, filename: Option<PathBuf>) -> Result<V
 
 	let cmds = vicut.cmds.clone();
 	for cmd in cmds {
-		vicut.eval_expr(/*is_top_level:*/true,&cmd).unwrap_or_else(complain_and_exit);
+		if let Err(e) = vicut.eval_expr(/*is_top_level:*/true,&cmd) {
+			match e {
+				VicErr::Exit(code) => {
+					std::process::exit(code);
+				}
+				_ => complain_and_exit(e)
+			}
+		}
 		if !vicut.find_opt(|o| o.keep_mode).unwrap_or(false) {
 			vicut.set_normal_mode();
 		}

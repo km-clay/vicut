@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
+use std::{collections::{HashMap, VecDeque}, fmt::Display, rc::Rc, str::FromStr};
 
 use crate::{exec::ViCut, linebuf::ClampedUsize, register::{read_register, write_register, RegisterContent}, vic::{error::VicErr, parse::{RcVal, Val, ValRef}}, vicmd::{Bound, Word}};
 
@@ -580,6 +580,72 @@ impl ViCut {
 					Ok(Val::new_str(trimmed.to_string()))
 				} else {
 					Err(VicErr::Simple("trim_matches can only be called on strings".to_string()))
+				}
+			}
+			"split" => {
+				if args.len() != 1 {
+					return Err(VicErr::Simple("split takes exactly one argument".to_string()));
+				}
+				let arg = &args[0];
+				if let Val::Str(s) = self_val {
+					let s = s.borrow();
+					let split_str = match arg {
+						Val::Str(delim) => delim.borrow(),
+						_ => return Err(VicErr::Simple("Expected string or array of strings".to_string())),
+					};
+					let parts: VecDeque<Val> = s.split(split_str.as_str()).map(|part| Val::new_str(part.to_string())).collect();
+					if parts.is_empty() {
+						Ok(Val::Null)
+					} else {
+						Ok(Val::new_arr(parts))
+					}
+				} else {
+					Err(VicErr::Simple("split can only be called on strings".to_string()))
+				}
+			}
+			"ends_with" |
+			"starts_with" => {
+				let is_ends_with = method_name == "ends_with";
+				if args.len() != 1 {
+					return Err(VicErr::Simple("starts_with takes exactly one argument".to_string()));
+				}
+				let arg = &args[0];
+				if let Val::Str(s) = self_val {
+					let s = s.borrow();
+					match arg {
+						Val::Str(prefix) => {
+							if is_ends_with {
+								Ok(Val::Bool(s.ends_with(prefix.borrow().as_str())))
+							} else {
+								Ok(Val::Bool(s.starts_with(prefix.borrow().as_str())))
+							}
+						}
+						Val::Arr(arr) => {
+							let arr = arr.borrow();
+							let chars: Option<Vec<char>> = arr.iter()
+								.map(|v| {
+									let s = v.to_string();
+									let mut chars = s.chars();
+									match (chars.next(), chars.next()) {
+										(Some(c), None) => Some(c), // single char string
+										_ => None
+									}
+								})
+							.collect();
+							if let Some(char_vec) = chars {
+								if is_ends_with {
+									Ok(Val::Bool(s.ends_with(&char_vec[..])))
+								} else {
+									Ok(Val::Bool(s.starts_with(&char_vec[..])))
+								}
+							} else {
+								Err(VicErr::Simple("All elements in array must be single-character strings".to_string()))
+							}
+						}
+						_ => Err(VicErr::Simple("Expected string".to_string())),
+					}
+				} else {
+					Err(VicErr::Simple("starts_with can only be called on strings".to_string()))
 				}
 			}
 			_ => Err(VicErr::Simple(format!("Unknown string method: {method_name}"))),

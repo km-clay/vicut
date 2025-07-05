@@ -415,5 +415,3 @@ fn parse_pattern(chars: &mut Peekable<Chars<'_>>, delimiter: char) -> Result<Str
 		Ok(pat)
 	}
 }
-
-

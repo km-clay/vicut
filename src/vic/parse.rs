@@ -1,4 +1,4 @@
-use std::{boxed, cell::RefCell, cmp::Ordering, collections::{HashMap, VecDeque}, fmt::{Debug, Display}, ops::Deref, rc::Rc, sync::Arc};
+use std::{cell::RefCell, cmp::Ordering, collections::{HashMap, VecDeque}, fmt::{Debug, Display}, rc::Rc, sync::Arc};
 
 use log::debug;
 use pest::{iterators::{Pair, Pairs}, Parser};
@@ -6,7 +6,7 @@ use pest_derive::Parser;
 use regex::Regex;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::{exec::ViCut, linebuf::LineBuf, register::read_register, vic::{error::{expr_error, VicErr, VicErrResult}, libvic::Builtin}, Opts};
+use crate::{exec::ViCut, register::read_register, vic::{error::{expr_error, VicErr, VicErrResult}, libvic::Builtin}};
 
 #[derive(Parser)]
 #[grammar = "vic/vic.pest"] // relative to src
@@ -169,20 +169,22 @@ impl Expr {
 	}
 	fn parse_top_level(cmd: ArcPair) -> Result<Expr,VicErr> {
 		match cmd.as_rule() {
-			Rule::var_declare |
-			Rule::var_add |
-			Rule::var_sub |
-			Rule::var_mut |
-			Rule::var_mult |
-			Rule::var_div |
-			Rule::var_pow |
-			Rule::var_mod => Self::parse_var_cmd(cmd),
-			Rule::block_struct => Self::parse_block_struct(cmd),
-			Rule::command => Self::parse_expr(cmd),
-			Rule::func_def => Self::parse_func_def(cmd),
-			Rule::class_def => Self::parse_class_def(cmd),
-			Rule::opts => Self::parse_opts(cmd),
-			Rule::expr => Self::parse_expr(cmd),
+			Rule::var_declare        |
+			Rule::var_add            |
+			Rule::var_sub            |
+			Rule::var_mut            |
+			Rule::var_mult           |
+			Rule::var_div            |
+			Rule::var_pow            |
+			Rule::var_mod            => Self::parse_var_cmd(cmd),
+			Rule::block_struct       => Self::parse_block_struct(cmd),
+			Rule::command            => Self::parse_expr(cmd),
+			Rule::func_def           => Self::parse_func_def(cmd),
+			Rule::class_def          => Self::parse_class_def(cmd),
+			Rule::opts               => Self::parse_opts(cmd),
+			Rule::expr_bool_priority |
+			Rule::expr_not_recursive |
+			Rule::expr               => Self::parse_expr(cmd),
 			Rule::top_level_cmd => {
 				let inner = cmd.into_inner().next().unwrap();
 				Self::parse_top_level(inner)
@@ -202,6 +204,8 @@ impl Expr {
 			Rule::with_block => Self::parse_with_block(inner),
 			Rule::if_block => Self::parse_if_block(inner),
 			Rule::loop_block => Self::parse_loop_block(inner),
+			Rule::catch_block => Self::parse_catch_block(inner),
+			Rule::try_block => Self::parse_try_block(inner),
 			Rule::do_while_block => Self::parse_postfix_loop_block(inner, true),
 			Rule::do_until_block => Self::parse_postfix_loop_block(inner, false),
 			Rule::while_block => Self::parse_prefix_loop_block(inner, true),
@@ -210,6 +214,42 @@ impl Expr {
 			Rule::for_block => Self::parse_for_block(inner),
 			_ => unreachable!()
 		}
+	}
+	fn parse_try_block(cmd: ArcPair) -> Result<Self,VicErr> {
+		let span = cmd.as_span();
+		let mut inner = cmd.into_inner();
+		let scrutinee = Box::new(Self::parse_expr(inner.next().unwrap())?);
+		let (try_bind,try_block) = {
+			let next = inner.next().unwrap();
+			match next.as_rule() {
+				Rule::block => (None, Self::parse_block(next)?),
+				Rule::var => (Some(next.as_str().to_string()), Self::parse_block(inner.next().unwrap())?),
+				_ => unreachable!(),
+			}
+		};
+		Ok(Self {
+			value: ExprKind::TryBlock { scrutinee, try_bind, try_block },
+			accessors: vec![],
+			span: span.clone()
+		})
+	}
+	fn parse_catch_block(cmd: ArcPair) -> Result<Self,VicErr> {
+		let span = cmd.as_span();
+		let mut inner = cmd.into_inner();
+		let scrutinee = Box::new(Self::parse_expr(inner.next().unwrap())?);
+		let (err_bind,catch_block) = {
+			let next = inner.next().unwrap();
+			match next.as_rule() {
+				Rule::block => (None, Self::parse_block(next)?),
+				Rule::var => (Some(next.as_str().to_string()), Self::parse_block(inner.next().unwrap())?),
+				_ => unreachable!(),
+			}
+		};
+		Ok(Self {
+			value: ExprKind::CatchBlock { scrutinee, err_bind, catch_block },
+			accessors: vec![],
+			span: span.clone()
+		})
 	}
 	fn parse_loop_block(cmd: ArcPair) -> Result<Self,VicErr> {
 		let span = cmd.as_span();
@@ -299,7 +339,7 @@ impl Expr {
 				val_or_accessor = inner.next().unwrap();
 			}
 			let name = Box::new(Expr {
-				value: ExprKind::Value(name_val.into()),
+				value: ExprKind::Value(name_val),
 				accessors,
 				span: ArcSpan::new(Arc::clone(&span.input), span.start, span.end)
 			});
@@ -487,6 +527,15 @@ impl Expr {
 			Rule::bin_expr => Self::parse_bin_expr(expr),
 			Rule::bool_expr => Self::parse_bool_expr(expr),
 			Rule::block_struct => Self::parse_block_struct(expr),
+			Rule::block => {
+				let span = expr.as_span();
+				let block = Self::parse_block(expr)?;
+				Ok(Self {
+					value: ExprKind::Block(block),
+					accessors: vec![],
+					span
+				})
+			}
 			Rule::expr => {
 				let mut inner = expr.into_inner();
 				let mut eval = Self::parse_expr(inner.next().unwrap())?;
@@ -505,14 +554,14 @@ impl Expr {
 				match bool_inner.as_rule() {
 					Rule::r#true => {
 						Ok(Self {
-							value: ExprKind::Value(Val::Bool(true).into()),
+							value: ExprKind::Value(Val::Bool(true)),
 							accessors: vec![],
 							span
 						})
 					}
 					Rule::r#false => {
 						Ok(Self {
-							value: ExprKind::Value(Val::Bool(false).into()),
+							value: ExprKind::Value(Val::Bool(false)),
 							accessors: vec![],
 							span
 						})
@@ -536,7 +585,7 @@ impl Expr {
 				let var_name = expr.as_str().to_string();
 				let span = expr.as_span();
 				Ok(Self {
-					value: ExprKind::Value(Val::Var(var_name).into()),
+					value: ExprKind::Value(Val::Var(var_name)),
 					accessors: vec![],
 					span
 				})
@@ -690,6 +739,19 @@ impl Expr {
 					span
 				})
 			}
+			"exit" => {
+				let mut inner = cmd.into_inner();
+				let code = if let Some(code_expr) = inner.next() {
+					Some(Box::new(Self::parse_expr(code_expr)?))
+				} else {
+					None
+				};
+				Ok(Self {
+					value: ExprKind::Command(Command::Exit { code }),
+					accessors: vec![],
+					span
+				})
+			}
 			"ref" => {
 				let mut inner = cmd.into_inner();
 				let var = Self::parse_expr(inner.next().unwrap())?;
@@ -709,23 +771,6 @@ impl Expr {
 					span
 				})
 			}
-			"catch" => {
-				let mut inner = cmd.into_inner();
-				let scrutinee = Box::new(Self::parse_expr(inner.next().unwrap())?);
-				let (err_bind,catch_block) = {
-					let next = inner.next().unwrap();
-					match next.as_rule() {
-						Rule::block => (None, Self::parse_block(next)?),
-						Rule::var => (Some(next.as_str().to_string()), Self::parse_block(inner.next().unwrap())?),
-						_ => unreachable!(),
-					}
-				};
-				Ok(Self {
-					value: ExprKind::CatchBlock { scrutinee, err_bind, catch_block },
-					accessors: vec![],
-					span: span.clone()
-				})
-			}
 			"not_global" | "!global" | "v" => {
 				let mut inner = cmd.into_inner();
 				let pattern = Box::new(Self::parse_expr(inner.next().unwrap())?);
@@ -741,6 +786,15 @@ impl Expr {
 				let msg = Box::new(Self::parse_expr(inner.next().unwrap())?);
 				Ok(Self {
 					value: ExprKind::Command(Command::Error(span.clone(),msg)),
+					accessors: vec![],
+					span
+				})
+			}
+			"debug!" => {
+				let mut inner = cmd.into_inner();
+				let msg = Box::new(Self::parse_expr(inner.next().unwrap())?);
+				Ok(Self {
+					value: ExprKind::Command(Command::Debug(msg)),
 					accessors: vec![],
 					span
 				})
@@ -853,7 +907,7 @@ impl Expr {
 		let value_kind = value.into_inner().next().unwrap();
 		let value = Val::try_from_pair(value_kind).try_blame(span.clone())?;
 		Ok(Self {
-			value: ExprKind::Value(value.into()),
+			value: ExprKind::Value(value),
 			accessors: vec![],
 			span
 		})
@@ -898,6 +952,7 @@ pub enum ExprKind {
 	UntilBlock { cond: Box<Expr>, body: Vec<Expr> },
 	WithBlock { buffer: Box<Expr>, body: Vec<Expr> },
 	CatchBlock { scrutinee: Box<Expr>, err_bind: Option<String>, catch_block: Vec<Expr> },
+	TryBlock { scrutinee: Box<Expr>, try_bind: Option<String>, try_block: Vec<Expr> },
 	Range { start: Box<Expr>, end: Box<Expr> },
 	BinExpr(Vec<RpnItem>),
 	BoolExpr(Vec<RpnItem>),
@@ -912,8 +967,10 @@ pub enum Command {
 	New(Box<Expr>), // constructor for classes
 	Ref(Box<Expr>), // reference to a value
 	Error(ArcSpan,Box<Expr>),
+	Debug(Box<Expr>),
 	Continue,
 	Break,
+	Exit { code: Option<Box<Expr>> }, // exit the interpreter, optionally with a code
 	Return { ret: Option<Box<Expr>> },
 	Global { pattern: Box<Expr>, block: Vec<Expr>, },
 	NotGlobal { pattern: Box<Expr>, block: Vec<Expr>, },
@@ -1075,15 +1132,20 @@ pub type RcVal = Rc<RefCell<Val>>;
 /// This means that `ValRef` can be safely used as long as the interpreter's scope management is respected.
 #[derive(Default, Debug, Clone)]
 pub struct ValRef {
-    pub ptr: *mut Val, // oooo spooooooky
-    pub min_depth: usize,
+    ptr: *mut Val, // oooo spooooooky
+    min_depth: usize,
 }
 
 impl ValRef {
+	pub fn min_depth(&self) -> usize {
+		self.min_depth
+	}
 	pub fn as_borrow(&self) -> &Val {
+		assert!(!self.ptr.is_null(), "Attempted to dereference a null pointer in ValRef");
 		unsafe { &*self.ptr }
 	}
 	pub fn as_mut_borrow(&mut self) -> &mut Val {
+		assert!(!self.ptr.is_null(), "Attempted to dereference a null pointer in ValRef");
 		unsafe { &mut *self.ptr }
 	}
 	pub fn peel_refs(&self) -> &Val {
@@ -1114,9 +1176,10 @@ pub enum Val {
 	Arr(Rc<RefCell<VecDeque<Val>>>),
 	Num(isize),
 	Register(char),
-	BoundClosure(Box<RcVal>, Box<RcVal>), // holds the Closure and the 'self' value
+	BoundClosure(Box<Val>, Box<RcVal>), // holds the Closure and the 'self' value
 	Closure(Rc<[String]>, Rc<[Expr]>),
 	Dict(Rc<RefCell<HashMap<String,Val>>>),
+	Constructor(String, HashMap<String, Expr>), // name and fields
 	Bool(bool),
 	Regex(Regex),
 	Expr(Box<Expr>),
@@ -1159,7 +1222,7 @@ impl Val {
 	}
 	pub fn to_int(self) -> Result<Self,VicErr> {
 		self.to_string().parse::<isize>().map_err(|_| {
-			VicErr::Simple(format!("Could not convert value to integer: {}", self))
+			VicErr::Simple(format!("Could not convert value to integer: {self}"))
 		}).map(Self::Num)
 	}
 	/// Unwrap implementation for `Val` with a default value
@@ -1199,11 +1262,11 @@ impl Val {
 	}
 	pub fn cmp(&self, other: &Val, vicut: &mut ViCut) -> Option<Ordering> {
 		match self {
-			Val::BuiltinHandle(handle) => unreachable!(),
+			Val::BuiltinHandle(_) => unreachable!(),
+			Val::Constructor(_, _) => todo!(),
 			Val::Err(_, _) => None,
 			Val::Ref(val) => {
-				let unboxed = val.ptr;
-				let val_ref = unsafe { &*unboxed };
+				let val_ref = val.as_borrow();
 				val_ref.cmp(other,vicut)
 			}
 			Val::Break |
@@ -1216,7 +1279,7 @@ impl Val {
 					debug!("Comparing strings: '{}' and '{}'", str1.borrow(), str2.borrow());
 					Some(str1.cmp(str2))
 				} else if let Val::Regex(regex) = other {
-					if regex.is_match(&*str1.borrow()) {
+					if regex.is_match(&str1.borrow()) {
 						Some(Ordering::Equal)
 					} else {
 						None
@@ -1238,7 +1301,7 @@ impl Val {
 					loop {
 						match (iter1.next(), iter2.next()) {
 							(Some(val1), Some(val2)) => {
-								if let Some(ordering) = val1.cmp(&val2, vicut) {
+								if let Some(ordering) = val1.cmp(val2, vicut) {
 									if ordering != Ordering::Equal { return Some(ordering) }
 								} else {
 									return None;
@@ -1282,7 +1345,7 @@ impl Val {
 						match (iter1.next(), iter2.next()) {
 							(Some((key1, val1)), Some((key2, val2))) => {
 								if key1 != key2 { return None }
-								if let Some(ordering) = val1.cmp(&val2, vicut) {
+								if let Some(ordering) = val1.cmp(val2, vicut) {
 									if ordering != Ordering::Equal { return Some(ordering) }
 								} else {
 									return None;
@@ -1306,7 +1369,7 @@ impl Val {
 			}
 			Val::Regex(regex) => {
 				if let Val::Str(other_str) = other {
-					if regex.is_match(&*other_str.borrow()) {
+					if regex.is_match(&other_str.borrow()) {
 						Some(Ordering::Equal)
 					} else {
 						None
@@ -1327,7 +1390,7 @@ impl Val {
 		match self {
 			Self::Arr(arr) => Ok(arr.borrow().clone().into_iter()),
 			Self::Str(s) => {
-				let graphemes = s.borrow().graphemes(true).map(|g| Val::Str(Rc::new(RefCell::new(g.to_string()))).into()).collect::<VecDeque<_>>();
+				let graphemes = s.borrow().graphemes(true).map(|g| Val::new_str(g.to_string())).collect::<VecDeque<_>>();
 				Ok(graphemes.into_iter())
 			}
 			_ => Err(VicErr::Simple(format!("Value of type '{}' is not iterable", self.display_type())))
@@ -1337,7 +1400,7 @@ impl Val {
 		match self {
 			Self::Arr(arr) => Ok(arr.borrow().clone().into_iter()),
 			Self::Str(s) => {
-				let graphemes = s.borrow().graphemes(true).map(|g| Val::Str(Rc::new(RefCell::new(g.to_string()))).into()).collect::<VecDeque<_>>();
+				let graphemes = s.borrow().graphemes(true).map(|g| Val::new_str(g.to_string())).collect::<VecDeque<_>>();
 				Ok(graphemes.into_iter())
 			}
 			_ => Err(VicErr::Simple(format!("Value of type '{}' is not iterable", self.display_type())))
@@ -1349,7 +1412,7 @@ impl Val {
 				let mut elements = VecDeque::new();
 				let elem_list = pair.into_inner().next().unwrap().into_inner();
 				for elem in elem_list {
-					elements.push_back(Self::Expr(Box::new(Expr::parse_expr(elem)?)).into());
+					elements.push_back(Self::Expr(Box::new(Expr::parse_expr(elem)?)));
 				}
 				Ok(Self::Arr(Rc::new(RefCell::new(elements))))
 			}
@@ -1365,7 +1428,7 @@ impl Val {
 					let mut inner = key_value.into_inner();
 					let name = inner.next().unwrap().as_str().to_string();
 					let val = Val::Expr(Box::new(Expr::parse_expr(inner.next().unwrap())?));
-					map.insert(name, val.into());
+					map.insert(name, val);
 				}
 				Ok(Self::Dict(Rc::new(RefCell::new(map))))
 			}
@@ -1418,7 +1481,7 @@ impl Val {
 			(s1, Self::Str(s2)) => Ok(Self::Str(Rc::new(RefCell::new(s2.borrow().to_string() + &s1.to_string())))),
 			(Self::Arr(arr), val) => {
 				let mut arr_ref = arr.borrow_mut();
-				arr_ref.push_back(val.clone().into());
+				arr_ref.push_back(val.clone());
 				Ok(Self::Arr(arr.clone()))
 			}
 			_ => Err(VicErr::Simple(format!("Cannot add values of type '{}' and '{}'", self.display_type(), other.display_type())))
@@ -1470,10 +1533,18 @@ impl Val {
 	}
 	pub fn display_type(&self) -> String {
 		match self {
-			Self::Ref(val) => format!("ref<{}>", val.peel_refs().display_type()),
-			Self::Err(_, _) => "error".to_string(),
+			Self::Ref(val) => format!("ref<{}>", val.as_borrow().display_type()),
+			Self::Err(_, val) => format!("error<{}>", val.borrow().display_type()),
 			Self::BuiltinHandle(_) => "buffer_handle".to_string(),
-			Self::Dict(_) => "dictionary".to_string(),
+			Self::Constructor(name, _) => format!("constructor<{name}>"),
+			Self::Dict(dict) => {
+				let dict = dict.borrow();
+				if let Some(class_name) = dict.get("_classname") {
+					class_name.to_string()
+				} else {
+					"dictionary".to_string()
+				}
+			}
 			Self::Str(_) => "string".to_string(),
 			Self::Num(_) => "number".to_string(),
 			Self::Register(_) => "register".to_string(),
@@ -1494,6 +1565,10 @@ impl Val {
 			Self::Ref(val) => {
 				// If the value is a reference, we need to dereference it
 				val.peel_refs().is_truthy(vicut)
+			}
+			Self::Constructor(_, _) => {
+				// Constructors are always truthy, they represent a valid object
+				true
 			}
 			Self::Err(_,_) => false,
 			Self::BuiltinHandle(_) => {
@@ -1557,13 +1632,14 @@ impl Display for Val {
 				let val = val.peel_refs();
 				write!(f, "{val}")
 			}
+			Self::Constructor(name, _) => write!(f, "constructor<{name}>"),
 			Self::Err(span, msg) => {
 				let msg = msg.borrow().to_string();
 				let pest_err = expr_error(msg, span.clone());
 				write!(f, "{pest_err}")
 			}
 			Self::BuiltinHandle(_) => {
-				write!(f, "{{ buffer handle }}")
+				write!(f, "{{ builtin }}")
 			}
 			Self::Arr(arr) => {
 				let inner = arr.borrow().iter()
@@ -1575,11 +1651,20 @@ impl Display for Val {
 			Self::Dict(dict) => {
 				let mut key_values = vec![];
 				let dict_ref = dict.borrow();
+				let mut class_name = None;
 				for (key,value) in &*dict_ref {
+					if key == "_classname" {
+						class_name = Some(value.to_string());
+						continue;
+					}
 					key_values.push(format!("{key}: {value}"))
 				}
 				let joined = key_values.join(", ");
-				write!(f, "{{{joined}}}")
+				if let Some(class_name) = class_name {
+					write!(f, "{class_name} {{{joined}}}")
+				} else {
+					write!(f, "{{{joined}}}")
+				}
 			}
 			Self::Expr(_) => {
 				write!(f, "{{ expression }}")

@@ -40,6 +40,7 @@ fn expr_error2<R: pest::RuleType>(message: String, span: pest::Span) -> String {
 pub enum VicErr {
 	Full(ArcSpan,String),
 	Simple(String),
+	Exit(i32),
 
 	// These three are control flow that are returned as 'errors'
 	// this pattern allows for signals to flow upwards easily through nested contexts
@@ -96,6 +97,9 @@ impl Display for VicErr {
 				} else {
 					write!(f,"vicut: {msg}")
 				}
+			}
+			VicErr::Exit(code) => {
+				write!(f, "vicut: exiting with code {code}")
 			}
 			VicErr::Continue(arc_span) => {
 				let pretty_err = expr_error("found 'continue' outside of loop context".into(), arc_span.clone());

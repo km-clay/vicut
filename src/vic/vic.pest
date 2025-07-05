@@ -55,21 +55,23 @@ global        = ${ not? ~ ("global") ~ " "+ ~ expr ~ WHITESPACE* ~ block ~ WHITE
 move          = ${ ("move") ~ " "+ ~ expr ~ WHITESPACE* }
 cut           = ${ ("cut") ~ " "+ ~ expr ~ WHITESPACE* }
 next          = ${ "next" ~ WHITESPACE+ }
-catch         =  { "catch" ~ expr ~ ("as" ~ var)? ~ block }
 repeat        = ${ ("repeat") ~ " "+ ~ expr ~ " "+ ~ block }
+exit          =  { "exit" ~ expr }
 break_loop    = ${ ("break") ~ WHITESPACE* }
 new           = ${ "new" ~ WHITESPACE+ ~ expr ~ WHITESPACE* }
 ref           = ${ "ref" ~ WHITESPACE+ ~ expr ~ WHITESPACE* }
 continue_loop = ${ ("continue") ~ WHITESPACE* }
 error         =  { "error!" ~ expr }
+debug         =  { "debug!" ~ expr }
 return        = ${ "return" ~ " "+ ~ expr }
 include       = ${ ("include") ~ " "+ ~ expr ~ WHITESPACE* }
 
 command = {
     global
   | error
-  | catch
+  | debug
   | move
+  | exit
   | cut
   | new
   | ref
@@ -91,6 +93,8 @@ cases              = { "{" ~ case* ~ default_block? ~ "}" }
 case               = { "case" ~ literal ~ ("|" ~ literal)* ~ block }
 with_block         = { "with" ~ expr ~ block }
 loop_block         = { "loop" ~ block }
+catch_block        = { "catch" ~ expr ~ ("as" ~ var)? ~ block }
+try_block          = { "try" ~ expr ~ ("as" ~ var)? ~ block }
 for_block          = { "for" ~ var ~ "in" ~ (range_inclusive | range | expr) ~ block }
 do_while_block     = { "do" ~ block ~ "while" ~ expr_bool_priority }
 do_until_block     = { "do" ~ block ~ "until" ~ expr_bool_priority }
@@ -138,10 +142,10 @@ not     = { "!" }
 // I'm not sure why I need to nest these rules like this
 // but it didn't work right until I did
 expr               = !{
-    ("(" ~ expr ~ ")" | (block_struct | (bin_expr | ((bool_node | bool_expr) | (command | value))))) ~ accessor*
+    ("(" ~ expr ~ ")" | (block_struct | (bin_expr | ((bool_node | bool_expr) | (command | block | value))))) ~ accessor*
 }
 expr_not_recursive = !{
-    (block_struct | command | value) ~ accessor*
+    (block_struct | command | block | value) ~ accessor*
 }
 
 accessor = { field | index | err_prop | call }
@@ -232,6 +236,8 @@ block_struct = {
     with_block
   | switch_block
   | for_block
+  | try_block
+  | catch_block
   | if_block
   | loop_block
   | do_while_block
