@@ -359,9 +359,21 @@ impl Expr {
 		let mut block = inner.next().unwrap().into_inner();
 		let field_pairs = block.next().unwrap().into_inner();
 		for field in field_pairs {
+			let field_span = field.as_span();
 			let mut field_inner = field.into_inner();
 			let name = field_inner.next().unwrap().as_str().to_string();
-			let val = Self::parse_expr(field_inner.next().unwrap())?;
+
+			// Fields can be written as 'field: expr' or just 'field'
+			// In the latter case, we initialize it to null
+			let val = if let Some(expr) = field_inner.next() {
+				Self::parse_expr(expr)?
+			} else {
+				Expr {
+					value: ExprKind::Value(Val::Null),
+					accessors: vec![],
+					span: field_span,
+				}
+			};
 			data.insert(name, val);
 		}
 		while let Some(method_def) = block.next() {
@@ -1171,7 +1183,7 @@ pub enum Val {
 	Null,
 	Err(ArcSpan,Box<RcVal>),
 	Ref(ValRef),
-	Str(Rc<RefCell<String>>),
+	Str(String),
 	Var(String),
 	Arr(Rc<RefCell<VecDeque<Val>>>),
 	Num(isize),
@@ -1212,7 +1224,7 @@ impl Val {
 	}
 
 	pub fn new_str(str: String) -> Self {
-		Self::Str(Rc::new(RefCell::new(str)))
+		Self::Str(str)
 	}
 	pub fn new_arr(arr: VecDeque<Val>) -> Self {
 		Self::Arr(Rc::new(RefCell::new(arr)))
@@ -1252,7 +1264,7 @@ impl Val {
 				Val::Arr(Rc::new(RefCell::new(new_arr)))
 			}
 			Val::Str(str) => {
-				Val::Str(Rc::new(RefCell::new(str.borrow().clone())))
+				Val::Str(str.clone())
 			}
 			Val::Ref(val) => {
 				Val::Ref(val.clone())
@@ -1276,10 +1288,10 @@ impl Val {
 			}
 			Val::Str(str1) => {
 				if let Val::Str(str2) = other {
-					debug!("Comparing strings: '{}' and '{}'", str1.borrow(), str2.borrow());
+					debug!("Comparing strings: '{str1}' and '{str2}'");
 					Some(str1.cmp(str2))
 				} else if let Val::Regex(regex) = other {
-					if regex.is_match(&str1.borrow()) {
+					if regex.is_match(str1) {
 						Some(Ordering::Equal)
 					} else {
 						None
@@ -1326,7 +1338,7 @@ impl Val {
 			Val::Register(reg) => {
 				let content = read_register(Some(*reg))?.to_string();
 				if let Val::Str(other_str) = other {
-					Some(content.cmp(&other_str.borrow()))
+					Some(content.cmp(other_str))
 				} else {
 					None
 				}
@@ -1369,7 +1381,7 @@ impl Val {
 			}
 			Val::Regex(regex) => {
 				if let Val::Str(other_str) = other {
-					if regex.is_match(&other_str.borrow()) {
+					if regex.is_match(other_str) {
 						Some(Ordering::Equal)
 					} else {
 						None
@@ -1390,7 +1402,7 @@ impl Val {
 		match self {
 			Self::Arr(arr) => Ok(arr.borrow().clone().into_iter()),
 			Self::Str(s) => {
-				let graphemes = s.borrow().graphemes(true).map(|g| Val::new_str(g.to_string())).collect::<VecDeque<_>>();
+				let graphemes = s.graphemes(true).map(|g| Val::new_str(g.to_string())).collect::<VecDeque<_>>();
 				Ok(graphemes.into_iter())
 			}
 			_ => Err(VicErr::Simple(format!("Value of type '{}' is not iterable", self.display_type())))
@@ -1400,7 +1412,7 @@ impl Val {
 		match self {
 			Self::Arr(arr) => Ok(arr.borrow().clone().into_iter()),
 			Self::Str(s) => {
-				let graphemes = s.borrow().graphemes(true).map(|g| Val::new_str(g.to_string())).collect::<VecDeque<_>>();
+				let graphemes = s.graphemes(true).map(|g| Val::new_str(g.to_string())).collect::<VecDeque<_>>();
 				Ok(graphemes.into_iter())
 			}
 			_ => Err(VicErr::Simple(format!("Value of type '{}' is not iterable", self.display_type())))
@@ -1434,7 +1446,7 @@ impl Val {
 			}
 			Rule::str_literal => {
 				let text = pair.into_inner().next().unwrap().as_str().to_string();
-				Ok(Self::Str(Rc::new(RefCell::new(text))))
+				Ok(Self::Str(text))
 			}
 			Rule::var => {
 				let var_name = pair.as_str().to_string();
@@ -1477,8 +1489,8 @@ impl Val {
 	pub fn add(&self, other: Val) -> Result<Self,VicErr> {
 		match (self, &other) {
 			(Self::Num(n1), Self::Num(n2)) => Ok(Self::Num(n1 + n2)),
-			(Self::Str(s1), s2) => Ok(Self::Str(Rc::new(RefCell::new(s1.borrow().to_string() + &s2.to_string())))),
-			(s1, Self::Str(s2)) => Ok(Self::Str(Rc::new(RefCell::new(s2.borrow().to_string() + &s1.to_string())))),
+			(Self::Str(s1), s2) => Ok(Self::Str(s1.to_string() + &s2.to_string())),
+			(s1, Self::Str(s2)) => Ok(Self::Str(s2.to_string() + &s1.to_string())),
 			(Self::Arr(arr), val) => {
 				let mut arr_ref = arr.borrow_mut();
 				arr_ref.push_back(val.clone());
@@ -1497,8 +1509,8 @@ impl Val {
 		match (self, &other) {
 			(Self::Num(n1), Self::Num(n2)) => Ok(Self::Num(n1 * n2)),
 			(Self::Str(s1), Self::Num(n2)) => {
-				let repeated = s1.borrow().repeat(*n2 as usize);
-				Ok(Self::Str(Rc::new(RefCell::new(repeated))))
+				let repeated = s1.repeat(*n2 as usize);
+				Ok(Self::Str(repeated))
 			}
 			_ => Err(VicErr::Simple(format!("Cannot multiply values of type '{}' and '{}'", self.display_type(), other.display_type())))
 		}
@@ -1577,7 +1589,7 @@ impl Val {
 				true
 			}
 			Self::Dict(dict) => !dict.borrow().is_empty(),
-			Self::Str(s) => !s.borrow().is_empty(),
+			Self::Str(s) => !s.is_empty(),
 			Self::Num(n) => *n != 0,
 			Self::Expr(e) => {
 				vicut.eval_expr(false, e).is_ok_and(|eval| eval.is_truthy(vicut))
@@ -1675,7 +1687,7 @@ impl Display for Val {
 			Self::Closure(_, _) => {
 				write!(f, "{{ closure }}")
 			}
-			Self::Str(s) => write!(f, "{}",unsafe{&*s.as_ptr()}),
+			Self::Str(s) => write!(f, "{s}"),
 			Self::Num(n) => write!(f, "{n}"),
 			Self::Bool(b) => write!(f, "{b}"),
 			Self::Regex(r) => write!(f, "{r}"),

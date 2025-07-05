@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, VecDeque}, fmt::Display, rc::Rc, str::FromStr};
 
-use crate::{exec::ViCut, linebuf::ClampedUsize, register::{read_register, write_register, RegisterContent}, vic::{error::VicErr, parse::{RcVal, Val, ValRef}}, vicmd::{Bound, Word}};
+use crate::{exec::ViCut, linebuf::ClampedUsize, register::{read_register, write_register, RegisterContent}, vic::{error::VicErr, parse::Val}, vicmd::{Bound, Word}};
 
 #[derive(Debug, Clone)]
 pub enum Func {
@@ -88,6 +88,7 @@ impl Display for Func {
 		}
 	}
 }
+
 impl Display for Var {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
@@ -145,7 +146,7 @@ impl ViCut {
 					return Err(VicErr::Simple("type_of expects exactly one argument".to_string()))
 				}
 				let arg = &args[0];
-				Ok(Val::new_str(arg.display_type()))
+				Ok(Val::Str(arg.display_type()))
 			}
 			Func::Json => {
 				if args.len() != 1 {
@@ -162,7 +163,7 @@ impl ViCut {
 				}
 				let raw = arg.to_string();
 				let json_str = serde_json::to_string(&raw).map_err(|e| VicErr::Simple(format!("Failed to serialize to JSON: {e}")))?;
-				Ok(Val::new_str(json_str))
+				Ok(Val::Str(json_str))
 			}
 			Func::Env => {
 				if args.len() != 1 {
@@ -172,9 +173,8 @@ impl ViCut {
 				let Val::Str(var_name) = arg else {
 					return Err(VicErr::Simple(format!("Expected string in env(), got {}", arg.display_type())))
 				};
-				let var_name = var_name.borrow();
 				let env_value = std::env::var(var_name.trim()).unwrap_or_default();
-				Ok(Val::new_str(env_value))
+				Ok(Val::Str(env_value))
 			}
 			Func::Print => {
 				let mut output = String::new();
@@ -193,7 +193,7 @@ impl ViCut {
 					let arg_str = arg.to_string();
 					format.push_str(&arg_str);
 				}
-				Ok(Val::new_str(format))
+				Ok(Val::Str(format))
 			}
 		}
 	}
@@ -207,21 +207,21 @@ impl ViCut {
 			Var::Pos => Val::Num(cur_buf.cursor.get() as isize),
 			Var::Byte => Val::Num(cur_buf.cursor_byte_pos() as isize),
 			Var::BufLen => Val::Num(cur_buf.buffer.len() as isize),
-			Var::Selection => Val::new_str(cur_buf.selected_content().unwrap_or_default()),
-			Var::Buffer => Val::new_str(cur_buf.buffer.clone()),
+			Var::Selection => Val::Str(cur_buf.selected_content().unwrap_or_default()),
+			Var::Buffer => Val::Str(cur_buf.buffer.clone()),
 			Var::Word => {
 				let (word_start,word_end) = cur_buf.text_obj_word(1, Bound::Inside, Word::Normal).unwrap_or_default();
 				let word_end = ClampedUsize::new(word_end, cur_buf.cursor.cap(), false).ret_add(1);
 				cur_buf.slice_inclusive(word_start..=word_end)
-					.map(|slice| Val::new_str(slice.to_string()))
-					.unwrap_or(Val::new_str(String::new()))
+					.map(|slice| Val::Str(slice.to_string()))
+					.unwrap_or(Val::Str(String::new()))
 			}
 			Var::BigWord => {
 				let (big_word_start,big_word_end) = cur_buf.text_obj_word(1, Bound::Inside, Word::Big).unwrap_or_default();
 				let big_word_end = ClampedUsize::new(big_word_end, cur_buf.cursor.cap(), false).ret_add(1);
 				cur_buf.slice_inclusive(big_word_start..=big_word_end)
-					.map(|slice| Val::new_str(slice.to_string()))
-					.unwrap_or(Val::new_str(String::new()))
+					.map(|slice| Val::Str(slice.to_string()))
+					.unwrap_or(Val::Str(String::new()))
 			}
 			Var::IsEndofFile => Val::Bool(cur_buf.cursor_at_max()),
 			Var::IsEndofLine => Val::Bool(cur_buf.cursor_at_eol()),
@@ -229,8 +229,8 @@ impl ViCut {
 			Var::IsStartofLine => Val::Bool(cur_buf.cursor.get() == 0),
 			Var::Char => {
 				cur_buf.grapheme_at_cursor()
-					.map(|gr| Val::new_str(gr.to_string()))
-					.unwrap_or(Val::new_str(String::new()))
+					.map(|gr| Val::Str(gr.to_string()))
+					.unwrap_or(Val::Str(String::new()))
 			}
 		})
 	}
@@ -253,7 +253,7 @@ impl ViCut {
 					return Err(VicErr::Simple("Line must be a non-negative integer".to_string()));
 				};
 				let Some((start,_)) = cur_buf.line_bounds(line) else {
-					return Err(VicErr::Simple(format!("Line {} does not exist", line)));
+					return Err(VicErr::Simple(format!("Line {line} does not exist")));
 				};
 				cur_buf.cursor.set(start);
 			},
@@ -263,7 +263,7 @@ impl ViCut {
 				};
 				cur_buf.cursor.set(pos);
 			},
-			_ => return Err(VicErr::Simple(format!("Cannot set built-in variable {}", name))),
+			_ => return Err(VicErr::Simple(format!("Cannot set built-in variable {name}"))),
 		}
 		Ok(())
 	}
@@ -330,9 +330,9 @@ impl ViCut {
 				}
 				let Val::Register(reg) = self_val else { unreachable!() };
 				let content = read_register(Some(*reg)).unwrap_or_default().to_string();
-				Ok(Val::new_str(content))
+				Ok(Val::Str(content))
 			}
-			_ => Err(VicErr::Simple(format!("Unknown register method: {}", method_name))),
+			_ => Err(VicErr::Simple(format!("Unknown register method: {method_name}"))),
 		}
 	}
 	fn num_builtins(&mut self, self_val: &mut Val, method_name: &str, args: Rc<[Val]>) -> Result<Val, VicErr> {
@@ -360,7 +360,7 @@ impl ViCut {
 					Err(VicErr::Simple("sqrt can only be called on numbers".to_string()))
 				}
 			},
-			_ => Err(VicErr::Simple(format!("Unknown method: {}", method_name))),
+			_ => Err(VicErr::Simple(format!("Unknown method: {method_name}"))),
 		}
 	}
 	fn arr_builtins(&mut self, self_val: &mut Val, method_name: &str, args: Rc<[Val]>) -> Result<Val, VicErr> {
@@ -446,7 +446,7 @@ impl ViCut {
 					return Err(VicErr::Simple("peek does not take any arguments".to_string()));
 				}
 				if let Val::Arr(arr) = self_val {
-					let mut arr = arr.borrow();
+					let arr = arr.borrow();
 					if let Some(val) = arr.back() {
 						Ok(val.clone())
 					} else {
@@ -461,7 +461,7 @@ impl ViCut {
 					return Err(VicErr::Simple("fpeek does not take any arguments".to_string()));
 				}
 				if let Val::Arr(arr) = self_val {
-					let mut arr = arr.borrow();
+					let arr = arr.borrow();
 					if let Some(val) = arr.front() {
 						Ok(val.clone())
 					} else {
@@ -471,7 +471,7 @@ impl ViCut {
 					Err(VicErr::Simple("fpeek can only be called on arrays".to_string()))
 				}
 			}
-			_ => Err(VicErr::Simple(format!("Unknown method: {}", method_name))),
+			_ => Err(VicErr::Simple(format!("Unknown method: {method_name}"))),
 		}
 	}
 	fn string_builtins(&mut self, self_val: &mut Val, method_name: &str, args: Rc<[Val]>) -> Result<Val, VicErr> {
@@ -481,7 +481,7 @@ impl ViCut {
 					return Err(VicErr::Simple("len does not take any arguments".to_string()));
 				}
 				let len = match self_val {
-					Val::Str(s) => s.borrow().len(),
+					Val::Str(s) => s.len(),
 					Val::Arr(arr) => arr.borrow().len(),
 					_ => return Err(VicErr::Simple("len can only be called on strings or arrays".to_string())),
 				};
@@ -492,7 +492,6 @@ impl ViCut {
 					return Err(VicErr::Simple("push takes exactly one argument".to_string()));
 				}
 				if let Val::Str(s) = self_val {
-					let mut s = s.borrow_mut();
 					s.push_str(&args[0].to_string());
 					Ok(Val::Null)
 				} else {
@@ -504,10 +503,9 @@ impl ViCut {
 					return Err(VicErr::Simple("pop does not take any arguments".to_string()));
 				}
 				if let Val::Str(s) = self_val {
-					let mut s = s.borrow_mut();
 					if !s.is_empty() {
 						let last_char = s.pop().unwrap();
-						Ok(Val::new_str(last_char.to_string()))
+						Ok(Val::Str(last_char.to_string()))
 					} else {
 						Err(VicErr::Simple("pop called on an empty string".to_string()))
 					}
@@ -520,8 +518,7 @@ impl ViCut {
 					return Err(VicErr::Simple("to_upper does not take any arguments".to_string()));
 				}
 				if let Val::Str(s) = self_val {
-					let s = s.borrow();
-					Ok(Val::new_str(s.to_uppercase()))
+					Ok(Val::Str(s.to_uppercase()))
 				} else {
 					Err(VicErr::Simple("to_upper can only be called on strings".to_string()))
 				}
@@ -531,8 +528,7 @@ impl ViCut {
 					return Err(VicErr::Simple("to_lower does not take any arguments".to_string()));
 				}
 				if let Val::Str(s) = self_val {
-					let s = s.borrow();
-					Ok(Val::new_str(s.to_lowercase()))
+					Ok(Val::Str(s.to_lowercase()))
 				} else {
 					Err(VicErr::Simple("to_lower can only be called on strings".to_string()))
 				}
@@ -542,8 +538,7 @@ impl ViCut {
 					return Err(VicErr::Simple("trim does not take any arguments".to_string()));
 				}
 				if let Val::Str(s) = self_val {
-					let s = s.borrow();
-					Ok(Val::new_str(s.trim().to_string()))
+					Ok(Val::Str(s.trim().to_string()))
 				} else {
 					Err(VicErr::Simple("trim can only be called on strings".to_string()))
 				}
@@ -554,9 +549,9 @@ impl ViCut {
 				}
 				let arg = args[0].clone();
 				if let Val::Str(s) = self_val {
-					let s = s.borrow().to_string();
+					let s = s.to_string();
 					let trimmed = match arg {
-						Val::Str(ref pat_str) => s.trim_matches(|c| pat_str.borrow().contains(c)),
+						Val::Str(ref pat_str) => s.trim_matches(|c| pat_str.contains(c)),
 						Val::Arr(ref arr) => {
 							let arr = arr.borrow();
 							let chars: Option<Vec<char>> = arr.iter()
@@ -577,7 +572,7 @@ impl ViCut {
 						}
 						_ => return Err(VicErr::Simple("Expected string or array of single-character strings".to_string())),
 					};
-					Ok(Val::new_str(trimmed.to_string()))
+					Ok(Val::Str(trimmed.to_string()))
 				} else {
 					Err(VicErr::Simple("trim_matches can only be called on strings".to_string()))
 				}
@@ -588,12 +583,11 @@ impl ViCut {
 				}
 				let arg = &args[0];
 				if let Val::Str(s) = self_val {
-					let s = s.borrow();
 					let split_str = match arg {
-						Val::Str(delim) => delim.borrow(),
+						Val::Str(delim) => delim,
 						_ => return Err(VicErr::Simple("Expected string or array of strings".to_string())),
 					};
-					let parts: VecDeque<Val> = s.split(split_str.as_str()).map(|part| Val::new_str(part.to_string())).collect();
+					let parts: VecDeque<Val> = s.split(split_str.as_str()).map(|part| Val::Str(part.to_string())).collect();
 					if parts.is_empty() {
 						Ok(Val::Null)
 					} else {
@@ -611,13 +605,12 @@ impl ViCut {
 				}
 				let arg = &args[0];
 				if let Val::Str(s) = self_val {
-					let s = s.borrow();
 					match arg {
 						Val::Str(prefix) => {
 							if is_ends_with {
-								Ok(Val::Bool(s.ends_with(prefix.borrow().as_str())))
+								Ok(Val::Bool(s.ends_with(prefix.as_str())))
 							} else {
-								Ok(Val::Bool(s.starts_with(prefix.borrow().as_str())))
+								Ok(Val::Bool(s.starts_with(prefix.as_str())))
 							}
 						}
 						Val::Arr(arr) => {

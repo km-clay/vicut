@@ -176,7 +176,9 @@ var_mod     =  { var ~ accessor* ~ "%=" ~ expr }
 // Class stuff
 
 class_def   = { "class" ~ var ~ class_block }
-class_block = { "{" ~ key_value_list ~ func_def* ~ "}" }
+class_block = { "{" ~ field_list ~ func_def* ~ "}" }
+class_field = { !"def " ~ var ~ (":" ~ expr)? }
+field_list  = { ((class_field ~ ",")* ~ class_field?)? }
 
 // Function stuff
 

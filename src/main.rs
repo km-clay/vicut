@@ -519,8 +519,8 @@ fn execute(mut vicut: ViCut, args: &Opts, filename: Option<PathBuf>) -> Result<V
 		.map(|s| s.file_name().unwrap_or_default().to_string_lossy().to_string())
 		.unwrap_or_else(|| String::from("stdin"));
 	let filepath = filename.map(|s| s.to_string_lossy().to_string()).unwrap_or(String::from("stdin"));
-	vicut.set_var("filename".into(), Val::new_str(basename))?;
-	vicut.set_var("filepath".into(), Val::new_str(filepath))?;
+	vicut.set_var("filename".into(), Val::Str(basename))?;
+	vicut.set_var("filepath".into(), Val::Str(filepath))?;
 
 
 	let cmds = vicut.cmds.clone();

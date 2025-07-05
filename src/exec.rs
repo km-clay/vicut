@@ -766,8 +766,8 @@ impl ViCut {
 			return Err(VicErr::Simple(format!("Shell command failed with status: {}", output.status)))
 		}
 		// Shell commands return an array containing stdout as index 0 and stderr as index 1
-		let stdout = Val::new_str(String::from_utf8_lossy(&output.stdout).trim_end().to_string());
-		let stderr = Val::new_str(String::from_utf8_lossy(&output.stderr).trim_end().to_string());
+		let stdout = Val::Str(String::from_utf8_lossy(&output.stdout).trim_end().to_string());
+		let stderr = Val::Str(String::from_utf8_lossy(&output.stderr).trim_end().to_string());
 		outputs.insert("stdout".to_string(),stdout);
 		outputs.insert("stderr".to_string(), stderr);
 		Ok(Val::new_dict(outputs))
@@ -1100,7 +1100,7 @@ impl ViCut {
 	}
 	pub fn eval_expr(&mut self, is_top_level: bool, cmd_expr: &Expr) -> Result<Val,VicErr> {
 		let Expr { value, accessors, span } = cmd_expr;
-		let mut eval = match value {
+		let eval = match value {
 			ExprKind::LoopBlock {..}    => self.eval_loop_block(value)?,
 			ExprKind::WhileBlock {..}   |
 			ExprKind::UntilBlock {..}   => self.eval_prefix_loop_block(value)?,
@@ -1218,7 +1218,7 @@ impl ViCut {
 			map_eval.insert(k.to_string(), eval);
 		}
 
-		map_eval.insert("_classname".to_string(), Val::new_str(class_name.to_string()));
+		map_eval.insert("_classname".to_string(), Val::Str(class_name.to_string()));
 
 		// Classes are also just fancy variables
 		// Internally they are just a named dictionary you can easily spawn instances of
@@ -1358,15 +1358,15 @@ impl ViCut {
 				Err(VicErr::Return(arc_span.clone(), Val::Err(arc_span.clone(), Box::new(err_val.into()))))
 			}
 			Command::Return { ret } => {
-				let ret = if let Some(expr) = ret {
-					self.eval_expr(is_top_level, expr)
-						.try_blame(expr.span())?
-				} else { Val::Null };
-
-				// Validate references in the return value before we return
-				self.validate_references(&ret, Some(span.clone()))?;
-
-				Err(VicErr::Return(span, ret))
+				if let Some(expr) = ret {
+					let span = expr.span();
+					let eval = self.eval_expr(is_top_level, expr)
+						.try_blame(expr.span())?;
+					self.validate_references(&eval, Some(span.clone()))?;
+					Err(VicErr::Return(span, eval))
+				} else {
+					Err(VicErr::Return(span, Val::Null))
+				}
 			}
 		}
 	}
@@ -1515,7 +1515,7 @@ impl ViCut {
 					self.exec_ctx.fields.push((name, field.clone()));
 					Ok(Val::Null)
 				} else {
-					Ok(Val::new_str(field))
+					Ok(Val::Str(field))
 				}
 			}
 			Err(e) => {
@@ -1697,8 +1697,8 @@ impl ViCut {
 			let ExprKind::CaseBlock { cond, body } = block.value() else { unreachable!() };
 			let expanded_cond = cond.iter().map(|c| {
 				if let Val::Str(s) = c {
-					let expanded = self.expand_literal(s.borrow().as_str()).unwrap_or(s.borrow().to_string());
-					Val::new_str(expanded)
+					let expanded = self.expand_literal(s.as_str()).unwrap_or(s.to_string());
+					Val::Str(expanded)
 				} else {
 					c.clone() // wrap this in Ok(...)
 				}
@@ -1843,7 +1843,7 @@ impl ViCut {
 					if let Some(arg) = arg {
 						let file_path = self.eval_expr(false,arg).try_blame(arg.span())?;
 						if let Val::Str(path) = file_path {
-							let path = PathBuf::from(path.borrow().clone());
+							let path = PathBuf::from(path.clone());
 							self.push_file(path);
 						} else {
 							return Err(VicErr::Simple(format!("Expected a string for file path, found {}", file_path.display_type())))
@@ -1856,7 +1856,7 @@ impl ViCut {
 					if let Some(arg) = arg {
 						let template = self.eval_expr(false,arg).try_blame(arg.span())?;
 						if let Val::Str(template) = template {
-							self.opts_mut().template = Some(template.borrow().to_string());
+							self.opts_mut().template = Some(template.to_string());
 						} else {
 							return Err(VicErr::Simple(format!("Expected a string for template, found {}", template.display_type())))
 						}
@@ -1868,7 +1868,7 @@ impl ViCut {
 					if let Some(arg) = arg {
 						let delimiter = self.eval_expr(false,arg).try_blame(arg.span())?;
 						if let Val::Str(delimiter) = delimiter {
-							self.opts_mut().delimiter = Some(delimiter.borrow().to_string());
+							self.opts_mut().delimiter = Some(delimiter.to_string());
 						} else {
 							return Err(VicErr::Simple(format!("Expected a string for delimiter, found {}", delimiter.display_type())))
 						}
@@ -1895,7 +1895,7 @@ impl ViCut {
 					if let Some(arg) = arg {
 						let backup_ext = self.eval_expr(false,arg).try_blame(arg.span())?;
 						if let Val::Str(ext) = backup_ext {
-							self.opts_mut().backup_extension = Some(ext.borrow().to_string());
+							self.opts_mut().backup_extension = Some(ext.to_string());
 						} else {
 							return Err(VicErr::Simple(format!("Expected a string for backup extension, found {}", backup_ext.display_type())))
 						}
@@ -2212,7 +2212,6 @@ impl ViCut {
 	fn index_val(&mut self, val: Val, index: &Index) -> Result<Val,VicErr> {
 		match val {
 			Val::Str(ref str) => {
-				let str = str.borrow();
 				let graphemes = str.graphemes(true).collect::<Vec<&str>>();
 				match index {
 					Index::Single(idx) => {
@@ -2223,7 +2222,7 @@ impl ViCut {
 						let Some(gr) = graphemes.get(idx as usize) else {
 							return Err(VicErr::Simple(format!("Index {idx} out of bounds for string of length {}", str.len())))
 						};
-						Ok(Val::new_str(gr.to_string()))
+						Ok(Val::Str(gr.to_string()))
 					}
 					Index::To(idx) => {
 						let idx = self.eval_expr(false, idx).try_blame(idx.span())?;
@@ -2235,7 +2234,7 @@ impl ViCut {
 							return Err(VicErr::Simple(format!("Index {idx} out of bounds for string of length {}", str.len())))
 						}
 						let slice = graphemes.get(..idx).unwrap().join("");
-						Ok(Val::new_str(slice))
+						Ok(Val::Str(slice))
 					}
 					Index::From(idx) => {
 						let idx = self.eval_expr(false, idx).try_blame(idx.span())?;
@@ -2247,7 +2246,7 @@ impl ViCut {
 							return Err(VicErr::Simple(format!("Index {idx} out of bounds for string of length {}", str.len())))
 						}
 						let slice = graphemes.get(idx..).unwrap().join("");
-						Ok(Val::new_str(slice))
+						Ok(Val::Str(slice))
 					}
 					Index::Slice(start, end) => {
 						let start = self.eval_expr(false, start).try_blame(start.span())?;
@@ -2269,7 +2268,7 @@ impl ViCut {
 									return Err(VicErr::Simple(format!("Index {start} out of bounds for string of length {}", str.len())))
 								}
 								let slice = graphemes.get(start..end).unwrap().join("");
-								Ok(Val::new_str(slice))
+								Ok(Val::Str(slice))
 							}
 							Ordering::Greater => {
 								std::mem::swap(&mut start, &mut end);
@@ -2286,9 +2285,9 @@ impl ViCut {
 									.skip(start)
 									.take(len)
 									.collect::<Vec<_>>().join("");
-								Ok(Val::new_str(slice))
+								Ok(Val::Str(slice))
 							}
-							Ordering::Equal => Ok(Val::new_str(String::new())),
+							Ordering::Equal => Ok(Val::Str(String::new())),
 						}
 					}
 					_ => unimplemented!()
@@ -2439,7 +2438,7 @@ impl ViCut {
 		match val {
 			Val::Var(name) => {
 				if name == "_buffer" {
-					return Ok(Val::new_str(self.current_buffer().buffer.clone()))
+					return Ok(Val::Str(self.current_buffer().buffer.clone()))
 				}
 				let mut val = self.get_var(name).ok_or_else(|| format!("Variable '{name}' not found"))?;
 				if let Val::Constructor(name, fields) = val {
@@ -2449,8 +2448,8 @@ impl ViCut {
 				Ok(val)
 			}
 			Val::Str(str) => {
-				let val = self.expand_literal(&str.borrow())?;
-				Ok(Val::new_str(val))
+				let val = self.expand_literal(str)?;
+				Ok(Val::Str(val))
 			}
 			Val::Expr(expr) => {
 				let eval = self.eval_expr(false, expr)?;
